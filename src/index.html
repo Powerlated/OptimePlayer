@@ -1,0 +1,158 @@
+<html>
+
+<head>
+    <title>Optime Player</title>
+
+    <style>
+        @font-face {
+            font-family: HindSiliguri;
+            src: url('fonts/HindSiliguri-Regular.ttf');
+        }
+
+        body {
+            font-family: HindSiliguri;
+
+            text-align: center;
+        }
+
+        #drop-zone {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+
+            /* display: none; */
+
+            background: gray;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 100;
+            opacity: .8;
+
+            font-size: 32px;
+
+            visibility: hidden;
+        }
+    </style>
+
+    <script>
+        function read32LE(data, addr) {
+            return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+        }
+
+        function pad(n, width, z) {
+            z = z || '0';
+            n = n + '';
+            return n.length >= width ? n : new Array(width - n.length + 1).join(z) + n;
+        }
+
+        function hex(i, digits) {
+            return `0x${pad(i.toString(16), digits, '0').toUpperCase()}`;
+        }
+
+        function hexN(i, digits) {
+            return pad(i.toString(16), digits, '0').toUpperCase();
+        }
+
+        function searchForSequences(data, sequence) {
+            let seqs = [];
+
+            for (let i = 0; i < data.length; i++) {
+                if (data[i] == sequence[0]) {
+                    for (let j = 1; j < sequence.length; j++) {
+                        if (data[i + j] != sequence[j]) {
+                            break;
+                        }
+
+                        if (j == sequence.length - 1) seqs.push(i);
+                    }
+                }
+            }
+
+            return seqs;
+        }
+
+        function loadFile(data) {
+            console.log(`ROM size: ${data.length} bytes`);
+
+            let sequence = [0x53, 0x44, 0x41, 0x54, 0xFF, 0xFE, 0x00, 0x01]; // "SDAT", then byte order 0xFEFF, then version 0x0100
+            let res = searchForSequences(data, sequence);
+            if (res.length > 0) {
+                console.log(`Found SDATs at:`);
+                for (let i = 0; i < res.length; i++) {
+                    console.log(hex(res, 8));
+                }
+            } else {
+                console.log(`Couldn't find SDAT (maybe not an NDS ROM?)`);
+            }
+
+            data[res]
+        }
+
+        window.onload = () => {
+            console.log("Optime Player");
+
+            let dropZone = document.querySelector('#drop-zone');
+            let filePicker = document.querySelector('#file-picker');
+
+            dropZone.style.visibility = 'hidden';
+            window.addEventListener('dragover', e => {
+                e.preventDefault();
+                // console.log("File dragged over");
+                dropZone.style.visibility = 'visible';
+            });
+            window.addEventListener('dragleave', e => {
+                e.preventDefault();
+                // console.log("File drag leave");
+                dropZone.style.visibility = 'hidden';
+            });
+            window.addEventListener('drop', e => {
+                e.preventDefault();
+                if (e.dataTransfer.files[0] instanceof Blob) {
+                    console.log("File dropped");
+
+                    dropZone.style.visibility = 'hidden';
+
+                    let reader = new FileReader();
+                    reader.onload = function () {
+                        if (this.result instanceof ArrayBuffer) {
+                            loadFile(new Uint8Array(this.result));
+                        }
+                    }
+                    reader.readAsArrayBuffer(e.dataTransfer.files[0]);
+                }
+            });
+
+            filePicker.addEventListener("input", () => {
+                if (filePicker.files && filePicker.files.length > 0) {
+                    let file = filePicker.files[0];
+                    let reader = new FileReader();
+                    reader.readAsArrayBuffer(file);
+                    reader.onload = function () {
+                        let result = reader.result;
+                        if (result instanceof ArrayBuffer) {
+                            loadFile(new Uint8Array(result));
+                        } else {
+                            alert("Failed to read file! Probably a result of a lack of API support.");
+                        }
+                    };
+                }
+            });
+        }
+    </script>
+</head>
+
+<body>
+    <div id='drop-zone'>
+        <h1>Drop file!</h1>
+    </div>
+    <h1>Optime Player</h1>
+
+    <h3>Drag and drop a file</h3>
+    <p>or</p>
+    <input type="file" id="file-picker" accept=".nds">
+</body>
+
+</html>
