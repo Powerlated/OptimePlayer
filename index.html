@@ -389,10 +389,16 @@
                 this.pitchBend = 0;
                 this.pitchBendRange = 0;
 
+                this.expression = 0;
+
+                this.portamentoEnable = 0;
+                this.portamentoTime = 0;
+
                 this.restingFor = 0;
 
                 this.stack = new Uint32Array(1024);
                 this.sp = 0;
+
             }
 
             debugLog(msg) {
@@ -484,6 +490,18 @@
                                 this.mono = bitTest(param, 0);
                                 break;
                             }
+                        case 0xCE: // Portamento On / Off
+                            {
+                                this.portamentoEnable = this.readPcInc();
+                                this.debugLog("Portamento On / Off: " + this.portamentoEnable);
+                                break;
+                            }
+                        case 0xCF: // Portamento Time
+                            {
+                                this.portamentoTime = this.readPcInc();
+                                this.debugLog("Portamento Time: " + this.portamentoTime);
+                                break;
+                            }
                         case 0xE1: // BPM
                             {
                                 this.bpm = this.readPcInc(2);
@@ -542,6 +560,18 @@
                                 this.debugLog("Modulation Speed: " + this.modulationSpeed);
                                 break;
                             }
+                        case 0xCC: // Modulation Type
+                            {
+                                this.modulationType = this.readPcInc();
+                                this.debugLog("Modulation Type: " + this.modulationType);
+                                break;
+                            }
+                        case 0xCD: // Modulation Range
+                            {
+                                this.modulationRange = this.readPcInc();
+                                this.debugLog("ModulationRange: " + this.modulationRange);
+                                break;
+                            }
                         case 0xC4: // Pitch Bend
                             {
                                 this.pitchBend = this.readPcInc();
@@ -577,6 +607,18 @@
                         case 0xB0: // TODO: According to sseq2mid: arithmetic operations?
                             {
                                 this.readPcInc(3);
+                                break;
+                            }
+                        case 0xE0: // Modulation Delay
+                            {
+                                this.modulationDelay = this.readPcInc(2);
+                                this.debugLog("Modulation Delay: " + this.modulationDelay);
+                                break;
+                            }
+                        case 0xD5: // Expression
+                            {
+                                this.expression = this.readPcInc();
+                                this.debugLog("Expression: " + this.expression);
                                 break;
                             }
                         default:
@@ -679,7 +721,7 @@
                     timer += controller.tracks[0].bpm * 96;
                     if (timer >= SAMPLE_RATE) {
                         timer -= SAMPLE_RATE;
-                        
+
                         // 48 ticks per beat
                         controller.tick();
 
@@ -691,7 +733,7 @@
                                 case MessageType.PlayNote:
                                     let midiNote = msg.param0;
                                     let hz = 440 * 2 ** ((midiNote - 69) / 12);
-                                    synthesizer.play(hz, msg.param1 / 127 * 0.5);
+                                    synthesizer.play(hz, msg.param1 / 127 * 0.25);
                                     break;
                             }
                         }
