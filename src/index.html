@@ -35,11 +35,149 @@
 
             visibility: hidden;
         }
+
+        .container {
+            display: grid;
+            grid-template-columns: 0.7fr 1.5fr 0.8fr;
+            grid-template-rows: 0.7fr 1.3fr 1fr;
+            gap: 0px 0px;
+            grid-template-areas:
+                "song-picker . ."
+                "song-picker channels ."
+                "song-picker . .";
+        }
+
+        .song-picker {
+            grid-area: song-picker;
+
+            display: flex;
+            flex-direction: column;
+        }
+
+        .channels {
+            grid-area: channels;
+        }
     </style>
 
     <script>
+
+        class AudioPlayer {
+            bufferLength;
+            sampleRate;
+            needMoreSamples;
+
+            bufferPool;
+            bufferPoolAt = 0;
+
+            safariHax = false;
+
+            constructor(bufferLength, sampleRate, needMoreSamples) {
+                if (!AudioBuffer.prototype.copyToChannel) this.safariHax = true;
+
+                this.bufferLength = bufferLength;
+                this.sampleRate = sampleRate;
+                this.needMoreSamples = needMoreSamples;
+
+                const AudioContext = window.AudioContext   // Normal browsers
+                    || window.webkitAudioContext; // Sigh... Safari
+
+                this.ctx = new AudioContext({ sampleRate: sampleRate });
+
+                this.bufferPool = this.genBufferPool(256, this.bufferLength, this.sampleRate);
+
+                const fixAudioContext = () => {
+                    // Create empty buffer
+                    let buffer = this.ctx.createBuffer(1, 1, 22050);
+                    let source = this.ctx.createBufferSource();
+                    source.buffer = buffer;
+                    // Connect to output (speakers)
+                    source.connect(this.ctx.destination);
+                    // Play sound
+                    if (source.start) {
+                        source.start(0);
+                    } else if (source.play) {
+                        source.play(0);
+                    } else if (source.noteOn) {
+                        source.noteOn(0);
+                    }
+                };
+                // iOS 6-8
+                document.addEventListener('touchstart', fixAudioContext);
+                // iOS 9
+                document.addEventListener('touchend', fixAudioContext);
+
+                this.gain = this.ctx.createGain();
+                this.gain.gain.value = 0.25;
+                this.gain.connect(this.ctx.destination);
+            }
+
+            gain;
+
+            ctx;
+            sourcesPlaying = 0;
+
+            genBufferPool(count, length) {
+                let pool = new Array(count);
+                for (let i = 0; i < count; i++) {
+                    pool[i] = this.ctx.createBuffer(2, length, this.sampleRate);
+                }
+                return pool;
+            }
+
+            queueAudio(bufferLeft, bufferRight) {
+                let buffer = this.bufferPool[this.bufferPoolAt];
+                this.bufferPoolAt++;
+                this.bufferPoolAt &= 255;
+
+                if (!this.safariHax) {
+                    buffer.copyToChannel(bufferLeft, 0);
+                    buffer.copyToChannel(bufferRight, 1);
+                } else {
+                    buffer.getChannelData(0).set(bufferLeft);
+                    buffer.getChannelData(1).set(bufferRight);
+                }
+
+                let bufferSource = this.ctx.createBufferSource();
+
+                bufferSource.onended = () => {
+                    this.sourcesPlaying--;
+                    if (this.sourcesPlaying < 3) {
+                        this.needMoreSamples();
+                    }
+                    if (this.sourcesPlaying < 2) {
+                        this.needMoreSamples();
+                    }
+                };
+
+                // if (this.audioSec <= this.ctx.currentTime + 0.05) {
+                // Reset time if close to buffer underrun
+                // this.audioSec = this.ctx.currentTime + 0.06;
+                // }
+                bufferSource.buffer = buffer;
+                bufferSource.connect(this.gain);
+                bufferSource.start(this.audioSec);
+
+                this.sampleRate = this.sampleRate;
+                this.audioSec += this.bufferLength / this.sampleRate;
+
+                this.sourcesPlaying++;
+            }
+
+            audioSec = 0;
+
+            reset() {
+                // 50 ms buffer
+                this.audioSec = this.ctx.currentTime + 0.06;
+                // console.log(`Latency in seconds: ${(LATENCY / this.sampleRate)}`)
+            }
+        }
+
+        function read16LE(data, addr) {
+            return data[addr] | (data[addr + 1] << 8);
+        }
+
         function read32LE(data, addr) {
-            return data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+            return data[addr] | (data[addr + 1] << 8) | (data[addr + 2] << 16) | (data[addr + 3] << 24);
         }
 
         function pad(n, width, z) {
@@ -54,6 +192,302 @@
 
         function hexN(i, digits) {
             return pad(i.toString(16), digits, '0').toUpperCase();
+        }
+
+        class SseqInfo {
+            constructor() {
+                this.fileId = null;
+                this.bank = null;
+                this.volume = null;
+                this.cpr = null;
+                this.ppr = null;
+                this.ply = null;
+            }
+        }
+
+        class Sdat {
+            constructor() {
+                this.fat = [];
+                this.sseqInfos = [];
+                this.sseqNameIdDict = [];
+                this.sseqIdNameDict = [];
+            }
+        }
+
+        function playSeq(sdat, name) {
+            let id = sdat.sseqNameIdDict[name];
+            let info = sdat.sseqInfos[id];
+            console.log("Playing SEQ Id:" + id);
+            console.log("FAT ID:" + info.fileId);
+
+            let file = sdat.fat[info.fileId];
+
+            console.log(hex(file[0], 2));
+            console.log(hex(file[1], 2));
+            console.log(hex(file[2], 2));
+            console.log(hex(file[3], 2));
+        }
+
+        function clamp(val, min, max) {
+            return Math.min(Math.max(val, min), max);
+        }
+
+        let indexTable = [-1, -1, -1, -1, 2, 4, 6, 8];
+        let adpcmTable = [
+            0x0007, 0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E, 0x0010, 0x0011, 0x0013, 0x0015,
+            0x0017, 0x0019, 0x001C, 0x001F, 0x0022, 0x0025, 0x0029, 0x002D, 0x0032, 0x0037, 0x003C, 0x0042,
+            0x0049, 0x0050, 0x0058, 0x0061, 0x006B, 0x0076, 0x0082, 0x008F, 0x009D, 0x00AD, 0x00BE, 0x00D1,
+            0x00E6, 0x00FD, 0x0117, 0x0133, 0x0151, 0x0173, 0x0198, 0x01C1, 0x01EE, 0x0220, 0x0256, 0x0292,
+            0x02D4, 0x031C, 0x036C, 0x03C3, 0x0424, 0x048E, 0x0502, 0x0583, 0x0610, 0x06AB, 0x0756, 0x0812,
+            0x08E0, 0x09C3, 0x0ABD, 0x0BD0, 0x0CFF, 0x0E4C, 0x0FBA, 0x114C, 0x1307, 0x14EE, 0x1706, 0x1954,
+            0x1BDC, 0x1EA5, 0x21B6, 0x2515, 0x28CA, 0x2CDF, 0x315B, 0x364B, 0x3BB9, 0x41B2, 0x4844, 0x4F7E,
+            0x5771, 0x602F, 0x69CE, 0x7462, 0x7FFF
+        ];
+
+        // Decodes IMA-ADPCM to PCM16
+        function decodeAdpcm(adpcmData) {
+            let out = new Float64Array((adpcmData.length - 4) * 2);
+            let outOffs = 0;
+
+            let adpcmIndex = 0;
+
+            let header = read32LE(adpcmData, 0);
+            // ADPCM header
+            let currentValue = header & 0xFFFF;
+            adpcmIndex = clamp(header >> 16, 0, 88);
+
+            for (let i = 4; i < adpcmData.length; i++) {
+                for (let j = 0; j < 2; j++) {
+                    let data = (adpcmData[i] >> (j * 4)) & 0xF;
+
+                    let tableVal = adpcmTable[adpcmIndex];
+                    let diff = tableVal >> 3;
+                    if ((data & 1) != 0) diff += tableVal >> 2;
+                    if ((data & 2) != 0) diff += tableVal >> 1;
+                    if ((data & 4) != 0) diff += tableVal >> 0;
+
+                    if ((data & 8) == 8) {
+                        currentValue = Math.max(currentValue - diff, -0x7FFF);
+                    }
+                    else {
+                        currentValue = Math.min(currentValue + diff, 0x7FFF);
+                    }
+                    adpcmIndex = clamp(adpcmIndex + indexTable[data & 7], 0, 88);
+
+                    out[outOffs++] = currentValue;
+                }
+            }
+
+            return out;
+        }
+
+        // Decode PCM16
+        function decodePcm16(pcm16Data) {
+            let out = new Float32Array(pcm16Data.length >> 1);
+
+            for (let i = 0; i < out.length; i++) {
+                out[i] = ((read16LE(pcm16Data, i * 2) << 16) >> 16) / 32767;
+            }
+
+            return out;
+        }
+
+        function playStrm(strmData) {
+            const BUFFER_SIZE = 2048;
+            const SAMPLE_RATE = 32768;
+
+            let bufferL = new Float32Array(BUFFER_SIZE);
+            let bufferR = new Float32Array(BUFFER_SIZE);
+
+            console.log("Number of Samples: " + read32LE(strmData, 0x24));
+
+            let channels = strmData[0x1A];
+            let numberOfBlocks = read32LE(strmData, 0x2C);
+            let blockLength = read32LE(strmData, 0x30);
+            let samplesPerBlock = read32LE(strmData, 0x34);
+            let lastBlockLength = read32LE(strmData, 0x38);
+            let lastBlockSamples = read32LE(strmData, 0x3C);
+
+            console.log("Channels: " + channels)
+            console.log("Number of blocks per channel: " + numberOfBlocks);
+            console.log("Block length: " + blockLength)
+            console.log("Samples per block: " + samplesPerBlock)
+            console.log("Last block length: " + lastBlockLength)
+            console.log("Last block samples: " + lastBlockSamples)
+
+            if (numberOfBlocks > 2) alert("TODO: Support for block counts other than 2");
+            if (channels > 2) alert("TODO: Support for mono audio");
+
+            let sampleRate = read16LE(strmData, 0x1C);
+            console.log("Sample Rate: " + sampleRate);
+            console.log("Time: " + read16LE(strmData, 0x1E));
+
+            let waveDataSize = blockLength;
+
+            console.log("Wave data size: " + waveDataSize)
+
+            let waveDataL = new Uint8Array(waveDataSize);
+            let waveDataR = new Uint8Array(waveDataSize);
+
+            for (let i = 0; i < waveDataSize; i++) {
+                waveDataL[i] = strmData[0x68 + i];
+                waveDataR[i] = strmData[0x68 + blockLength + i];
+            }
+
+            let decoded;
+            let format;
+            switch (strmData[0x18]) {
+                case 0: format = "PCM8"; break;
+                case 1:
+                    format = "PCM16";
+                    decodedL = decodePcm16(waveDataL);
+                    decodedR = decodePcm16(waveDataR);
+                    break;
+                case 2:
+                    format = "IMA-ADPCM";
+                    break;
+            }
+
+            console.log("Format: " + format);
+
+            let inBufferPos = 0;
+            let timer = 0;
+
+            function synthesizeMore() {
+                for (let i = 0; i < BUFFER_SIZE; i++) {
+                    bufferL[i] = decodedL[inBufferPos];
+                    bufferR[i] = decodedR[inBufferPos];
+
+                    timer += sampleRate;
+                    if (timer >= SAMPLE_RATE) {
+                        timer -= SAMPLE_RATE;
+                        if (++inBufferPos >= decodedL.length) {
+                            inBufferPos = 0;
+                        }
+                    }
+                }
+
+                // console.log(inBufferPos);
+
+                player.queueAudio(bufferL, bufferR);
+
+                // console.log("Syntheszing more audio");
+            }
+
+            let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
+            synthesizeMore();
+        }
+
+        function loadSdatFromRom(data, offset) {
+            let sdat = new Sdat();
+
+            let sdatSize = read32LE(data, offset + 0x8);
+            console.log("SDAT file size: " + sdatSize);
+
+            let sdatData = new Uint8Array(sdatSize);
+
+            for (let i = 0; i < sdatSize; i++) {
+                sdatData[i] = data[offset + i];
+            }
+
+            let numOfBlocks = read16LE(sdatData, 0xE);
+            let headerSize = read16LE(sdatData, 0xC);
+
+            console.log("Number of Blocks: " + numOfBlocks);
+            console.log("Header Size: " + headerSize);
+
+            if (headerSize > 256) {
+                console.log("Header size too big (> 256), rejecting.");
+                return;
+            }
+
+            let symbOffs = read32LE(sdatData, 0x10);
+            let symbSize = read32LE(sdatData, 0x14);
+            let infoOffs = read32LE(sdatData, 0x18);
+            let infoSize = read32LE(sdatData, 0x1C);
+            let fatOffs = read32LE(sdatData, 0x20);
+            let fatSize = read32LE(sdatData, 0x24);
+            let fileOffs = read32LE(sdatData, 0x28);
+            let fileSize = read32LE(sdatData, 0x2C);
+
+            console.log("SYMB Block Offset: " + hexN(symbOffs, 8));
+            console.log("SYMB Block Size: " + hexN(symbSize, 8));
+            console.log("INFO Block Offset: " + hexN(infoOffs, 8));
+            console.log("INFO Block Size: " + hexN(infoSize, 8));
+            console.log("FAT  Block Offset: " + hexN(fatOffs, 8));
+            console.log("FAT  Block Size: " + hexN(fatSize, 8));
+            console.log("FILE Block Offset: " + hexN(fileOffs, 8));
+            console.log("FILE Block Size: " + hexN(fileSize, 8));
+
+            // SYMB processing
+            let symbSseqListOffs = read32LE(sdatData, symbOffs + 0x8);
+            let symbSseqListNumEntries = read32LE(sdatData, symbOffs + symbSseqListOffs);
+
+            console.log(hexN(offset + symbOffs + symbSseqListOffs, 8));
+            console.log("SYMB Number of SSEQ entries: " + symbSseqListNumEntries);
+
+            for (let i = 0; i < symbSseqListNumEntries; i++) {
+                let sseqNameOffs = read32LE(sdatData, symbOffs + symbSseqListOffs + 4 + i * 4);
+
+                let sseqNameArr = [];
+                let sseqNameCharOffs = 0;
+                while (true) {
+                    let char = sdatData[symbOffs + sseqNameOffs + sseqNameCharOffs];
+                    if (char == 0) break; // check for null terminator
+                    sseqNameCharOffs++;
+                    sseqNameArr.push(char);
+                }
+
+                // for some reason Pokemon Platinum has a ton of null pointers 
+                if (sseqNameOffs != 0) {
+                    let seqName = String.fromCharCode(...sseqNameArr);
+
+                    sdat.sseqNameIdDict[seqName] = i;
+                    sdat.sseqIdNameDict[i] = seqName;
+                }
+            }
+
+            // INFO processing
+            let infoSseqListOffs = read32LE(sdatData, infoOffs + 0x8);
+            let infoSseqListNumEntries = read32LE(sdatData, infoOffs + infoSseqListOffs);
+            console.log("INFO Number of SSEQ entries: " + infoSseqListNumEntries);
+
+            for (let i = 0; i < infoSseqListNumEntries; i++) {
+                let infoSseqNameOffs = read32LE(sdatData, infoOffs + infoSseqListOffs + 4 + i * 4);
+
+                let info = new SseqInfo();
+                info.fileId = read16LE(sdatData, infoOffs + infoSseqNameOffs + 0);
+                info.bank = read16LE(sdatData, infoOffs + infoSseqNameOffs + 4);
+                info.volume = sdatData[infoOffs + infoSseqNameOffs + 6];
+                info.cpr = sdatData[infoOffs + infoSseqNameOffs + 7];
+                info.ppr = sdatData[infoOffs + infoSseqNameOffs + 8];
+                info.ply = sdatData[infoOffs + infoSseqNameOffs + 9];
+
+                sdat.sseqInfos[i] = info;
+            }
+
+            // FAT / FILE processing
+            let fatNumFiles = read32LE(sdatData, fatOffs + 8);
+            console.log("FAT Number of files: " + fatNumFiles);
+
+            for (let i = 0; i < fatNumFiles; i++) {
+                let fileEntryOffs = fatOffs + 0xC + i * 0x10;
+
+                let fileDataOffs = read32LE(sdatData, fileEntryOffs);
+                let fileSize = read32LE(sdatData, fileEntryOffs + 4);
+
+                let fileData = new Uint8Array(fileSize);
+
+                for (let j = 0; j < fileSize; j++) {
+                    fileData[j] = sdatData[fileDataOffs + j];
+                }
+
+                sdat.fat[i] = fileData;
+
+                // console.log(`Loaded FAT file id:${i} size:${fileSize}`);
+            }
+
+            return sdat;
         }
 
         function searchForSequences(data, sequence) {
@@ -82,13 +516,40 @@
             if (res.length > 0) {
                 console.log(`Found SDATs at:`);
                 for (let i = 0; i < res.length; i++) {
-                    console.log(hex(res, 8));
+                    console.log(hex(res[i], 8));
                 }
             } else {
                 console.log(`Couldn't find SDAT (maybe not an NDS ROM?)`);
             }
 
-            data[res]
+            for (let i = 0; i < res.length; i++) {
+                let sdat = loadSdatFromRom(data, res[i]);
+
+                if (sdat != null) {
+                    for (let i = 0; i < sdat.sseqIdNameDict.length; i++) {
+                        let seqName = sdat.sseqIdNameDict[i];
+                        if (seqName != undefined) {
+                            let button = document.createElement('button');
+                            button.innerText = seqName;
+                            document.querySelector(".song-picker").appendChild(button);
+                            button.onclick = () => {
+                                console.log(seqName);
+                                playSeq(sdat, seqName);
+                            }
+                        }
+                    }
+
+                    for (let i = 0; i < sdat.fat.length; i++) {
+                        if (read32LE(sdat.fat[i], 0) == 0x4D525453) {
+                            // alert(`file id:${i} is STRM`);
+
+                            playStrm(sdat.fat[i]);
+                        }
+                    }
+                }
+            }
+
+            document.querySelector("#file-picker-container").style.display = 'none';
         }
 
         window.onload = () => {
@@ -150,9 +611,16 @@
     </div>
     <h1>Optime Player</h1>
 
-    <h3>Drag and drop a file</h3>
-    <p>or</p>
-    <input type="file" id="file-picker" accept=".nds">
+    <div id="file-picker-container">
+        <h3>Drag and drop a file</h3>
+        <p>or</p>
+        <input type="file" id="file-picker" accept=".nds">
+    </div>
+
+    <div class="container">
+        <div class="song-picker"></div>
+        <div class="channels"></div>
+    </div>
 </body>
 
 </html>
