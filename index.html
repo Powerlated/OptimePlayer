@@ -60,7 +60,7 @@
     </style>
 
     <script>
-
+        //@ts-check
         class AudioPlayer {
             bufferLength;
             sampleRate;
@@ -79,11 +79,12 @@
                 this.needMoreSamples = needMoreSamples;
 
                 const AudioContext = window.AudioContext   // Normal browsers
+                    //@ts-ignore
                     || window.webkitAudioContext; // Sigh... Safari
 
                 this.ctx = new AudioContext({ sampleRate: sampleRate });
 
-                this.bufferPool = this.genBufferPool(256, this.bufferLength, this.sampleRate);
+                this.bufferPool = this.genBufferPool(256, this.bufferLength);
 
                 const fixAudioContext = () => {
                     // Create empty buffer
@@ -194,6 +195,63 @@
             return pad(i.toString(16), digits, '0').toUpperCase();
         }
 
+        class CircularBuffer {
+            /** @param {number} size */
+            constructor(size) {
+                this.size = size;
+                this.buffer = new Array(size);
+
+                this.entries = 0;
+                this.readPos = 0;
+                this.writePos = 0;
+            }
+
+            insert(data) {
+                if (this.entries < this.size) {
+                    this.entries++;
+                    this.buffer[this.writePos++] = data;
+
+                    if (this.writePos >= this.size) {
+                        this.writePos = 0;
+                    }
+
+                    return true;
+                }
+
+                alert("CircularBuffer: overflow");
+
+                return false;
+            }
+
+            pop() {
+                let data;
+                if (this.entries > 0) {
+                    this.entries--;
+                    data = this.buffer[this.readPos++];
+
+                    if (this.readPos >= this.size) {
+                        this.readPos = 0;
+                    }
+                }
+                else {
+                    alert("CircularBuffer: underflow");
+                    data = null;
+                }
+                return data;
+            }
+
+            peek(offset) {
+                return this.buffer[(this.readPos + offset) % this.size];
+            }
+
+            reset() {
+                this.entries = 0;
+                this.readPos = 0;
+                this.writePos = 0;
+            }
+        }
+
+
         class SseqInfo {
             constructor() {
                 this.fileId = null;
@@ -214,18 +272,452 @@
             }
         }
 
+        class Message {
+            constructor(type, param0, param1, param2) {
+                this.type = type;
+                this.param0 = param0;
+                this.param1 = param1;
+                this.param2 = param2;
+            }
+        }
+
+        const MessageType = {
+            PlayNote: 0,
+        }
+
+        class Instrument {
+            constructor(sampleRate) {
+                this.valL = 0;
+                this.valR = 0;
+                this.frequency = 440;
+                this.sampleRate = sampleRate;
+                this.volume = 1;
+
+                this.playing = false;
+            }
+
+            sampleAt(sample) {
+                let t = sample / this.sampleRate;
+
+                let continuePlaying = true;
+
+                let envVol = 0;
+                if (t < 0.4) {
+                    envVol = 1 - t / 0.4;
+                } else {
+                    envVol = 0;
+                    continuePlaying = false;
+                }
+
+                let periodTime = 1 / this.frequency;
+
+                if ((t % periodTime) >= periodTime / 2) {
+                    this.valL = this.volume * envVol;
+                    this.valR = this.volume * envVol;
+                } else {
+                    this.valL = -this.volume * envVol;
+                    this.valR = -this.volume * envVol;
+                }
+
+                return continuePlaying;
+            }
+        }
+
+
+        class SseqController {
+            /** @param {Array} sseqFile
+             *  @param {number} dataOffset
+             *  @param {CircularBuffer} messageBuffer
+             **/
+            constructor(sseqFile, dataOffset, messageBuffer) {
+                this.sseqFile = sseqFile;
+                this.dataOffset = dataOffset;
+                this.messageBuffer = messageBuffer;
+
+                /** @type {SseqTrack[]} */
+                this.tracks = new Array(16);
+
+                for (let i = 0; i < 16; i++) {
+                    this.tracks[i] = new SseqTrack(this, i);
+                }
+
+                this.tracks[0].active = true;
+            }
+
+            tick() {
+                for (let i = 0; i < 16; i++) {
+                    if (this.tracks[i].active) {
+                        if (this.tracks[i].restingFor == 0) {
+                            while (this.tracks[i].restingFor == 0) {
+                                this.tracks[i].execute();
+                            }
+                        } else {
+                            this.tracks[i].restingFor--;
+                        }
+                    }
+                }
+            }
+
+            startTrack(num, pc) {
+                this.tracks[num].active = true;
+                this.tracks[num].pc = pc;
+                this.tracks[num].debugLog("Started! PC: " + hexN(pc, 6));
+            }
+        }
+
+        class SseqTrack {
+            constructor(controller, id) {
+                /** @type {SseqController} */
+                this.controller = controller;
+                this.id = id;
+
+                this.active = false;
+
+                this.pc = 0;
+                this.pan = 0;
+                this.mono = false;
+                this.volume = 0;
+                this.priority = 0;
+                this.program = 0;
+                this.bank = 0;
+
+                this.modulationDepth = 0;
+                this.modulationSpeed = 0;
+                this.modulationType = 0;
+                this.modulationRange = 0;
+
+                this.pitchBend = 0;
+                this.pitchBendRange = 0;
+
+                this.restingFor = 0;
+
+                this.stack = new Uint32Array(1024);
+                this.sp = 0;
+            }
+
+            debugLog(msg) {
+                console.log(`${this.id}: ${msg}`)
+            }
+
+            push(val) {
+                this.stack[this.sp++] = val;
+                if (this.sp >= this.stack.length) alert("SSEQ stack overflow");
+            }
+
+            pop() {
+                if (this.sp == 0) alert("SSEQ stack underflow");
+                return this.stack[--this.sp];
+            }
+
+            readPc() {
+                return this.controller.sseqFile[this.pc + this.controller.dataOffset];
+            }
+
+            readPcInc(bytes = 1) {
+                let val = 0;
+                for (let i = 0; i < bytes; i++) {
+                    val |= this.readPc() << (i * 8);
+                    this.pc++;
+                }
+
+                return val;
+            }
+
+            readVariableLength(arr, offs) {
+                let num = 0;
+                for (let i = 0; i < 4; i++) {
+                    let val = this.readPcInc();
+
+                    num |= val & 0x7F;
+                    num <<= 7;
+
+                    if ((val & 0x80) == 0) {
+                        break;
+                    }
+                }
+
+                return num;
+            }
+
+            execute() {
+                let opcodePc = this.pc;
+                let opcode = this.readPcInc();
+
+                if (opcode >= 0 && opcode <= 0x7F) {
+                    let velocity = this.readPcInc();
+                    let duration = this.readVariableLength();
+
+                    this.debugLog("Note: " + opcode);
+                    this.debugLog("Velocity: " + velocity);
+                    this.debugLog("Duration: " + duration);
+
+                    this.controller.messageBuffer.insert(new Message(MessageType.PlayNote, opcode, velocity, duration));
+                } else {
+                    switch (opcode) {
+                        case 0xFE: // Allocate track
+                            {
+                                // This probably isn't important for emulation
+                                let alloced = this.readPcInc(2);
+
+                                for (let i = 0; i < 16; i++) {
+                                    if (bitTest(alloced, i)) {
+                                        this.debugLog("Allocated track " + i);
+                                    }
+                                }
+                                break;
+                            }
+                        case 0x93: // Start new track thread 
+                            {
+                                let trackNum = this.readPcInc();
+                                let trackOffs = this.readPcInc(3);
+
+                                this.controller.startTrack(trackNum, trackOffs);
+
+                                this.debugLog("Started track thread " + trackNum);
+                                this.debugLog("Offset: " + hex(trackOffs, 6));
+
+                                break;
+                            }
+                        case 0xC7: // Mono / Poly
+                            {
+                                let param = this.readPcInc();
+                                this.mono = bitTest(param, 0);
+                                break;
+                            }
+                        case 0xE1: // BPM
+                            {
+                                this.bpm = this.readPcInc(2);
+                                this.debugLog("BPM: " + this.bpm);
+                                break;
+                            }
+                        case 0xC1: // Volume
+                            {
+                                this.volume = this.readPcInc();
+                                this.debugLog("Volume: " + this.volume);
+                                break;
+                            }
+                        case 0x81: // Set bank and program
+                            {
+                                let bankAndProgram = this.readVariableLength();
+                                this.program = bankAndProgram & 0xFF;
+                                this.bank = (bankAndProgram >> 8) & 0x7F;
+
+                                this.debugLog("Program: " + this.program);
+                                this.debugLog("Bank: " + this.bank);
+                                break;
+                            }
+                        case 0xC2: // Master Volume
+                            {
+                                this.masterVolume = this.readPcInc();
+                                this.debugLog("Master Volume: " + this.masterVolume);
+                                break;
+                            }
+                        case 0xC0: // Pan
+                            {
+                                this.pan = this.readPcInc();
+                                this.debugLog("Pan: " + this.pan);
+                                break;
+                            }
+                        case 0xC6: // Track Priority
+                            {
+                                this.priority = this.readPcInc();
+                                this.debugLog("Track Priority: " + this.priority);
+                                break;
+                            }
+                        case 0xC5: // Pitch Bend Range
+                            {
+                                this.pitchBendRange = this.readPcInc();
+                                this.debugLog("Pitch Bend Range: " + this.pitchBendRange);
+                                break;
+                            }
+                        case 0xCA: // Modulation Depth
+                            {
+                                this.modulationDepth = this.readPcInc();
+                                this.debugLog("Modulation Depth: " + this.modulationDepth);
+                                break;
+                            }
+                        case 0xCB: // Modulation Speed
+                            {
+                                this.modulationSpeed = this.readPcInc();
+                                this.debugLog("Modulation Speed: " + this.modulationSpeed);
+                                break;
+                            }
+                        case 0xC4: // Pitch Bend
+                            {
+                                this.pitchBend = this.readPcInc();
+                                this.debugLog("Pitch Bend: " + this.pitchBend);
+                                break;
+                            }
+                        case 0x80: // Rest
+                            {
+                                this.restingFor = this.readVariableLength();
+                                this.debugLog("Resting For: " + this.restingFor);
+                                break;
+                            }
+                        case 0x94: // Jump
+                            {
+                                let dest = this.readPcInc(3);
+                                this.pc = dest;
+                                break;
+                            }
+                        case 0x95: // Call
+                            {
+                                let dest = this.readPcInc(3);
+
+                                // Push the return address
+                                this.push(this.pc);
+                                this.pc = dest;
+                                break;
+                            }
+                        case 0xFD: // Return
+                            {
+                                this.pc = this.pop();
+                                break;
+                            }
+                        case 0xB0: // TODO: According to sseq2mid: arithmetic operations?
+                            {
+                                this.readPcInc(3);
+                                break;
+                            }
+                        default:
+                            alert(`${this.id}: Unknown opcode: ` + hex(opcode, 2) + " PC: " + hex(opcodePc, 6));
+                    }
+                }
+            }
+        }
+
+        class Synthesizer {
+            constructor(sampleRate) {
+                this.instrsAvailable = 16;
+
+                this.instrs = new Array(this.instrsAvailable);
+                this.instrsStartSample = new Float64Array(this.instrsAvailable);
+                this.sampleNum = 0;
+                this.sampleRate = sampleRate;
+
+                this.valL = 0;
+                this.valR = 0;
+
+                this.playingIndex = 0;
+
+                for (let i = 0; i < this.instrs.length; i++) {
+                    this.instrs[i] = new Instrument(sampleRate);
+                }
+            }
+
+            play(frequency, volume) {
+                this.instrs[this.playingIndex].playing = true;
+                this.instrs[this.playingIndex].frequency = frequency;
+                this.instrs[this.playingIndex].volume = volume;
+                this.instrsStartSample[this.playingIndex] = this.sampleNum;
+
+                this.playingIndex++;
+                this.playingIndex %= this.instrsAvailable;
+            }
+
+            nextSample() {
+                this.valL = 0;
+                this.valR = 0;
+
+                for (let i = 0; i < this.instrsAvailable; i++) {
+                    if (this.instrs[i].playing)
+                        this.instrs[i].sampleAt(this.sampleNum - this.instrsStartSample[i]);
+                    this.valL += this.instrs[i].valL;
+                    this.valR += this.instrs[i].valR;
+                }
+
+                this.sampleNum++;
+            }
+
+            getTime() {
+                return this.sampleNum / this.sampleRate;
+            }
+        }
+
+        function bitTest(i, bit) {
+            return (i & (1 << bit)) !== 0;
+        }
+
         function playSeq(sdat, name) {
+            const BUFFER_SIZE = 4096;
+            const SAMPLE_RATE = 65536;
+            let synthesizer = new Synthesizer(SAMPLE_RATE);
+
             let id = sdat.sseqNameIdDict[name];
             let info = sdat.sseqInfos[id];
-            console.log("Playing SEQ Id:" + id);
+            console.log("Playing SSEQ Id:" + id);
             console.log("FAT ID:" + info.fileId);
 
             let file = sdat.fat[info.fileId];
+            let bufferL = new Float32Array(BUFFER_SIZE);
+            let bufferR = new Float32Array(BUFFER_SIZE);
 
-            console.log(hex(file[0], 2));
-            console.log(hex(file[1], 2));
-            console.log(hex(file[2], 2));
-            console.log(hex(file[3], 2));
+            let inBufferPos = 0;
+
+            // // debugging hexdump
+            // let offs = 0;
+            // for (let i = 0; i < 16; i++) {
+            //     let str = "";
+            //     for (let j = 0; j < 16; j++) {
+            //         str += hexN(file[offs], 2) + " ";
+            //         offs++;
+            //     }
+            //     console.log(str);
+            // }
+            // console.log(String.fromCharCode(file[0], file[1], file[2], file[3]))
+
+            let dataOffset = read32LE(file, 0x18);
+            if (dataOffset != 0x1C) alert("SSEQ offset is not 0x1C? it is: " + hex(dataOffset, 8));
+
+            let messageBuffer = new CircularBuffer(1024);
+            let controller = new SseqController(file, dataOffset, messageBuffer);
+
+            let timer = 0;
+            controller.tick();
+            function synthesizeMore() {
+                for (let i = 0; i < BUFFER_SIZE; i++) {
+                    timer += controller.tracks[0].bpm * 96;
+                    if (timer >= SAMPLE_RATE) {
+                        timer -= SAMPLE_RATE;
+                        
+                        // 48 ticks per beat
+                        controller.tick();
+
+                        if (messageBuffer.entries > 0) {
+                            /** @type {Message} */
+                            let msg = messageBuffer.pop();
+
+                            switch (msg.type) {
+                                case MessageType.PlayNote:
+                                    let midiNote = msg.param0;
+                                    let hz = 440 * 2 ** ((midiNote - 69) / 12);
+                                    synthesizer.play(hz, msg.param1 / 127 * 0.5);
+                                    break;
+                            }
+                        }
+
+                    }
+
+                    // synthesizer.play(440);
+
+                    synthesizer.nextSample();
+                    bufferL[i] = synthesizer.valL;
+                    bufferR[i] = synthesizer.valR;
+                }
+
+                // synthesizer.play(Math.random() * 880);
+                // synthesizer.play(Math.random() * 880);
+
+
+                // console.log(inBufferPos);
+
+                player.queueAudio(bufferL, bufferR);
+
+                console.log("Syntheszing more audio");
+            }
+
+            let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
+            synthesizeMore();
         }
 
         function clamp(val, min, max) {
@@ -316,7 +808,7 @@
             console.log("Last block samples: " + lastBlockSamples)
 
             if (numberOfBlocks > 2) alert("TODO: Support for block counts other than 2");
-            if (channels > 2) alert("TODO: Support for mono audio");
+            if (channels < 2) alert("TODO: Support for mono audio");
 
             let sampleRate = read16LE(strmData, 0x1C);
             console.log("Sample Rate: " + sampleRate);
@@ -334,7 +826,8 @@
                 waveDataR[i] = strmData[0x68 + blockLength + i];
             }
 
-            let decoded;
+            let decodedL;
+            let decodedR;
             let format;
             switch (strmData[0x18]) {
                 case 0: format = "PCM8"; break;
@@ -549,13 +1042,17 @@
                 }
             }
 
-            document.querySelector("#file-picker-container").style.display = 'none';
+            /** @type {HTMLElement} */
+            let filePickerContainer = document.querySelector("#file-picker-container")
+            filePickerContainer.style.display = 'none';
         }
 
         window.onload = () => {
             console.log("Optime Player");
 
+            /** @type {HTMLElement} */
             let dropZone = document.querySelector('#drop-zone');
+            /** @type {HTMLInputElement} */
             let filePicker = document.querySelector('#file-picker');
 
             dropZone.style.visibility = 'hidden';
@@ -564,7 +1061,7 @@
                 // console.log("File dragged over");
                 dropZone.style.visibility = 'visible';
             });
-            window.addEventListener('dragleave', e => {
+            dropZone.addEventListener('dragleave', e => {
                 e.preventDefault();
                 // console.log("File drag leave");
                 dropZone.style.visibility = 'hidden';
@@ -612,7 +1109,7 @@
     <h1>Optime Player</h1>
 
     <div id="file-picker-container">
-        <h3>Drag and drop a file</h3>
+        <h3>Drag and drop a Nintendo DS ROM</h3>
         <p>or</p>
         <input type="file" id="file-picker" accept=".nds">
     </div>
