@@ -285,7 +285,7 @@
             PlayNote: 0,
         }
 
-        class Instrument {
+        class PsgSquareInstrument {
             constructor(sampleRate) {
                 this.valL = 0;
                 this.valR = 0;
@@ -301,6 +301,7 @@
 
                 let continuePlaying = true;
 
+                // TODO: a better envelope
                 let envVol = 0;
                 if (t < 0.4) {
                     envVol = 1 - t / 0.4;
@@ -323,6 +324,53 @@
             }
         }
 
+        class Sample {
+            /**
+            * @param {Float64Array} data 
+            * @param {number} frequency
+            * @param {number} sampleRate
+            */
+            constructor(data, frequency, sampleRate) {
+                this.data = data;
+                this.frequency = frequency;
+                this.sampleRate = sampleRate;
+            }
+        }
+
+        class SampleInstrument {
+            /**
+            * @param {number} sampleRate 
+            * @param {Sample} sample
+            */
+            constructor(sampleRate, sample) {
+                this.sampleRate = sampleRate;
+                this.sample = sample;
+
+                // sampleFrequency is the sample's tone frequency when played at sampleSampleRate
+                this.valL = 0;
+                this.valR = 0;
+                this.frequency = 440;
+                this.volume = 1;
+
+                this.playing = false;
+            }
+
+            sampleAt(sample) {
+                let ratio = this.frequency / this.sample.frequency;
+                let t = sample / this.sampleRate * ratio;
+                let sampleSample = Math.round(t * this.sample.sampleRate);
+
+                if (sampleSample >= 0 && sampleSample < this.sample.data.length) {
+                    this.valL = this.sample.data[sampleSample];
+                    this.valR = this.sample.data[sampleSample];
+                    return true;
+                } else {
+                    this.valL = 0;
+                    this.valR = 0;
+                    return false;
+                }
+            }
+        }
 
         class SseqController {
             /** @param {Array} sseqFile
@@ -342,6 +390,12 @@
                 }
 
                 this.tracks[0].active = true;
+
+                this.destroyed = false;
+            }
+
+            destroy() {
+                this.destroyed = true;
             }
 
             tick() {
@@ -362,6 +416,11 @@
                 this.tracks[num].active = true;
                 this.tracks[num].pc = pc;
                 this.tracks[num].debugLog("Started! PC: " + hexN(pc, 6));
+            }
+
+            endTrack(num) {
+                this.tracks[num].active = false;
+                this.tracks[num].debugLog("Ended track.");
             }
         }
 
@@ -396,13 +455,12 @@
 
                 this.restingFor = 0;
 
-                this.stack = new Uint32Array(1024);
+                this.stack = new Uint32Array(64);
                 this.sp = 0;
-
             }
 
             debugLog(msg) {
-                console.log(`${this.id}: ${msg}`)
+                // console.log(`${this.id}: ${msg}`)
             }
 
             push(val) {
@@ -449,7 +507,7 @@
                 let opcodePc = this.pc;
                 let opcode = this.readPcInc();
 
-                if (opcode >= 0 && opcode <= 0x7F) {
+                if (opcode <= 0x7F) {
                     let velocity = this.readPcInc();
                     let duration = this.readVariableLength();
 
@@ -588,6 +646,7 @@
                             {
                                 let dest = this.readPcInc(3);
                                 this.pc = dest;
+                                this.debugLog("Jump to: " + hexN(dest, 6));
                                 break;
                             }
                         case 0x95: // Call
@@ -621,6 +680,13 @@
                                 this.debugLog("Expression: " + this.expression);
                                 break;
                             }
+                        case 0xFF: // End of Track
+                            {
+                                this.controller.endTrack(this.id);
+                                // Set restingFor to non-zero since the controller checks it to stop executing
+                                this.restingFor = 1;
+                                break;
+                            }
                         default:
                             alert(`${this.id}: Unknown opcode: ` + hex(opcode, 2) + " PC: " + hex(opcodePc, 6));
                     }
@@ -629,7 +695,7 @@
         }
 
         class Synthesizer {
-            constructor(sampleRate) {
+            constructor(sampleRate, sample) {
                 this.instrsAvailable = 16;
 
                 this.instrs = new Array(this.instrsAvailable);
@@ -643,7 +709,11 @@
                 this.playingIndex = 0;
 
                 for (let i = 0; i < this.instrs.length; i++) {
-                    this.instrs[i] = new Instrument(sampleRate);
+                    if (sample != null) {
+                        this.instrs[i] = new SampleInstrument(sampleRate, sample);
+                    } else {
+                        this.instrs[i] = new PsgSquareInstrument(sampleRate);
+                    }
                 }
             }
 
@@ -680,10 +750,20 @@
             return (i & (1 << bit)) !== 0;
         }
 
-        function playSeq(sdat, name) {
-            const BUFFER_SIZE = 4096;
-            const SAMPLE_RATE = 65536;
-            let synthesizer = new Synthesizer(SAMPLE_RATE);
+        /** @type {SseqController} */
+        let currentlyPlaying = null;
+
+        async function playSeq(sdat, name) {
+            if (currentlyPlaying) {
+                currentlyPlaying.destroy();
+            }
+
+            const BUFFER_SIZE = 16384;
+            const SAMPLE_RATE = 131072;
+
+            let sampleFrequency = 440 * 2 ** ((9 - 12) / 12);
+            let synthtestSample = decodeWavToSample(await downloadFileFromUrl("synthtest.wav"), sampleFrequency);
+            let synthesizer = new Synthesizer(SAMPLE_RATE, synthtestSample);
 
             let id = sdat.sseqNameIdDict[name];
             let info = sdat.sseqInfos[id];
@@ -713,19 +793,20 @@
 
             let messageBuffer = new CircularBuffer(1024);
             let controller = new SseqController(file, dataOffset, messageBuffer);
+            currentlyPlaying = controller;
 
             let timer = 0;
             controller.tick();
             function synthesizeMore() {
                 for (let i = 0; i < BUFFER_SIZE; i++) {
-                    timer += controller.tracks[0].bpm * 96;
-                    if (timer >= SAMPLE_RATE) {
+                    timer += controller.tracks[0].bpm * 100;
+                    while (timer >= SAMPLE_RATE) {
                         timer -= SAMPLE_RATE;
 
                         // 48 ticks per beat
                         controller.tick();
 
-                        if (messageBuffer.entries > 0) {
+                        while (messageBuffer.entries > 0) {
                             /** @type {Message} */
                             let msg = messageBuffer.pop();
 
@@ -745,6 +826,10 @@
                     synthesizer.nextSample();
                     bufferL[i] = synthesizer.valL;
                     bufferR[i] = synthesizer.valR;
+
+                    if (controller.destroyed) {
+                        return;
+                    }
                 }
 
                 // synthesizer.play(Math.random() * 880);
@@ -826,9 +911,47 @@
             return out;
         }
 
+        /** @param {Uint8Array} wavData */
+        function decodeWavToSample(wavData, sampleFrequency) {
+            /** @type {number[]} */
+            let sampleData = [];
+
+            let numChannels = read16LE(wavData, 22);
+            let sampleRate = read32LE(wavData, 24);
+            let bitsPerSample = read16LE(wavData, 34);
+
+            console.log("decodeWav: sample rate: " + sampleRate);
+
+            switch (bitsPerSample) {
+                case 8:
+                case 16:
+                    break;
+                default:
+                    console.error("decodeWav: unsupported bits per sample: " + bitsPerSample);
+                    return;
+            }
+
+            // Number of bytes in the wav data
+            let subchunk2Size = read32LE(wavData, 40);
+
+
+            for (let i = 44; i < 44 + subchunk2Size; i += bitsPerSample / 8 * numChannels) {
+                switch (bitsPerSample) {
+                    case 8:
+                        sampleData.push(wavData[i] / 255);
+                        break;
+                    case 16:
+                        sampleData.push(((read16LE(wavData, i) << 16) >> 16) / 32767);
+                        break;
+                }
+            }
+
+            return new Sample(Float64Array.from(sampleData), sampleFrequency, sampleRate);
+        }
+
         function playStrm(strmData) {
             const BUFFER_SIZE = 2048;
-            const SAMPLE_RATE = 32768;
+            const SAMPLE_RATE = 131072;
 
             let bufferL = new Float32Array(BUFFER_SIZE);
             let bufferR = new Float32Array(BUFFER_SIZE);
@@ -1043,6 +1166,26 @@
             return seqs;
         }
 
+        function downloadFileFromUrl(url) {
+            return new Promise((resolve, reject) => {
+                let client = new XMLHttpRequest();
+                client.responseType = "arraybuffer";
+                client.open("GET", url);
+                client.onreadystatechange = () => {
+                    if (client.status != 404) {
+                        if (client.response instanceof ArrayBuffer) {
+                            resolve(new Uint8Array(client.response));
+                            return;
+                        }
+                    } else {
+                        reject();
+                        return;
+                    }
+                };
+                client.send();
+            });
+        }
+
         function loadFile(data) {
             console.log(`ROM size: ${data.length} bytes`);
 
@@ -1089,7 +1232,7 @@
             filePickerContainer.style.display = 'none';
         }
 
-        window.onload = () => {
+        window.onload = async () => {
             console.log("Optime Player");
 
             /** @type {HTMLElement} */
