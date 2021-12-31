@@ -114,6 +114,7 @@
 
             gain;
 
+            /** @type {AudioContext} */
             ctx;
             sourcesPlaying = 0;
 
@@ -263,17 +264,55 @@
             }
         }
 
+        class SsarInfo {
+            constructor() {
+                this.fileId = null;
+            }
+        }
+
+        class BankInfo {
+            constructor() {
+                this.fileId = null;
+                this.swar1 = null;
+                this.swar2 = null;
+                this.swar3 = null;
+                this.swar4 = null;
+            }
+        }
+
+        class SwarInfo {
+            constructor() {
+                this.fileId = null;
+            }
+        }
+
         class Sdat {
             constructor() {
+                /** @type {Uint8Array[]} */
                 this.fat = [];
+
+                /** @type {SseqInfo[] | null} */
                 this.sseqInfos = [];
                 this.sseqNameIdDict = [];
                 this.sseqIdNameDict = [];
+
+                /** @type {SsarInfo[] | null} */
+                this.ssarInfos = [];
+
+                /** @type {BankInfo[] | null} */
+                this.bankInfos = [];
+
+                /** @type {SwarInfo[] | null} */
+                this.swarInfos = [];
+
+                /** @type {Bank[]} */
+                this.banks = new Array(128);
             }
         }
 
         class Message {
-            constructor(type, param0, param1, param2) {
+            constructor(channel, type, param0, param1, param2) {
+                this.channel = channel;
                 this.type = type;
                 this.param0 = param0;
                 this.param1 = param1;
@@ -337,6 +376,47 @@
             }
         }
 
+        class InstrumentRecord {
+            // fRecord = 0x1 - Single-Region Instrument
+            // fRecord = 0x2 - PSG Pulse
+            // fRecord = 0x3 - PSG Noise
+
+            // fRecord = 0x10 - Drumset
+            // fRecord = 0x11 - Multi-Region Instrument
+
+            constructor() {
+                this.fRecord = 0;
+
+                this.lowerNote = 0;
+                this.upperNote = 0;
+
+                this.region1End = 0;
+                this.region2End = 0;
+                this.region3End = 0;
+                this.region4End = 0;
+                this.region5End = 0;
+                this.region6End = 0;
+                this.region7End = 0;
+                this.region8End = 0;
+
+                this.swavId = 0;
+                this.swarId = 0;
+                this.noteNumber = 0;
+                this.attack = 0;
+                this.decay = 0;
+                this.sustain = 0;
+                this.release = 0;
+                this.pan = 0;
+            }
+        }
+
+        class Bank {
+            constructor() {
+                /** @type {InstrumentRecord[]} */
+                this.patches = new Array(128);
+            }
+        }
+
         class SampleInstrument {
             /**
             * @param {number} sampleRate 
@@ -353,6 +433,10 @@
                 this.volume = 1;
 
                 this.playing = false;
+            }
+
+            changeSample(sample) {
+                this.sample = sample;
             }
 
             sampleAt(sample) {
@@ -463,6 +547,10 @@
                 // console.log(`${this.id}: ${msg}`)
             }
 
+            debugLogForce(msg) {
+                console.log(`${this.id}: ${msg}`)
+            }
+
             push(val) {
                 this.stack[this.sp++] = val;
                 if (this.sp >= this.stack.length) alert("SSEQ stack overflow");
@@ -515,7 +603,7 @@
                     this.debugLog("Velocity: " + velocity);
                     this.debugLog("Duration: " + duration);
 
-                    this.controller.messageBuffer.insert(new Message(MessageType.PlayNote, opcode, velocity, duration));
+                    this.controller.messageBuffer.insert(new Message(this.id, MessageType.PlayNote, opcode, velocity, duration));
                 } else {
                     switch (opcode) {
                         case 0xFE: // Allocate track
@@ -575,11 +663,11 @@
                         case 0x81: // Set bank and program
                             {
                                 let bankAndProgram = this.readVariableLength();
-                                this.program = bankAndProgram & 0xFF;
-                                this.bank = (bankAndProgram >> 8) & 0x7F;
+                                this.program = (bankAndProgram >> 7) & 0x7F;
+                                this.bank = (bankAndProgram >> 14) & 0x7F;
 
-                                this.debugLog("Program: " + this.program);
-                                this.debugLog("Bank: " + this.bank);
+                                this.debugLogForce("Program: " + this.program);
+                                this.debugLogForce("Bank: " + this.bank);
                                 break;
                             }
                         case 0xC2: // Master Volume
@@ -752,14 +840,17 @@
 
         /** @type {SseqController} */
         let currentlyPlaying = null;
+        /** @type {AudioPlayer} */
+        let currentPlayer = null;
 
         async function playSeq(sdat, name) {
             if (currentlyPlaying) {
                 currentlyPlaying.destroy();
+                currentPlayer.ctx.close();
             }
 
             const BUFFER_SIZE = 16384;
-            const SAMPLE_RATE = 131072;
+            const SAMPLE_RATE = 32768;
 
             let sampleFrequency = 440 * 2 ** ((9 - 12) / 12);
             let synthtestSample = decodeWavToSample(await downloadFileFromUrl("synthtest.wav"), sampleFrequency);
@@ -844,11 +935,32 @@
             }
 
             let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
+            currentPlayer = player;
             synthesizeMore();
         }
 
         function clamp(val, min, max) {
             return Math.min(Math.max(val, min), max);
+        }
+
+        function decodePcm8(pcm8Data) {
+            let out = new Float64Array(pcm8Data.length);
+
+            for (let i = 0; i < out.length; i++) {
+                out[i] = (pcm8Data[i] - 127) / 128;
+            }
+
+            return out;
+        }
+
+        function decodePcm16(pcm16Data) {
+            let out = new Float64Array(pcm16Data.length >> 1);
+
+            for (let i = 0; i < out.length; i++) {
+                out[i] = ((read16LE(pcm16Data, i * 2) << 16) >> 16) / 32768;
+            }
+
+            return out;
         }
 
         let indexTable = [-1, -1, -1, -1, 2, 4, 6, 8];
@@ -900,15 +1012,29 @@
             return out;
         }
 
-        // Decode PCM16
-        function decodePcm16(pcm16Data) {
-            let out = new Float32Array(pcm16Data.length >> 1);
+        function decodeSwavSampleBlock(data) {
+            let wavType = data[0];
+            let loopFlag = data[1];
+            let sampleRate = read16LE(data, 2);
+            let loopOffset = read16LE(data, 6); // in 4-byte units
+            let soundOffset = read32LE(data, 8); // in 4-byte units (excluding ADPCM header if any)
 
-            for (let i = 0; i < out.length; i++) {
-                out[i] = ((read16LE(pcm16Data, i * 2) << 16) >> 16) / 32767;
+            let sampleDataLength = data.length - 0xC;
+            let sampleData = new Uint8Array(sampleDataLength);
+            for (let i = 0; i < sampleDataLength; i++) {
+                sampleData[i] = data[i + 0xC];
             }
 
-            return out;
+            switch (wavType) {
+                case 0: // PCM8
+                    return new Sample(decodePcm8(sampleData), 440, sampleRate);
+                case 1: // PCM16
+                    return new Sample(decodePcm16(sampleData), 440, sampleRate);
+                case 2: // IMA-ADPCM
+                    return new Sample(decodeAdpcm(sampleData), 440, sampleRate);
+            }
+
+            return null;
         }
 
         /** @param {Uint8Array} wavData */
@@ -950,8 +1076,8 @@
         }
 
         function playStrm(strmData) {
-            const BUFFER_SIZE = 2048;
-            const SAMPLE_RATE = 131072;
+            const BUFFER_SIZE = 4096;
+            const SAMPLE_RATE = 32768;
 
             let bufferL = new Float32Array(BUFFER_SIZE);
             let bufferR = new Float32Array(BUFFER_SIZE);
@@ -1078,50 +1204,147 @@
             console.log("FILE Block Size: " + hexN(fileSize, 8));
 
             // SYMB processing
-            let symbSseqListOffs = read32LE(sdatData, symbOffs + 0x8);
-            let symbSseqListNumEntries = read32LE(sdatData, symbOffs + symbSseqListOffs);
+            {
+                // SSEQ symbols
+                let symbSseqListOffs = read32LE(sdatData, symbOffs + 0x8);
+                let symbSseqListNumEntries = read32LE(sdatData, symbOffs + symbSseqListOffs);
 
-            console.log(hexN(offset + symbOffs + symbSseqListOffs, 8));
-            console.log("SYMB Number of SSEQ entries: " + symbSseqListNumEntries);
+                // console.log(hexN(offset + symbOffs + symbSseqListOffs, 8));
+                console.log("SYMB Number of SSEQ entries: " + symbSseqListNumEntries);
 
-            for (let i = 0; i < symbSseqListNumEntries; i++) {
-                let sseqNameOffs = read32LE(sdatData, symbOffs + symbSseqListOffs + 4 + i * 4);
+                for (let i = 0; i < symbSseqListNumEntries; i++) {
+                    let sseqNameOffs = read32LE(sdatData, symbOffs + symbSseqListOffs + 4 + i * 4);
 
-                let sseqNameArr = [];
-                let sseqNameCharOffs = 0;
-                while (true) {
-                    let char = sdatData[symbOffs + sseqNameOffs + sseqNameCharOffs];
-                    if (char == 0) break; // check for null terminator
-                    sseqNameCharOffs++;
-                    sseqNameArr.push(char);
-                }
+                    let sseqNameArr = [];
+                    let sseqNameCharOffs = 0;
+                    while (true) {
+                        let char = sdatData[symbOffs + sseqNameOffs + sseqNameCharOffs];
+                        if (char == 0) break; // check for null terminator
+                        sseqNameCharOffs++;
+                        sseqNameArr.push(char);
+                    }
 
-                // for some reason Pokemon Platinum has a ton of null pointers 
-                if (sseqNameOffs != 0) {
-                    let seqName = String.fromCharCode(...sseqNameArr);
+                    // for some reason games have a ton of empty symbols
+                    if (sseqNameOffs != 0) {
+                        let seqName = String.fromCharCode(...sseqNameArr);
 
-                    sdat.sseqNameIdDict[seqName] = i;
-                    sdat.sseqIdNameDict[i] = seqName;
+                        sdat.sseqNameIdDict[seqName] = i;
+                        sdat.sseqIdNameDict[i] = seqName;
+                    }
                 }
             }
 
+            {
+                // SSAR symbols
+                let symbSsarListOffs = read32LE(sdatData, symbOffs + 0xC);
+                let symbSsarListNumEntries = read32LE(sdatData, symbOffs + symbSsarListOffs);
+
+                console.log("SYMB Number of SSAR entries: " + symbSsarListNumEntries);
+            }
+            {
+                // BANK symbols
+                let symbBankListOffs = read32LE(sdatData, symbOffs + 0x10);
+                let symbBankListNumEntries = read32LE(sdatData, symbOffs + symbBankListOffs);
+
+                console.log("SYMB Number of BANK entries: " + symbBankListNumEntries);
+            }
+
+            {
+                // SWAR symbols
+                let symbSwarListOffs = read32LE(sdatData, symbOffs + 0x14);
+                let symbSwarListNumEntries = read32LE(sdatData, symbOffs + symbSwarListOffs);
+
+                console.log("SYMB Number of SWAR entries: " + symbSwarListNumEntries);
+            }
+
             // INFO processing
-            let infoSseqListOffs = read32LE(sdatData, infoOffs + 0x8);
-            let infoSseqListNumEntries = read32LE(sdatData, infoOffs + infoSseqListOffs);
-            console.log("INFO Number of SSEQ entries: " + infoSseqListNumEntries);
+            {
+                // SSEQ info
+                let infoSseqListOffs = read32LE(sdatData, infoOffs + 0x8);
+                let infoSseqListNumEntries = read32LE(sdatData, infoOffs + infoSseqListOffs);
+                console.log("INFO Number of SSEQ entries: " + infoSseqListNumEntries);
 
-            for (let i = 0; i < infoSseqListNumEntries; i++) {
-                let infoSseqNameOffs = read32LE(sdatData, infoOffs + infoSseqListOffs + 4 + i * 4);
+                for (let i = 0; i < infoSseqListNumEntries; i++) {
+                    let infoSseqNameOffs = read32LE(sdatData, infoOffs + infoSseqListOffs + 4 + i * 4);
 
-                let info = new SseqInfo();
-                info.fileId = read16LE(sdatData, infoOffs + infoSseqNameOffs + 0);
-                info.bank = read16LE(sdatData, infoOffs + infoSseqNameOffs + 4);
-                info.volume = sdatData[infoOffs + infoSseqNameOffs + 6];
-                info.cpr = sdatData[infoOffs + infoSseqNameOffs + 7];
-                info.ppr = sdatData[infoOffs + infoSseqNameOffs + 8];
-                info.ply = sdatData[infoOffs + infoSseqNameOffs + 9];
+                    if (infoSseqNameOffs != 0) {
+                        let info = new SseqInfo();
+                        info.fileId = read16LE(sdatData, infoOffs + infoSseqNameOffs + 0);
+                        info.bank = read16LE(sdatData, infoOffs + infoSseqNameOffs + 4);
+                        info.volume = sdatData[infoOffs + infoSseqNameOffs + 6];
+                        info.cpr = sdatData[infoOffs + infoSseqNameOffs + 7];
+                        info.ppr = sdatData[infoOffs + infoSseqNameOffs + 8];
+                        info.ply = sdatData[infoOffs + infoSseqNameOffs + 9];
 
-                sdat.sseqInfos[i] = info;
+                        sdat.sseqInfos[i] = info;
+                    } else {
+                        sdat.sseqInfos[i] = null;
+                    }
+                }
+            }
+
+            {
+                // SSAR info
+                let infoSsarListOffs = read32LE(sdatData, infoOffs + 0xC);
+                let infoSsarListNumEntries = read32LE(sdatData, infoOffs + infoSsarListOffs);
+                console.log("INFO Number of SSAR entries: " + infoSsarListNumEntries);
+
+                for (let i = 0; i < infoSsarListNumEntries; i++) {
+                    let infoSsarNameOffs = read32LE(sdatData, infoOffs + infoSsarListOffs + 4 + i * 4);
+
+                    if (infoSsarNameOffs != 0) {
+                        let info = new SsarInfo();
+                        info.fileId = read16LE(sdatData, infoOffs + infoSsarNameOffs + 0);
+
+                        sdat.ssarInfos[i] = info;
+                    } else {
+                        sdat.ssarInfos[i] = null;
+                    }
+                }
+            }
+
+            {
+                // BANK info
+                let infoBankListOffs = read32LE(sdatData, infoOffs + 0x10);
+                let infoBankListNumEntries = read32LE(sdatData, infoOffs + infoBankListOffs);
+                console.log("INFO Number of BANK entries: " + infoBankListNumEntries);
+
+                for (let i = 0; i < infoBankListNumEntries; i++) {
+                    let infoBankNameOffs = read32LE(sdatData, infoOffs + infoBankListOffs + 4 + i * 4);
+
+                    if (infoBankNameOffs != 0) {
+                        let info = new BankInfo();
+                        info.fileId = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x0);
+                        info.swar1 = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x4);
+                        info.swar2 = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x6);
+                        info.swar3 = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x8);
+                        info.swar4 = read16LE(sdatData, infoOffs + infoBankNameOffs + 0xA);
+
+                        sdat.bankInfos[i] = info;
+                    } else {
+                        sdat.bankInfos[i] = null;
+                    }
+                }
+            }
+
+            {
+                // SWAR info
+                let infoSwarListOffs = read32LE(sdatData, infoOffs + 0x14);
+                let infoSwarListNumEntries = read32LE(sdatData, infoOffs + infoSwarListOffs);
+                console.log("INFO Number of SWAR entries: " + infoSwarListNumEntries);
+
+                for (let i = 0; i < infoSwarListNumEntries; i++) {
+                    let infoSwarNameOffs = read32LE(sdatData, infoOffs + infoSwarListOffs + 4 + i * 4);
+
+                    if (infoSwarNameOffs) {
+                        let info = new SwarInfo();
+                        info.fileId = read16LE(sdatData, infoOffs + infoSwarNameOffs + 0x0);
+
+                        sdat.swarInfos[i] = info;
+                    } else {
+                        sdat.swarInfos[i] = null;
+                    }
+                }
             }
 
             // FAT / FILE processing
@@ -1144,6 +1367,35 @@
 
                 // console.log(`Loaded FAT file id:${i} size:${fileSize}`);
             }
+
+
+            // // testing
+            // for (let i = 0; i < sdat.swarInfos.length; i++) {
+            //     if (sdat.swarInfos[i] != null) {
+            //         let file = sdat.fat[sdat.swarInfos[i].fileId];
+
+            //         console.log(`SWAR #${i}: file ID: ${sdat.swarInfos[i].fileId}`);
+            //         console.log(`SWAR #${i}: ${read32LE(file, 0x38)} sample blocks`)
+            //     }
+            // }
+
+            // console.log(`${sdat.bankInfos.length} SBNKs in INFO block`);
+            // // testing
+            // for (let i = 0; i < sdat.bankInfos.length; i++) {
+            //     if (sdat.bankInfos[i] != null) {
+            //         let file = sdat.fat[sdat.bankInfos[i].fileId];
+
+            //         console.log(`SBNK #${i}: file ID: ${sdat.bankInfos[i].fileId}`);
+            //         console.log(`SBNK #${i}: ${read32LE(file, 0x38)} instruments`)
+            //     }
+            // }
+
+            // for (let i = 0; i < sdat.bankInfos.length; i++) {
+            //     let bankInfo = sdat.bankInfos[i];
+            //     let bankFile = sdat.fat[bankInfo.fileId];
+
+            //     bankFile.
+            // }
 
             return sdat;
         }
@@ -1186,7 +1438,7 @@
             });
         }
 
-        function loadFile(data) {
+        function loadNdsRom(data) {
             console.log(`ROM size: ${data.length} bytes`);
 
             let sequence = [0x53, 0x44, 0x41, 0x54, 0xFF, 0xFE, 0x00, 0x01]; // "SDAT", then byte order 0xFEFF, then version 0x0100
@@ -1217,12 +1469,25 @@
                         }
                     }
 
+                    console.log("Searching for STRMs")
                     for (let i = 0; i < sdat.fat.length; i++) {
                         if (read32LE(sdat.fat[i], 0) == 0x4D525453) {
-                            // alert(`file id:${i} is STRM`);
+                            console.log(`file id:${i} is STRM`);
 
                             playStrm(sdat.fat[i]);
                         }
+
+                        // if (read32LE(sdat.fat[i], 0) == 0x4B4E4253) {
+                        //     console.log(`file id:${i} is SBNK`);
+
+                        //     // playStrm(sdat.fat[i]);
+                        // }
+
+                        // if (read32LE(sdat.fat[i], 0) == 0x51455353) {
+                        //     console.log(`file id:${i} is SSEQ`);
+
+                        //     // playStrm(sdat.fat[i]);
+                        // }
                     }
                 }
             }
@@ -1261,7 +1526,7 @@
                     let reader = new FileReader();
                     reader.onload = function () {
                         if (this.result instanceof ArrayBuffer) {
-                            loadFile(new Uint8Array(this.result));
+                            loadNdsRom(new Uint8Array(this.result));
                         }
                     }
                     reader.readAsArrayBuffer(e.dataTransfer.files[0]);
@@ -1276,7 +1541,7 @@
                     reader.onload = function () {
                         let result = reader.result;
                         if (result instanceof ArrayBuffer) {
-                            loadFile(new Uint8Array(result));
+                            loadNdsRom(new Uint8Array(result));
                         } else {
                             alert("Failed to read file! Probably a result of a lack of API support.");
                         }
