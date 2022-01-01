@@ -42,8 +42,8 @@
             grid-template-rows: 0.7fr 1.3fr 1fr;
             gap: 0px 0px;
             grid-template-areas:
-                "song-picker . ."
                 "song-picker channels ."
+                "song-picker . ."
                 "song-picker . .";
         }
 
@@ -314,7 +314,7 @@
 
         class Message {
             constructor(channel, type, param0, param1, param2) {
-                this.channel = channel;
+                this.track = channel;
                 this.type = type;
                 this.param0 = param0;
                 this.param1 = param1;
@@ -417,6 +417,27 @@
                 this.release = new Uint8Array(128);
                 this.pan = new Uint8Array(128);
             }
+
+            resolveEntryIndex(note) {
+                switch (this.fRecord) {
+                    case InstrumentType.SingleSample:
+                    case InstrumentType.PsgPulse:
+                    case InstrumentType.PsgNoise:
+                        return 0;
+
+                    case InstrumentType.Drumset:
+                        if (note < this.lowerNote || note > this.upperNote) {
+                            console.warn(`resolveEntryIndex: drumset note out of range (${this.lowerNote}-${this.upperNote} inclusive): ${note}`)
+                        }
+                        return note - this.lowerNote;
+
+                    case InstrumentType.MultiSample:
+                        for (let i = 0; i < 8; i++) {
+                            if (note <= this.regionEnd[i]) return i;
+                        }
+                        return 7;
+                }
+            }
         }
 
         // SBNK
@@ -454,7 +475,7 @@
                 let ratio = this.frequency / this.sample.frequency;
                 let t = sample / this.sampleRate * ratio;
                 let sampleSample = Math.round(t * this.sample.sampleRate);
-                
+
                 // if (sampleSample >= this.sample.data.length && this.sample.looping) {
                 //     let sampleNoIntro = sampleSample - this.sample.loopPoint;
                 //     let loopLength = this.sample.data.length - this.sample.loopPoint;
@@ -806,7 +827,7 @@
         }
 
         class Synthesizer {
-            constructor(sampleRate, sample, instrsAvailable) {
+            constructor(sampleRate, instrsAvailable) {
                 this.instrsAvailable = instrsAvailable;
 
                 this.instrs = new Array(this.instrsAvailable);
@@ -819,30 +840,20 @@
 
                 this.playingIndex = 0;
 
+                let emptySample = new Sample(new Float64Array(1), 440, sampleRate, 0)
+
                 for (let i = 0; i < this.instrs.length; i++) {
-                    if (sample != null) {
-                        this.instrs[i] = new SampleInstrument(this.sampleRate, sample);
-                    } else {
-                        this.instrs[i] = new PsgSquareInstrument(this.sampleRate);
-                    }
+                    this.instrs[i] = new SampleInstrument(this.sampleRate, emptySample);
                 }
             }
 
-            changeSquare() {
-                for (let i = 0; i < this.instrs.length; i++) {
-                    this.instrs[i] = new PsgSquareInstrument(this.sampleRate);
-                }
-            }
-
-            changeSample(sample) {
-                for (let i = 0; i < this.instrs.length; i++) {
-                    if (sample != null) {
-                        this.instrs[i] = new SampleInstrument(this.sampleRate, sample);
-                    }
-                }
-            }
-
-            play(frequency, volume) {
+            /**
+             * @param {Sample} sample
+             * @param {number} frequency
+             * @param {number} volume
+             */
+            play(sample, frequency, volume) {
+                this.instrs[this.playingIndex].sample = sample;
                 this.instrs[this.playingIndex].playing = true;
                 this.instrs[this.playingIndex].frequency = frequency;
                 this.instrs[this.playingIndex].volume = volume;
@@ -881,6 +892,9 @@
         /** @type {AudioPlayer} */
         let currentPlayer = null;
 
+        /** @type {boolean[]} */
+        let enabledTrack = new Array(16).fill(true);
+
         /**
          * @param {Sdat} sdat
          * @param {string} name
@@ -897,7 +911,7 @@
             let sampleFrequency = 440 * 2 ** ((9 - 12) / 12);
             let synthtestSample = decodeWavToSample(await downloadFileFromUrl("synthtest.wav"), sampleFrequency);
             let emptySample = new Sample(new Float64Array(1), 440, SAMPLE_RATE, 0)
-            let synthesizers = new Array(16).fill(null).map(() => new Synthesizer(SAMPLE_RATE, emptySample, 8));
+            let synthesizer = new Synthesizer(SAMPLE_RATE, 32);
 
             let id = sdat.sseqNameIdDict[name];
             let info = sdat.sseqInfos[id];
@@ -950,37 +964,29 @@
 
                             switch (msg.type) {
                                 case MessageType.PlayNote:
-                                    let midiNote = msg.param0;
-                                    let hz = 440 * 2 ** ((midiNote - 69) / 12);
-                                    synthesizers[msg.channel].play(hz, msg.param1 / 127 * 1 * (controller.tracks[msg.channel].volume / 127));
-                                    break;
-                                case MessageType.InstrumentChange:
-                                    // The archive ID inside each instrument record inside each SBNK file
-                                    // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
-                                    let program = msg.param1;
+                                    if (enabledTrack[msg.track]) {
+                                        let midiNote = msg.param0;
+                                        let hz = 440 * 2 ** ((midiNote - 69) / 12);
 
-                                    let instrument = bank.instruments[program];
+                                        // The archive ID inside each instrument record inside each SBNK file
+                                        // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
 
-                                    let archiveId = instrument.swarInfoId[0];
-                                    let sampleId = instrument.swavInfoId[0];
+                                        let instrument = bank.instruments[controller.tracks[msg.track].program];
 
-                                    let archive = sdat.sampleArchives[bankInfo.swarId[archiveId]];
-                                    let sample = archive[sampleId];
+                                        let index = instrument.resolveEntryIndex(midiNote);
+                                        let archiveId = instrument.swarInfoId[index];
+                                        let sampleId = instrument.swavInfoId[index];
 
-                                    // TODO: calculate frequency during SDAT parsing
-                                    console.log(instrument.noteNumber)
-                                    sample.frequency = midiNoteToHz(instrument.noteNumber[0]);
+                                        let archive = sdat.sampleArchives[bankInfo.swarId[archiveId]];
+                                        let sample = archive[sampleId];
 
-                                    switch (instrument.fRecord) {
-                                        case InstrumentType.SingleSample:
-                                        case InstrumentType.MultiSample: // TODO: proper multi-sample support
-                                            synthesizers[msg.channel].changeSample(sample);
-                                            break;
-                                        case InstrumentType.PsgPulse:
-                                            synthesizers[msg.channel].changeSquare();
-                                            break;
+                                        // if (instrument.fRecord != InstrumentType.Drumset) {
+                                            sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
+                                        // }
+
+                                        synthesizer.play(sample, hz, msg.param1 / 127 * 1 * (controller.tracks[msg.track].volume / 127));
+                                        break;
                                     }
-                                    break;
                             }
                         }
 
@@ -988,15 +994,9 @@
 
                     // synthesizer.play(440);
 
-                    let sumL = 0;
-                    let sumR = 0;
-                    for (let i = 0; i < 16; i++) {
-                        synthesizers[i].nextSample();
-                        sumL += synthesizers[i].valL;
-                        sumR += synthesizers[i].valR;
-                    }
-                    bufferL[i] = sumL;
-                    bufferR[i] = sumR;
+                    synthesizer.nextSample();
+                    bufferL[i] = synthesizer.valL;
+                    bufferR[i] = synthesizer.valR;
 
                     if (controller.destroyed) {
                         return;
@@ -1011,7 +1011,7 @@
 
                 player.queueAudio(bufferL, bufferR);
 
-                console.log("Syntheszing more audio");
+                // console.log("Syntheszing more audio");
             }
 
             let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
@@ -1543,6 +1543,9 @@
                                 {
                                     let instrumentCount = bankFile[recordOffset + 1] - bankFile[recordOffset] + 1;
 
+                                    instrument.lowerNote = bankFile[recordOffset + 0];
+                                    instrument.upperNote = bankFile[recordOffset + 1];
+
                                     for (let k = 0; k < instrumentCount; k++) {
                                         instrument.swavInfoId[k] = read16LE(bankFile, recordOffset + 4 + k * 12 + 0x0);
                                         instrument.swarInfoId[k] = read16LE(bankFile, recordOffset + 4 + k * 12 + 0x2);
@@ -1752,6 +1755,10 @@
             /** @type {HTMLElement} */
             let filePickerContainer = document.querySelector("#file-picker-container")
             filePickerContainer.style.display = 'none';
+
+            /** @type {HTMLDivElement} */
+            let channelsDiv = document.querySelector(".channels");
+            channelsDiv.style.display = 'block';
         }
 
         window.onload = async () => {
@@ -1761,6 +1768,9 @@
             let dropZone = document.querySelector('#drop-zone');
             /** @type {HTMLInputElement} */
             let filePicker = document.querySelector('#file-picker');
+            /** @type {HTMLDivElement} */
+            let channelsDiv = document.querySelector(".channels");
+            channelsDiv.style.display = 'none';
 
             dropZone.style.visibility = 'hidden';
             window.addEventListener('dragover', e => {
@@ -1805,6 +1815,26 @@
                     };
                 }
             });
+
+            for (let i = 0; i < 16; i++) {
+                let channelDiv = document.createElement('div');
+                channelsDiv.append(channelDiv);
+                let label = document.createElement("label");
+                label.innerText = `Channel ${i}`
+                label.htmlFor = `channel-select-checkbox${i}`;
+                label.id = `channel-select-label${i}`
+                let input = document.createElement("input");
+                input.type = 'checkbox';
+                input.checked = true;
+                input.id = `channel-select-checkbox${i}`;
+                channelDiv.append(label);
+                channelDiv.append(input);
+
+                input.onchange = e => {
+                    enabledTrack[i] = input.checked;
+                };
+
+            }
         }
     </script>
 </head>
