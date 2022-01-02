@@ -61,6 +61,7 @@
 
     <script>
         //@ts-check
+
         class AudioPlayer {
             bufferLength;
             sampleRate;
@@ -89,6 +90,8 @@
                 const fixAudioContext = () => {
                     // Create empty buffer
                     let buffer = this.ctx.createBuffer(1, 1, 22050);
+
+                    /** @type {any} */
                     let source = this.ctx.createBufferSource();
                     source.buffer = buffer;
                     // Connect to output (speakers)
@@ -143,10 +146,10 @@
 
                 bufferSource.onended = () => {
                     this.sourcesPlaying--;
-                    if (this.sourcesPlaying < 3) {
+                    if (this.sourcesPlaying < 6) {
                         this.needMoreSamples();
                     }
-                    if (this.sourcesPlaying < 2) {
+                    if (this.sourcesPlaying < 5) {
                         this.needMoreSamples();
                     }
                 };
@@ -272,7 +275,7 @@
         class BankInfo {
             constructor() {
                 this.fileId = null;
-                this.swarId = new Uint8Array(4);
+                this.swarId = new Uint16Array(4);
             }
         }
 
@@ -325,6 +328,7 @@
         const MessageType = {
             PlayNote: 0, // P0: MIDI Note P1: Velocity
             InstrumentChange: 1, // P0: Bank P1: Program
+            Jump: 2,
         }
 
         class PsgSquareInstrument {
@@ -465,6 +469,8 @@
                 this.volume = 1;
 
                 this.playing = false;
+
+                this.pan = 0.5;
             }
 
             changeSample(sample) {
@@ -484,8 +490,8 @@
                 // }
 
                 if (sampleSample >= 0 && sampleSample < this.sample.data.length) {
-                    this.valL = this.sample.data[sampleSample] * this.volume;
-                    this.valR = this.sample.data[sampleSample] * this.volume;
+                    this.valL = this.sample.data[sampleSample] * this.volume * (1 - this.pan);
+                    this.valR = this.sample.data[sampleSample] * this.volume * this.pan;
                     return true;
                 } else {
                     this.valL = 0;
@@ -515,6 +521,8 @@
                 this.tracks[0].active = true;
 
                 this.destroyed = false;
+
+                this.ticksElapsed = 0;
             }
 
             destroy() {
@@ -524,15 +532,14 @@
             tick() {
                 for (let i = 0; i < 16; i++) {
                     if (this.tracks[i].active) {
-                        if (this.tracks[i].restingFor == 0) {
-                            while (this.tracks[i].restingFor == 0) {
-                                this.tracks[i].execute();
-                            }
-                        } else {
-                            this.tracks[i].restingFor--;
+                        while (this.tracks[i].restingFor == 0) {
+                            this.tracks[i].execute();
                         }
+                        this.tracks[i].restingFor--;
                     }
                 }
+
+                this.ticksElapsed++;
             }
 
             startTrack(num, pc) {
@@ -700,7 +707,7 @@
                         case 0xC1: // Volume
                             {
                                 this.volume = this.readPcInc();
-                                this.debugLogForce("Volume: " + this.volume);
+                                this.debugLog("Volume: " + this.volume);
                                 break;
                             }
                         case 0x81: // Set bank and program
@@ -778,7 +785,9 @@
                             {
                                 let dest = this.readPcInc(3);
                                 this.pc = dest;
-                                this.debugLog("Jump to: " + hexN(dest, 6));
+                                this.debugLogForce(`Jump to: ${hexN(dest, 6)} Tick: ${this.controller.ticksElapsed}`);
+
+                                this.sendMessage(MessageType.Jump);
                                 break;
                             }
                         case 0x95: // Call
@@ -819,6 +828,26 @@
                                 this.restingFor = 1;
                                 break;
                             }
+                        case 0xD0: // Attack Rate
+                            {
+                                this.attackRate = this.readPcInc();
+                                break;
+                            }
+                        case 0xD1: // Decay Rate
+                            {
+                                this.decayRate = this.readPcInc();
+                                break;
+                            }
+                        case 0xD2: // Sustain Rate
+                            {
+                                this.sustainRate = this.readPcInc();
+                                break;
+                            }
+                        case 0xD3: // Release Rate
+                            {
+                                this.releaseRate = this.readPcInc();
+                                break;
+                            }
                         default:
                             alert(`${this.id}: Unknown opcode: ` + hex(opcode, 2) + " PC: " + hex(opcodePc, 6));
                     }
@@ -830,6 +859,7 @@
             constructor(sampleRate, instrsAvailable) {
                 this.instrsAvailable = instrsAvailable;
 
+                /** @type {SampleInstrument[]} */
                 this.instrs = new Array(this.instrsAvailable);
                 this.instrsStartSample = new Float64Array(this.instrsAvailable);
                 this.sampleNum = 0;
@@ -851,8 +881,10 @@
              * @param {Sample} sample
              * @param {number} frequency
              * @param {number} volume
+             * @param {number} pan
              */
-            play(sample, frequency, volume) {
+            play(sample, frequency, volume, pan) {
+                this.instrs[this.playingIndex].pan = pan;
                 this.instrs[this.playingIndex].sample = sample;
                 this.instrs[this.playingIndex].playing = true;
                 this.instrs[this.playingIndex].frequency = frequency;
@@ -905,7 +937,7 @@
                 currentPlayer.ctx.close();
             }
 
-            const BUFFER_SIZE = 16384;
+            const BUFFER_SIZE = 512;
             const SAMPLE_RATE = 32768;
 
             let sampleFrequency = 440 * 2 ** ((9 - 12) / 12);
@@ -981,10 +1013,13 @@
                                         let sample = archive[sampleId];
 
                                         // if (instrument.fRecord != InstrumentType.Drumset) {
-                                            sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
+                                        sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
                                         // }
 
-                                        synthesizer.play(sample, hz, msg.param1 / 127 * 1 * (controller.tracks[msg.track].volume / 127));
+                                        let pan = (instrument.pan[index] + controller.tracks[msg.track].pan) / 256;
+
+                                        let track = controller.tracks[msg.track];
+                                        synthesizer.play(sample, hz, msg.param1 / 127 * 1 * (track.volume / 127), pan);
                                         break;
                                     }
                             }
@@ -1522,6 +1557,17 @@
                         let instrument = new InstrumentRecord();
                         instrument.fRecord = fRecord;
 
+                        function readRecordData(index, offset) {
+                            instrument.swavInfoId[index] = read16LE(bankFile, recordOffset + 0x0 + offset);
+                            instrument.swarInfoId[index] = read16LE(bankFile, recordOffset + 0x2 + offset);
+                            instrument.noteNumber[index] = bankFile[recordOffset + 0x4 + offset];
+                            instrument.attack[index] = bankFile[recordOffset + 0x5 + offset];
+                            instrument.decay[index] = bankFile[recordOffset + 0x6 + offset];
+                            instrument.sustain[index] = bankFile[recordOffset + 0x7 + offset];
+                            instrument.release[index] = bankFile[recordOffset + 0x8 + offset];
+                            instrument.pan[index] = bankFile[recordOffset + 0x9 + offset];
+                        }
+
                         switch (fRecord) {
                             case 0: // Empty
                                 break;
@@ -1529,14 +1575,7 @@
                             case InstrumentType.SingleSample: // Sample
                             case InstrumentType.PsgPulse: // PSG Pulse
                             case InstrumentType.PsgNoise: // PSG Noise
-                                instrument.swavInfoId[0] = read16LE(bankFile, recordOffset + 0x0);
-                                instrument.swarInfoId[0] = read16LE(bankFile, recordOffset + 0x2);
-                                instrument.noteNumber[0] = bankFile[recordOffset + 0x4];
-                                instrument.attack[0] = bankFile[recordOffset + 0x5];
-                                instrument.decay[0] = bankFile[recordOffset + 0x6];
-                                instrument.sustain[0] = bankFile[recordOffset + 0x7];
-                                instrument.release[0] = bankFile[recordOffset + 0x8];
-                                instrument.pan[0] = bankFile[recordOffset + 0x9];
+                                readRecordData(0, 0);
                                 break;
 
                             case InstrumentType.Drumset: // Drumset 
@@ -1547,14 +1586,7 @@
                                     instrument.upperNote = bankFile[recordOffset + 1];
 
                                     for (let k = 0; k < instrumentCount; k++) {
-                                        instrument.swavInfoId[k] = read16LE(bankFile, recordOffset + 4 + k * 12 + 0x0);
-                                        instrument.swarInfoId[k] = read16LE(bankFile, recordOffset + 4 + k * 12 + 0x2);
-                                        instrument.noteNumber[k] = bankFile[recordOffset + 4 + k * 12 + 0x4];
-                                        instrument.attack[k] = bankFile[recordOffset + 4 + k * 12 + 0x5];
-                                        instrument.decay[k] = bankFile[recordOffset + 4 + k * 12 + 0x6];
-                                        instrument.sustain[k] = bankFile[recordOffset + 4 + k * 12 + 0x7];
-                                        instrument.release[k] = bankFile[recordOffset + 4 + k * 12 + 0x8];
-                                        instrument.pan[k] = bankFile[recordOffset + 4 + k * 12 + 0x9];
+                                        readRecordData(k, 4 + k * 12);
                                     }
                                     break;
                                 }
@@ -1571,14 +1603,7 @@
                                     }
 
                                     for (let k = 0; k < instrumentCount; k++) {
-                                        instrument.swavInfoId[k] = read16LE(bankFile, recordOffset + 10 + k * 12 + 0x0);
-                                        instrument.swarInfoId[k] = read16LE(bankFile, recordOffset + 10 + k * 12 + 0x2);
-                                        instrument.noteNumber[k] = bankFile[recordOffset + 10 + k * 12 + 0x4];
-                                        instrument.attack[k] = bankFile[recordOffset + 10 + k * 12 + 0x5];
-                                        instrument.decay[k] = bankFile[recordOffset + 10 + k * 12 + 0x6];
-                                        instrument.sustain[k] = bankFile[recordOffset + 10 + k * 12 + 0x7];
-                                        instrument.release[k] = bankFile[recordOffset + 10 + k * 12 + 0x8];
-                                        instrument.pan[k] = bankFile[recordOffset + 10 + k * 12 + 0x9];
+                                        readRecordData(k, 10 + k * 12);
                                     }
                                     break;
                                 }
@@ -1734,7 +1759,7 @@
                         if (read32LE(sdat.fat[i], 0) == 0x4D525453) {
                             console.log(`file id:${i} is STRM`);
 
-                            playStrm(sdat.fat[i]);
+                            // playStrm(sdat.fat[i]);
                         }
                     }
 
