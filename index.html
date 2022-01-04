@@ -61,6 +61,140 @@
 
     <script>
         //@ts-check
+        class WavDownloader {
+            constructor(sampleRate, bits) {
+                this.sampleRate = sampleRate;
+                this.bits = bits;
+
+                if (bits % 8 != 0) {
+                    alert("WavDownloader.constructor: bits not multiple of 8:" + bits)
+                }
+            }
+
+            recordBuffer = new Uint8ClampedArray(32);
+            recordBufferAt = 0;
+            addSamples(left, right, size) {
+                for (let i = 0; i < size; i++) {
+                    this.addSample(left[i], right[i]);
+                }
+            }
+
+            addSample(left, right) {
+                // This is literally a C++ vector. In freaking TypeScript.
+                // I need to reevaluate my life choices.
+                if (this.recordBufferAt + 16 > this.recordBuffer.length) {
+                    const oldBuf = this.recordBuffer;
+                    this.recordBuffer = new Uint8ClampedArray(this.recordBufferAt * 2);
+                    this.recordBuffer.set(oldBuf);
+                }
+
+                switch (this.bits) {
+                    case 8:
+                        this.recordBuffer[this.recordBufferAt++] = clamp(Math.round(((left + 1) / 2) * 255), 0, 255);
+                        this.recordBuffer[this.recordBufferAt++] = clamp(Math.round(((right + 1) / 2) * 255), 0, 255);
+                        break;
+                    case 16:
+                        const out0_16bit = clamp(Math.round(left * 32767), -32768, 32767);
+                        const out1_16bit = clamp(Math.round(right * 32767), -32768, 32767);
+                        this.recordBuffer[this.recordBufferAt++] = out0_16bit & 0xFF;
+                        this.recordBuffer[this.recordBufferAt++] = (out0_16bit >> 8) & 0xFF;
+                        this.recordBuffer[this.recordBufferAt++] = out1_16bit & 0xFF;
+                        this.recordBuffer[this.recordBufferAt++] = (out1_16bit >> 8) & 0xFF;
+                        break;
+                }
+
+            }
+
+            download(name) {
+                // Allocate exactly enough for a WAV header
+                const wave = new Uint8Array(this.recordBufferAt + 44);
+
+                // RIFF header
+                wave[0] = 0x52;
+                wave[1] = 0x49;
+                wave[2] = 0x46;
+                wave[3] = 0x46;
+
+                const size = wave.length - 8;
+                wave[4] = (size >> 0) & 0xFF;
+                wave[5] = (size >> 8) & 0xFF;
+                wave[6] = (size >> 16) & 0xFF;
+                wave[7] = (size >> 24) & 0xFF;
+
+                // WAVE
+                wave[8] = 0x57;
+                wave[9] = 0x41;
+                wave[10] = 0x56;
+                wave[11] = 0x45;
+
+                // Subchunk1ID "fmt "
+                wave[12] = 0x66;
+                wave[13] = 0x6d;
+                wave[14] = 0x74;
+                wave[15] = 0x20;
+
+                // Subchunk1Size
+                wave[16] = 16;
+                wave[17] = 0;
+                wave[18] = 0;
+                wave[19] = 0;
+
+                // AudioFormat
+                wave[20] = 1;
+                wave[21] = 0;
+
+                // 2 channels
+                wave[22] = 2;
+                wave[23] = 0;
+
+                // Sample rate
+                wave[24] = (this.sampleRate >> 0) & 0xFF;
+                wave[25] = (this.sampleRate >> 8) & 0xFF;
+                wave[26] = (this.sampleRate >> 16) & 0xFF;
+                wave[27] = (this.sampleRate >> 24) & 0xFF;
+
+                // ByteRate
+                // SampleRate & NumChannels * BitsPerSample/8
+                const byteRate = this.sampleRate * 2 * (this.bits / 8);
+                wave[28] = (byteRate >> 0) & 0xFF;
+                wave[29] = (byteRate >> 8) & 0xFF;
+                wave[30] = (byteRate >> 16) & 0xFF;
+                wave[31] = (byteRate >> 24) & 0xFF;
+
+                // BlockAlign
+                // NumChannels * BitsPerSample / 8
+                const blockAlign = 2 * (this.bits / 8);
+                wave[32] = (blockAlign >> 0) & 0xFF;
+                wave[33] = (blockAlign >> 8) & 0xFF;
+
+                // BitsPerSample
+                wave[34] = this.bits;
+                wave[35] = 0;
+
+                // Subchunk2ID "data"
+                wave[36] = 0x64;
+                wave[37] = 0x61;
+                wave[38] = 0x74;
+                wave[39] = 0x61;
+
+                // NumSamples * NumChannels * BitsPerSample/8
+                const subchunk2Size = this.recordBufferAt * 2 * (this.bits / 8);
+                wave[40] = (subchunk2Size >> 0) & 0xFF;
+                wave[41] = (subchunk2Size >> 8) & 0xFF;
+                wave[42] = (subchunk2Size >> 16) & 0xFF;
+                wave[43] = (subchunk2Size >> 24) & 0xFF;
+
+                for (let i = 0; i < this.recordBufferAt; i++) {
+                    wave[44 + i] = this.recordBuffer[i];
+                }
+
+                let blob = new Blob([wave], { type: "application/octet-stream" });
+                let link = document.createElement('a');
+                link.href = window.URL.createObjectURL(blob);
+                link.download = name;
+                link.click();
+            }
+        }
 
         class AudioPlayer {
             bufferLength;
@@ -329,6 +463,7 @@
             PlayNote: 0, // P0: MIDI Note P1: Velocity
             InstrumentChange: 1, // P0: Bank P1: Program
             Jump: 2,
+            TrackEnded: 3
         }
 
         class PsgSquareInstrument {
@@ -519,6 +654,7 @@
                 }
 
                 this.tracks[0].active = true;
+                this.tracks[0].bpm = 120;
 
                 this.destroyed = false;
 
@@ -824,6 +960,7 @@
                         case 0xFF: // End of Track
                             {
                                 this.controller.endTrack(this.id);
+                                this.sendMessage(MessageType.TrackEnded);
                                 // Set restingFor to non-zero since the controller checks it to stop executing
                                 this.restingFor = 1;
                                 break;
@@ -919,6 +1056,8 @@
             return (i & (1 << bit)) !== 0;
         }
 
+        // let 
+
         /** @type {SseqController} */
         let currentlyPlaying = null;
         /** @type {AudioPlayer} */
@@ -980,7 +1119,6 @@
 
 
             let timer = 0;
-            controller.tick();
             function synthesizeMore() {
                 for (let i = 0; i < BUFFER_SIZE; i++) {
                     timer += controller.tracks[0].bpm * 100;
@@ -1052,6 +1190,174 @@
             let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
             currentPlayer = player;
             synthesizeMore();
+        }
+
+
+        /**
+        * @param {Sdat} sdat
+        * @param {string} name
+        */
+        async function renderAndDownloadSeq(sdat, name) {
+            const SAMPLE_RATE = 32768;
+
+            let synthesizer = new Synthesizer(SAMPLE_RATE, 32);
+
+            let id = sdat.sseqNameIdDict[name];
+            let info = sdat.sseqInfos[id];
+            let bankInfo = sdat.sbnkInfos[info.bank];
+            let bank = sdat.banks[info.bank];
+
+            console.log("Rendering SSEQ Id:" + id);
+            // console.log("FAT ID:" + info.fileId);
+
+            let file = sdat.fat[info.fileId];
+            let bufferL = [];
+            let bufferR = [];
+
+            let inBufferPos = 0;
+
+            let dataOffset = read32LE(file, 0x18);
+            if (dataOffset != 0x1C) alert("SSEQ offset is not 0x1C? it is: " + hex(dataOffset, 8));
+
+            let messageBuffer = new CircularBuffer(1024);
+            let controller = new SseqController(file, dataOffset, messageBuffer);
+
+            let loop = 0;
+            let sample = 0;
+            let fadingOut = false;
+            let fadeoutStartSample = 0;
+
+            let synthtestSample = decodeWavToSample(await downloadFileFromUrl("synthtest-amp.wav"), 440 * 2 ** ((9) / 12));
+            let synthtest2Sample = decodeWavToSample(await downloadFileFromUrl("synthtest2-amp.wav"), 440 * 2 ** ((3 - 24) / 12));
+
+            let timer = 0;
+            let playing = true;
+            let fadeoutLength = 10; // in seconds 
+            
+            // keep it under 480 seconds
+            while (playing && bufferL.length < SAMPLE_RATE * 480) {
+                timer += controller.tracks[0].bpm * 100;
+                while (timer >= SAMPLE_RATE) {
+                    timer -= SAMPLE_RATE;
+
+                    // 48 ticks per beat
+                    controller.tick();
+
+                    let jumpsThisTick = 0;
+
+                    while (messageBuffer.entries > 0) {
+                        /** @type {Message} */
+                        let msg = messageBuffer.pop();
+
+                        switch (msg.type) {
+                            case MessageType.PlayNote:
+                                if (enabledTrack[msg.track]) {
+                                    let midiNote = msg.param0;
+                                    let hz = 440 * 2 ** ((midiNote - 69) / 12);
+
+                                    // The archive ID inside each instrument record inside each SBNK file
+                                    // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
+
+                                    let instrument = bank.instruments[controller.tracks[msg.track].program];
+
+                                    let index = instrument.resolveEntryIndex(midiNote);
+                                    let archiveId = instrument.swarInfoId[index];
+                                    let sampleId = instrument.swavInfoId[index];
+
+                                    let archive = sdat.sampleArchives[bankInfo.swarId[archiveId]];
+                                    let sample = archive[sampleId];
+
+                                    // if (instrument.fRecord != InstrumentType.Drumset) {
+                                    sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
+                                    // }
+
+                                    // switch (msg.track) {
+                                    //     case 9:
+                                    //     case 12:
+                                    //     case 13:
+                                    //         break;
+
+                                    //     default:
+                                    //         sample = synthtestSample
+                                    //         break;
+
+                                    //     case 0:
+                                    //         msg.param1 *= 2;
+                                    //         sample = synthtest2Sample;
+                                    //         break;
+                                    // }
+
+                                    let pan = (instrument.pan[index] + controller.tracks[msg.track].pan) / 256;
+
+                                    let track = controller.tracks[msg.track];
+                                    synthesizer.play(sample, hz, msg.param1 / 127 * 1 * (track.volume / 127), pan);
+                                }
+                                break;
+                            case MessageType.Jump: {
+                                jumpsThisTick++;
+                                break;
+                            }
+                            case MessageType.TrackEnded: {
+                                let tracksActive = 0;
+                                for (let i = 0; i < 16; i++) {
+                                    if (controller.tracks[i].active) {
+                                        tracksActive++;
+                                    }
+                                }
+
+                                if (tracksActive == 0) {
+                                    fadeoutStartSample = sample + SAMPLE_RATE * 2;
+                                    console.log("All tracks ended, starting fadeout at sample: " + fadeoutStartSample);
+                                    fadingOut = true;
+                                    fadeoutLength = .1;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    if (jumpsThisTick > 0) {
+                        jumpsThisTick = 0;
+                        loop++;
+
+                        if (loop == 2) {
+                            console.log("2nd loop ended, starting fadeout at sample: " + sample);
+                            fadeoutStartSample = sample;
+                            fadingOut = true;
+
+                            break;
+                        }
+                    }
+                }
+
+                let fadeoutVolMul = 1;
+
+                if (fadingOut) {
+                    let fadeoutSample = sample - fadeoutStartSample;
+                    if (fadeoutSample >= 0) {
+                        let fadeoutTime = fadeoutSample / SAMPLE_RATE;
+
+                        let ratio = fadeoutTime / fadeoutLength;
+
+                        fadeoutVolMul = 1 - ratio;
+
+                        if (fadeoutVolMul <= 0) {
+                            playing = false;
+                        }
+                    }
+                }
+
+                synthesizer.nextSample();
+                bufferL.push(synthesizer.valL * 0.5 * fadeoutVolMul);
+                bufferR.push(synthesizer.valR * 0.5 * fadeoutVolMul);
+
+                sample++;
+            }
+
+            // console.log(bufferL)
+            let downloader = new WavDownloader(SAMPLE_RATE, 16);
+            downloader.addSamples(bufferL, bufferR, sample);
+            downloader.download(name + ".wav");
         }
 
         function clamp(val, min, max) {
@@ -1747,9 +2053,13 @@
                             button.innerText = `ID: ${i} ${seqName}`;
                             button.style.textAlign = 'left';
                             document.querySelector(".song-picker").appendChild(button);
-                            button.onclick = () => {
+                            button.onclick = e => {
                                 console.log(seqName);
-                                playSeq(sdat, seqName);
+                                if (!e.shiftKey) {
+                                    playSeq(sdat, seqName);
+                                } else {
+                                    renderAndDownloadSeq(sdat, seqName);
+                                }
                             }
                         }
                     }
