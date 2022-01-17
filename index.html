@@ -300,6 +300,14 @@
                 this.audioSec += this.bufferLength / this.sampleRate;
 
                 this.sourcesPlaying++;
+
+                // prevent dropouts when starting synthesis
+                if (this.sourcesPlaying < 6) {
+                    this.needMoreSamples();
+                }
+                if (this.sourcesPlaying < 5) {
+                    this.needMoreSamples();
+                }
             }
 
             audioSec = 0;
@@ -583,7 +591,7 @@
         class Bank {
             constructor() {
                 /** @type {InstrumentRecord[]} */
-                this.instruments = new Array(128);
+                this.instruments = [];
             }
         }
 
@@ -659,10 +667,6 @@
                 this.destroyed = false;
 
                 this.ticksElapsed = 0;
-            }
-
-            destroy() {
-                this.destroyed = true;
             }
 
             tick() {
@@ -811,7 +815,7 @@
 
                                 this.controller.startTrack(trackNum, trackOffs);
 
-                                this.debugLog("Started track thread " + trackNum);
+                                this.debugLogForce("Started track thread " + trackNum);
                                 this.debugLog("Offset: " + hex(trackOffs, 6));
 
                                 break;
@@ -1052,13 +1056,137 @@
             }
         }
 
+        class ControllerBridge {
+            constructor(sampleRate, sdat, id) {
+                let info = sdat.sseqInfos[id];
+                this.bankInfo = sdat.sbnkInfos[info.bank];
+                this.bank = sdat.banks[info.bank];
+
+                console.log("Playing SSEQ Id:" + id);
+                console.log("FAT ID:" + info.fileId);
+
+                console.log(`Linked archives: ${this.bankInfo.swarId[0]} ${this.bankInfo.swarId[1]} ${this.bankInfo.swarId[2]} ${this.bankInfo.swarId[3]}`);
+                let file = sdat.fat[info.fileId];
+
+                for (let i = 0; i < this.bank.instruments.length; i++) {
+                    let instrument = this.bank.instruments[i];
+                    let typeString = "";
+                    switch (instrument.fRecord) {
+                        case InstrumentType.Drumset:
+                            typeString = "Drumset";
+                            break;
+                        case InstrumentType.MultiSample:
+                            typeString = "Multi-Sample Instrument";
+                            break;
+                        case InstrumentType.PsgNoise:
+                            typeString = "PSG Noise";
+                            break;
+                        case InstrumentType.PsgPulse:
+                            typeString = "PSG Pulse";
+                            break;
+                        case InstrumentType.SingleSample:
+                            typeString = "Single-Sample Instrument";
+                            break;
+
+                    }
+
+                    if (instrument.fRecord != 0) {
+                        console.log(`Program ${i}: ${typeString}\nLinked archive ${instrument.swarInfoId[0]} Sample ${instrument.swavInfoId[0]}`);
+                    }
+                }
+
+                let dataOffset = read32LE(file, 0x18);
+                if (dataOffset != 0x1C) alert("SSEQ offset is not 0x1C? it is: " + hex(dataOffset, 8));
+
+                this.sdat = sdat;
+                this.messageBuffer = new CircularBuffer(1024);
+                this.controller = new SseqController(file, dataOffset, this.messageBuffer);
+                this.synthesizer = new Synthesizer(sampleRate, 32);
+                this.destroyed = false;
+
+                this.jumps = 0;
+                this.fadingStart = false;
+
+                this.loop = 0;
+            }
+
+            tick() {
+                // 48 ticks per beat
+                this.controller.tick();
+
+                while (this.messageBuffer.entries > 0) {
+                    /** @type {Message} */
+                    let msg = this.messageBuffer.pop();
+
+                    switch (msg.type) {
+                        case MessageType.PlayNote:
+                            if (enabledTrack[msg.track]) {
+                                let midiNote = msg.param0;
+                                let hz = 440 * 2 ** ((midiNote - 69) / 12);
+
+                                // The archive ID inside each instrument record inside each SBNK file
+                                // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
+
+                                let instrument = this.bank.instruments[this.controller.tracks[msg.track].program];
+
+                                let index = instrument.resolveEntryIndex(midiNote);
+                                let archiveId = instrument.swarInfoId[index];
+                                let sampleId = instrument.swavInfoId[index];
+
+                                let archive = this.sdat.sampleArchives[this.bankInfo.swarId[archiveId]];
+                                let sample = archive[sampleId];
+
+                                // if (instrument.fRecord != InstrumentType.Drumset) {
+                                sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
+                                // }
+
+                                let pan = (instrument.pan[index] + this.controller.tracks[msg.track].pan) / 256;
+
+                                let track = this.controller.tracks[msg.track];
+                                this.synthesizer.play(sample, hz, msg.param1 / 127 * 1 * (track.volume / 127), pan);
+                                break;
+                            }
+                        case MessageType.Jump: {
+                            this.jumps++;
+                            if (this.jumps > 0) {
+                                this.jumps = 0;
+                                this.loop++;
+
+                                if (this.loop == 2) {
+                                    this.fadingStart = true;
+                                }
+                            }
+                            break;
+                        }
+                        case MessageType.TrackEnded: {
+                            let tracksActive = 0;
+                            for (let i = 0; i < 16; i++) {
+                                if (this.controller.tracks[i].active) {
+                                    tracksActive++;
+                                }
+                            }
+
+                            if (tracksActive == 0) {
+                                this.fadingStart = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
+            destroy() {
+                this.destroyed = true;
+            }
+        }
+
         function bitTest(i, bit) {
             return (i & (1 << bit)) !== 0;
         }
 
         // let 
 
-        /** @type {SseqController} */
+        /** @type {ControllerBridge} */
         let currentlyPlaying = null;
         /** @type {AudioPlayer} */
         let currentPlayer = null;
@@ -1079,23 +1207,12 @@
             const BUFFER_SIZE = 512;
             const SAMPLE_RATE = 32768;
 
-            let sampleFrequency = 440 * 2 ** ((9 - 12) / 12);
-            let synthtestSample = decodeWavToSample(await downloadFileFromUrl("synthtest.wav"), sampleFrequency);
-            let emptySample = new Sample(new Float64Array(1), 440, SAMPLE_RATE, 0)
-            let synthesizer = new Synthesizer(SAMPLE_RATE, 32);
-
             let id = sdat.sseqNameIdDict[name];
-            let info = sdat.sseqInfos[id];
-            let bankInfo = sdat.sbnkInfos[info.bank];
-            let bank = sdat.banks[info.bank];
 
-            console.log("Playing SSEQ Id:" + id);
-            console.log("FAT ID:" + info.fileId);
-
-            let file = sdat.fat[info.fileId];
             let bufferL = new Float32Array(BUFFER_SIZE);
             let bufferR = new Float32Array(BUFFER_SIZE);
 
+            let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
             let inBufferPos = 0;
 
             // // debugging hexdump
@@ -1108,77 +1225,30 @@
             //     }
             //     console.log(str);
             // }
-            // console.log(String.fromCharCode(file[0], file[1], file[2], file[3]))
-
-            let dataOffset = read32LE(file, 0x18);
-            if (dataOffset != 0x1C) alert("SSEQ offset is not 0x1C? it is: " + hex(dataOffset, 8));
-
-            let messageBuffer = new CircularBuffer(1024);
-            let controller = new SseqController(file, dataOffset, messageBuffer);
-            currentlyPlaying = controller;
-
+            currentlyPlaying = bridge;
 
             let timer = 0;
             function synthesizeMore() {
                 for (let i = 0; i < BUFFER_SIZE; i++) {
-                    timer += controller.tracks[0].bpm * 100;
+                    timer += bridge.controller.tracks[0].bpm * 100;
                     while (timer >= SAMPLE_RATE) {
                         timer -= SAMPLE_RATE;
 
-                        // 48 ticks per beat
-                        controller.tick();
-
-                        while (messageBuffer.entries > 0) {
-                            /** @type {Message} */
-                            let msg = messageBuffer.pop();
-
-                            switch (msg.type) {
-                                case MessageType.PlayNote:
-                                    if (enabledTrack[msg.track]) {
-                                        let midiNote = msg.param0;
-                                        let hz = 440 * 2 ** ((midiNote - 69) / 12);
-
-                                        // The archive ID inside each instrument record inside each SBNK file
-                                        // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
-
-                                        let instrument = bank.instruments[controller.tracks[msg.track].program];
-
-                                        let index = instrument.resolveEntryIndex(midiNote);
-                                        let archiveId = instrument.swarInfoId[index];
-                                        let sampleId = instrument.swavInfoId[index];
-
-                                        let archive = sdat.sampleArchives[bankInfo.swarId[archiveId]];
-                                        let sample = archive[sampleId];
-
-                                        // if (instrument.fRecord != InstrumentType.Drumset) {
-                                        sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
-                                        // }
-
-                                        let pan = (instrument.pan[index] + controller.tracks[msg.track].pan) / 256;
-
-                                        let track = controller.tracks[msg.track];
-                                        synthesizer.play(sample, hz, msg.param1 / 127 * 1 * (track.volume / 127), pan);
-                                        break;
-                                    }
-                            }
-                        }
-
+                        bridge.tick();
                     }
 
                     // synthesizer.play(440);
 
-                    synthesizer.nextSample();
-                    bufferL[i] = synthesizer.valL;
-                    bufferR[i] = synthesizer.valR;
+                    bridge.synthesizer.nextSample();
+                    bufferL[i] = bridge.synthesizer.valL;
+                    bufferR[i] = bridge.synthesizer.valR;
 
-                    if (controller.destroyed) {
+                    if (bridge.controller.destroyed) {
                         return;
                     }
                 }
 
                 // synthesizer.play(Math.random() * 880);
-                // synthesizer.play(Math.random() * 880);
-
 
                 // console.log(inBufferPos);
 
@@ -1200,29 +1270,18 @@
         async function renderAndDownloadSeq(sdat, name) {
             const SAMPLE_RATE = 32768;
 
-            let synthesizer = new Synthesizer(SAMPLE_RATE, 32);
-
             let id = sdat.sseqNameIdDict[name];
-            let info = sdat.sseqInfos[id];
-            let bankInfo = sdat.sbnkInfos[info.bank];
-            let bank = sdat.banks[info.bank];
+
+            let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
 
             console.log("Rendering SSEQ Id:" + id);
             // console.log("FAT ID:" + info.fileId);
 
-            let file = sdat.fat[info.fileId];
             let bufferL = [];
             let bufferR = [];
 
             let inBufferPos = 0;
 
-            let dataOffset = read32LE(file, 0x18);
-            if (dataOffset != 0x1C) alert("SSEQ offset is not 0x1C? it is: " + hex(dataOffset, 8));
-
-            let messageBuffer = new CircularBuffer(1024);
-            let controller = new SseqController(file, dataOffset, messageBuffer);
-
-            let loop = 0;
             let sample = 0;
             let fadingOut = false;
             let fadeoutStartSample = 0;
@@ -1233,101 +1292,22 @@
             let timer = 0;
             let playing = true;
             let fadeoutLength = 10; // in seconds 
-            
+
             // keep it under 480 seconds
             while (playing && bufferL.length < SAMPLE_RATE * 480) {
-                timer += controller.tracks[0].bpm * 100;
+                timer += bridge.controller.tracks[0].bpm * 100;
                 while (timer >= SAMPLE_RATE) {
                     timer -= SAMPLE_RATE;
 
-                    // 48 ticks per beat
-                    controller.tick();
+                    bridge.tick();
+                }
 
-                    let jumpsThisTick = 0;
 
-                    while (messageBuffer.entries > 0) {
-                        /** @type {Message} */
-                        let msg = messageBuffer.pop();
-
-                        switch (msg.type) {
-                            case MessageType.PlayNote:
-                                if (enabledTrack[msg.track]) {
-                                    let midiNote = msg.param0;
-                                    let hz = 440 * 2 ** ((midiNote - 69) / 12);
-
-                                    // The archive ID inside each instrument record inside each SBNK file
-                                    // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
-
-                                    let instrument = bank.instruments[controller.tracks[msg.track].program];
-
-                                    let index = instrument.resolveEntryIndex(midiNote);
-                                    let archiveId = instrument.swarInfoId[index];
-                                    let sampleId = instrument.swavInfoId[index];
-
-                                    let archive = sdat.sampleArchives[bankInfo.swarId[archiveId]];
-                                    let sample = archive[sampleId];
-
-                                    // if (instrument.fRecord != InstrumentType.Drumset) {
-                                    sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
-                                    // }
-
-                                    // switch (msg.track) {
-                                    //     case 9:
-                                    //     case 12:
-                                    //     case 13:
-                                    //         break;
-
-                                    //     default:
-                                    //         sample = synthtestSample
-                                    //         break;
-
-                                    //     case 0:
-                                    //         msg.param1 *= 2;
-                                    //         sample = synthtest2Sample;
-                                    //         break;
-                                    // }
-
-                                    let pan = (instrument.pan[index] + controller.tracks[msg.track].pan) / 256;
-
-                                    let track = controller.tracks[msg.track];
-                                    synthesizer.play(sample, hz, msg.param1 / 127 * 1 * (track.volume / 127), pan);
-                                }
-                                break;
-                            case MessageType.Jump: {
-                                jumpsThisTick++;
-                                break;
-                            }
-                            case MessageType.TrackEnded: {
-                                let tracksActive = 0;
-                                for (let i = 0; i < 16; i++) {
-                                    if (controller.tracks[i].active) {
-                                        tracksActive++;
-                                    }
-                                }
-
-                                if (tracksActive == 0) {
-                                    fadeoutStartSample = sample + SAMPLE_RATE * 2;
-                                    console.log("All tracks ended, starting fadeout at sample: " + fadeoutStartSample);
-                                    fadingOut = true;
-                                    fadeoutLength = .1;
-                                }
-                                break;
-                            }
-                        }
-                    }
-
-                    if (jumpsThisTick > 0) {
-                        jumpsThisTick = 0;
-                        loop++;
-
-                        if (loop == 2) {
-                            console.log("2nd loop ended, starting fadeout at sample: " + sample);
-                            fadeoutStartSample = sample;
-                            fadingOut = true;
-
-                            break;
-                        }
-                    }
+                if (bridge.fadingStart) {
+                    bridge.fadingStart = false;
+                    fadingOut = true;
+                    fadeoutStartSample = sample + SAMPLE_RATE * 2;
+                    console.log("Starting fadeout at sample: " + fadeoutStartSample);
                 }
 
                 let fadeoutVolMul = 1;
@@ -1347,9 +1327,9 @@
                     }
                 }
 
-                synthesizer.nextSample();
-                bufferL.push(synthesizer.valL * 0.5 * fadeoutVolMul);
-                bufferR.push(synthesizer.valR * 0.5 * fadeoutVolMul);
+                bridge.synthesizer.nextSample();
+                bufferL.push(bridge.synthesizer.valL * 0.5 * fadeoutVolMul);
+                bufferR.push(bridge.synthesizer.valR * 0.5 * fadeoutVolMul);
 
                 sample++;
             }
