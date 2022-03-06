@@ -518,6 +518,9 @@
             * @param {Float64Array} data 
             * @param {number} frequency
             * @param {number} sampleRate
+            * @param {boolean} looping
+            * @param {number} loopPoint
+            *
             */
             constructor(data, frequency, sampleRate, looping, loopPoint) {
                 this.data = data;
@@ -615,7 +618,7 @@
 
                 this.pan = 0.5;
 
-                this.id = 0;
+                this.meta = 0;
             }
 
             changeSample(sample) {
@@ -631,7 +634,7 @@
                     let sampleNoIntro = sampleSample - this.sample.loopPoint;
                     let loopLength = this.sample.data.length - this.sample.loopPoint;
                     sampleNoIntro %= loopLength;
-                    sampleSample = sampleNoIntro + this.sample.loopPoint; 
+                    sampleSample = sampleNoIntro + this.sample.loopPoint;
                 }
 
                 if (sampleSample >= 0 && sampleSample < this.sample.data.length) {
@@ -848,6 +851,7 @@
                             }
                         case 0xC1: // Volume
                             {
+                                // TODO: implement volume changes during notes to support crescendos/decrescendos
                                 this.volume = this.readPcInc();
                                 this.debugLog("Volume: " + this.volume);
                                 break;
@@ -1013,7 +1017,7 @@
 
                 this.playingIndex = 0;
 
-                let emptySample = new Sample(new Float64Array(1), 440, sampleRate, 0)
+                let emptySample = new Sample(new Float64Array(1), 440, sampleRate, false, 0)
 
                 for (let i = 0; i < this.instrs.length; i++) {
                     this.instrs[i] = new SampleInstrument(this.sampleRate, emptySample);
@@ -1025,14 +1029,14 @@
              * @param {number} frequency
              * @param {number} volume
              * @param {number} pan
-             * @param {number} id
+             * @param {number} meta
              */
-            play(sample, frequency, volume, pan, id) {
+            play(sample, frequency, volume, pan, meta) {
                 this.instrs[this.playingIndex].pan = pan;
                 this.instrs[this.playingIndex].sample = sample;
                 this.instrs[this.playingIndex].frequency = frequency;
                 this.instrs[this.playingIndex].volume = volume;
-                this.instrs[this.playingIndex].id = id;
+                this.instrs[this.playingIndex].meta = meta;
                 this.instrs[this.playingIndex].playing = true;
                 this.instrsStartSample[this.playingIndex] = this.sampleNum;
 
@@ -1208,6 +1212,9 @@
             }
         }
 
+        // TODO: Write a square synthesizer
+        let square50 = new Sample(new Float64Array([-0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0);
+
         class ControllerBridge {
             constructor(sampleRate, sdat, id) {
                 let info = sdat.sseqInfos[id];
@@ -1253,7 +1260,7 @@
                 this.sdat = sdat;
                 this.messageBuffer = new CircularBuffer(1024);
                 this.controller = new SseqController(file, dataOffset, this.messageBuffer);
-                this.synthesizer = new Synthesizer(sampleRate, 32);
+                this.synthesizer = new Synthesizer(sampleRate, 256);
                 this.destroyed = false;
 
                 this.jumps = 0;
@@ -1272,7 +1279,7 @@
                     let entry = this.noteCutTimes.popFirstEntry();
 
                     let instr = this.synthesizer.instrs[entry.data.synthInstrIndex];
-                    if (instr.id == entry.data.startTime) {
+                    if (instr.meta == entry.data.startTime) {
                         this.synthesizer.cutInstrument(entry.data.synthInstrIndex);
                     }
                 }
@@ -1299,19 +1306,22 @@
                                 let archiveId = instrument.swarInfoId[index];
                                 let sampleId = instrument.swavInfoId[index];
 
+
                                 let archive = this.sdat.sampleArchives[this.bankInfo.swarId[archiveId]];
                                 let sample = archive[sampleId];
 
-                                // if (instrument.fRecord != InstrumentType.Drumset) {
-                                sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
-                                // }
+                                if (instrument.fRecord == InstrumentType.PsgPulse) {
+                                    sample = square50;
+                                } else {
+                                    sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
+                                }
 
                                 let pan = (instrument.pan[index] + this.controller.tracks[msg.track].pan) / 256;
 
                                 let track = this.controller.tracks[msg.track];
                                 let synthInstrIndex = this.synthesizer.play(sample, hz, noteVolume / 127 * 1 * (track.volume / 127), pan, this.controller.ticksElapsed);
 
-                                this.noteCutTimes.addEntry({synthInstrIndex: synthInstrIndex, startTime: this.controller.ticksElapsed}, this.controller.ticksElapsed + duration);
+                                this.noteCutTimes.addEntry({ synthInstrIndex: synthInstrIndex, startTime: this.controller.ticksElapsed }, this.controller.ticksElapsed + duration);
                                 break;
                             }
                         case MessageType.Jump: {
@@ -1616,7 +1626,7 @@
                 }
             }
 
-            return new Sample(Float64Array.from(sampleData), sampleFrequency, sampleRate);
+            return new Sample(Float64Array.from(sampleData), sampleFrequency, sampleRate, false, 0);
         }
 
         function playStrm(strmData) {
