@@ -468,7 +468,7 @@
         }
 
         const MessageType = {
-            PlayNote: 0, // P0: MIDI Note P1: Velocity
+            PlayNote: 0, // P0: MIDI Note P1: Velocity P2: Duration
             InstrumentChange: 1, // P0: Bank P1: Program
             Jump: 2,
             TrackEnded: 3
@@ -614,6 +614,8 @@
                 this.playing = false;
 
                 this.pan = 0.5;
+
+                this.id = 0;
             }
 
             changeSample(sample) {
@@ -625,12 +627,12 @@
                 let t = sample / this.sampleRate * ratio;
                 let sampleSample = Math.round(t * this.sample.sampleRate);
 
-                // if (sampleSample >= this.sample.data.length && this.sample.looping) {
-                //     let sampleNoIntro = sampleSample - this.sample.loopPoint;
-                //     let loopLength = this.sample.data.length - this.sample.loopPoint;
-                //     sampleNoIntro %= loopLength;
-                //     sampleSample = sampleNoIntro + this.sample.loopPoint; 
-                // }
+                if (sampleSample >= this.sample.data.length && this.sample.looping) {
+                    let sampleNoIntro = sampleSample - this.sample.loopPoint;
+                    let loopLength = this.sample.data.length - this.sample.loopPoint;
+                    sampleNoIntro %= loopLength;
+                    sampleSample = sampleNoIntro + this.sample.loopPoint; 
+                }
 
                 if (sampleSample >= 0 && sampleSample < this.sample.data.length) {
                     this.valL = this.sample.data[sampleSample] * this.volume * (1 - this.pan);
@@ -1023,17 +1025,27 @@
              * @param {number} frequency
              * @param {number} volume
              * @param {number} pan
+             * @param {number} id
              */
-            play(sample, frequency, volume, pan) {
+            play(sample, frequency, volume, pan, id) {
                 this.instrs[this.playingIndex].pan = pan;
                 this.instrs[this.playingIndex].sample = sample;
-                this.instrs[this.playingIndex].playing = true;
                 this.instrs[this.playingIndex].frequency = frequency;
                 this.instrs[this.playingIndex].volume = volume;
+                this.instrs[this.playingIndex].id = id;
+                this.instrs[this.playingIndex].playing = true;
                 this.instrsStartSample[this.playingIndex] = this.sampleNum;
+
+                let currentIndex = this.playingIndex;
 
                 this.playingIndex++;
                 this.playingIndex %= this.instrsAvailable;
+
+                return currentIndex;
+            }
+
+            cutInstrument(index) {
+                this.instrs[index].playing = false;
             }
 
             nextSample() {
@@ -1053,6 +1065,146 @@
 
             getTime() {
                 return this.sampleNum / this.sampleRate;
+            }
+        }
+
+        class MinHeapEntry {
+            data = null;
+            index = 0;
+            priority = 0;
+        }
+
+        class MinHeap {
+            static parent(n) { return (n - 1) >> 1; }
+            static leftChild(n) { return n * 2 + 1; }
+            static rightChild(n) { return n * 2 + 2; }
+
+            /** @param {number} size */
+            constructor(size) {
+                /** @type {MinHeapEntry[]} */
+                this.heap = new Array(size);
+
+                for (let i = 0; i < this.heap.length; i++) {
+                    this.heap[i] = new MinHeapEntry();
+                    this.heap[i].index = i;
+                }
+            }
+
+            heapEntries = 0;
+
+            static createEmptyEntry() {
+                return new MinHeapEntry();
+            }
+
+            addEntry(data, priority) {
+                if (this.heapEntries >= this.heap.length) {
+                    alert("Heap overflow!");
+                    return;
+                }
+
+                let index = this.heapEntries;
+                this.heapEntries++;
+                this.heap[index].data = data;
+                this.heap[index].priority = priority;
+                this.heap[index].index = index;
+
+                while (index != 0) {
+                    let parentIndex = MinHeap.parent(index);
+                    if (this.heap[parentIndex].priority > this.heap[index].priority) {
+                        this.swap(index, parentIndex);
+                        index = parentIndex;
+                    } else {
+                        break;
+                    }
+                }
+                this.updateNextEvent();
+            }
+
+            updateNextEvent() {
+                if (this.heapEntries > 0) {
+                    this.nextEventTicks = this.heap[0].priority;
+                }
+            }
+
+            getFirstEntry() {
+                if (this.heapEntries <= 0) {
+                    alert("Tried to get from empty heap!");
+                    return this.heap[0]; // This isn't supposed to happen.
+                }
+
+                return this.heap[0];
+            }
+
+            returnEvent = MinHeap.createEmptyEntry();
+
+            popFirstEntry() {
+                let event = this.getFirstEntry();
+
+                this.returnEvent.data = event.data;
+                this.returnEvent.priority = event.priority;
+                this.returnEvent.index = event.index;
+
+                if (this.heapEntries == 1) {
+                    this.heapEntries--;
+                    return this.returnEvent;
+                }
+
+                this.swap(0, this.heapEntries - 1);
+
+                this.heapEntries--;
+
+                // Satisfy the heap property again
+                let index = 0;
+                while (true) {
+                    let left = MinHeap.leftChild(index);
+                    let right = MinHeap.rightChild(index);
+                    let smallest = index;
+
+                    if (left < this.heapEntries && this.heap[left].priority < this.heap[index].priority) {
+                        smallest = left;
+                    }
+                    if (right < this.heapEntries && this.heap[right].priority < this.heap[smallest].priority) {
+                        smallest = right;
+                    }
+
+                    if (smallest != index) {
+                        this.swap(index, smallest);
+                        index = smallest;
+                    } else {
+                        break;
+                    }
+                }
+
+                this.updateNextEvent();
+                return this.returnEvent;
+            }
+
+            setPriorityLower(index, newVal) {
+                this.heap[index].priority = newVal;
+
+                while (index != 0) {
+                    let parentIndex = MinHeap.parent(index);
+                    if (this.heap[parentIndex].priority > this.heap[index].priority) {
+                        this.swap(index, parentIndex);
+                        index = parentIndex;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            deleteEvent(index) {
+                this.setPriorityLower(index, -9999);
+                this.popFirstEntry();
+            }
+
+            swap(ix, iy) {
+                // console.log(`Swapped ${ix} with ${iy}`);
+                let temp = this.heap[ix];
+                this.heap[ix] = this.heap[iy];
+                this.heap[ix].index = ix;
+                this.heap[iy] = temp;
+                this.heap[iy].index = iy;
             }
         }
 
@@ -1108,11 +1260,22 @@
                 this.fadingStart = false;
 
                 this.loop = 0;
+
+                this.noteCutTimes = new MinHeap(1024);
             }
 
             tick() {
                 // 48 ticks per beat
                 this.controller.tick();
+
+                while (this.noteCutTimes.heapEntries > 0 && this.noteCutTimes.getFirstEntry().priority < this.controller.ticksElapsed) {
+                    let entry = this.noteCutTimes.popFirstEntry();
+
+                    let instr = this.synthesizer.instrs[entry.data.synthInstrIndex];
+                    if (instr.id == entry.data.startTime) {
+                        this.synthesizer.cutInstrument(entry.data.synthInstrIndex);
+                    }
+                }
 
                 while (this.messageBuffer.entries > 0) {
                     /** @type {Message} */
@@ -1122,6 +1285,9 @@
                         case MessageType.PlayNote:
                             if (enabledTrack[msg.track]) {
                                 let midiNote = msg.param0;
+                                let noteVolume = msg.param1;
+                                let duration = msg.param2;
+
                                 let hz = 440 * 2 ** ((midiNote - 69) / 12);
 
                                 // The archive ID inside each instrument record inside each SBNK file
@@ -1143,7 +1309,9 @@
                                 let pan = (instrument.pan[index] + this.controller.tracks[msg.track].pan) / 256;
 
                                 let track = this.controller.tracks[msg.track];
-                                this.synthesizer.play(sample, hz, msg.param1 / 127 * 1 * (track.volume / 127), pan);
+                                let synthInstrIndex = this.synthesizer.play(sample, hz, noteVolume / 127 * 1 * (track.volume / 127), pan, this.controller.ticksElapsed);
+
+                                this.noteCutTimes.addEntry({synthInstrIndex: synthInstrIndex, startTime: this.controller.ticksElapsed}, this.controller.ticksElapsed + duration);
                                 break;
                             }
                         case MessageType.Jump: {
@@ -1230,7 +1398,7 @@
             let timer = 0;
             function synthesizeMore() {
                 for (let i = 0; i < BUFFER_SIZE; i++) {
-                    timer += bridge.controller.tracks[0].bpm * 100;
+                    timer += bridge.controller.tracks[0].bpm * 102;
                     while (timer >= SAMPLE_RATE) {
                         timer -= SAMPLE_RATE;
 
@@ -1295,7 +1463,7 @@
 
             // keep it under 480 seconds
             while (playing && bufferL.length < SAMPLE_RATE * 480) {
-                timer += bridge.controller.tracks[0].bpm * 100;
+                timer += bridge.controller.tracks[0].bpm * 102;
                 while (timer >= SAMPLE_RATE) {
                     timer -= SAMPLE_RATE;
 
@@ -1937,27 +2105,27 @@
                         }
 
                         let decoded;
-                        let loopLength = 0;
+                        let loopPoint = 0;
 
                         switch (wavType) {
                             case 0: // PCM8
-                                loopLength = swarLoopOffset * 4;
+                                loopPoint = swarLoopOffset * 4;
                                 decoded = decodePcm8(sampleData);
                                 console.log(`Archive ${i}, Sample ${j}: PCM8`);
                                 break;
                             case 1: // PCM16
-                                loopLength = swarLoopOffset * 2;
+                                loopPoint = swarLoopOffset * 2;
                                 decoded = decodePcm16(sampleData);
                                 console.log(`Archive ${i}, Sample ${j}: PCM16`);
                                 break;
                             case 2: // IMA-ADPCM
-                                loopLength = swarLoopOffset * 8 - 8; // subtract ADPCM header
+                                loopPoint = swarLoopOffset * 8;
                                 decoded = decodeAdpcm(sampleData);
                                 console.log(`Archive ${i}, Sample ${j}: ADPCM`);
                                 break;
                         }
 
-                        archive[j] = new Sample(decoded, 440, sampleRate, loopFlag != 0, loopLength);
+                        archive[j] = new Sample(decoded, 440, sampleRate, loopFlag != 0, loopPoint);
                         archive[j].sampleLength = swarSampleLength * 4;
                     }
 
