@@ -432,7 +432,7 @@
                 /** @type {Uint8Array[]} */
                 this.fat = [];
 
-                /** @type {SseqInfo[] | null} */
+                /** @type {SseqInfo[]} */
                 this.sseqInfos = [];
                 this.sseqNameIdDict = [];
                 this.sseqIdNameDict = [];
@@ -440,13 +440,13 @@
                 this.sbnkNameIdDict = [];
                 this.sbnkIdNameDict = [];
 
-                /** @type {SsarInfo[] | null} */
+                /** @type {SsarInfo[]} */
                 this.ssarInfos = [];
 
-                /** @type {BankInfo[] | null} */
+                /** @type {BankInfo[]} */
                 this.sbnkInfos = [];
 
-                /** @type {SwarInfo[] | null} */
+                /** @type {SwarInfo[]} */
                 this.swarInfos = [];
 
                 /** @type {Bank[]} */
@@ -471,7 +471,8 @@
             PlayNote: 0, // P0: MIDI Note P1: Velocity P2: Duration
             InstrumentChange: 1, // P0: Bank P1: Program
             Jump: 2,
-            TrackEnded: 3
+            TrackEnded: 3,
+            VolumeChange: 4, // P0: Volume
         }
 
         class PsgSquareInstrument {
@@ -851,8 +852,8 @@
                             }
                         case 0xC1: // Volume
                             {
-                                // TODO: implement volume changes during notes to support crescendos/decrescendos
                                 this.volume = this.readPcInc();
+                                this.sendMessage(MessageType.VolumeChange, this.volume);
                                 this.debugLog("Volume: " + this.volume);
                                 break;
                             }
@@ -1015,6 +1016,8 @@
                 this.valL = 0;
                 this.valR = 0;
 
+                this.volume = 1;
+
                 this.playingIndex = 0;
 
                 let emptySample = new Sample(new Float64Array(1), 440, sampleRate, false, 0)
@@ -1063,6 +1066,9 @@
                         this.valR += this.instrs[i].valR;
                     }
                 }
+
+                this.valL *= this.volume;
+                this.valR *= this.volume;
 
                 this.sampleNum++;
             }
@@ -1260,7 +1266,13 @@
                 this.sdat = sdat;
                 this.messageBuffer = new CircularBuffer(1024);
                 this.controller = new SseqController(file, dataOffset, this.messageBuffer);
-                this.synthesizer = new Synthesizer(sampleRate, 256);
+
+                /** @type {Synthesizer[]} */
+                this.synthesizers = new Array(16);
+
+                for (let i = 0; i < 16; i++) {
+                    this.synthesizers[i] = new Synthesizer(sampleRate, 256);
+                }
                 this.destroyed = false;
 
                 this.jumps = 0;
@@ -1278,9 +1290,9 @@
                 while (this.noteCutTimes.heapEntries > 0 && this.noteCutTimes.getFirstEntry().priority < this.controller.ticksElapsed) {
                     let entry = this.noteCutTimes.popFirstEntry();
 
-                    let instr = this.synthesizer.instrs[entry.data.synthInstrIndex];
+                    let instr = this.synthesizers[entry.data.trackNum].instrs[entry.data.synthInstrIndex];
                     if (instr.meta == entry.data.startTime) {
-                        this.synthesizer.cutInstrument(entry.data.synthInstrIndex);
+                        this.synthesizers[entry.data.trackNum].cutInstrument(entry.data.synthInstrIndex);
                     }
                 }
 
@@ -1306,7 +1318,6 @@
                                 let archiveId = instrument.swarInfoId[index];
                                 let sampleId = instrument.swavInfoId[index];
 
-
                                 let archive = this.sdat.sampleArchives[this.bankInfo.swarId[archiveId]];
                                 let sample = archive[sampleId];
 
@@ -1316,12 +1327,12 @@
                                     sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
                                 }
 
-                                let pan = (instrument.pan[index] + this.controller.tracks[msg.track].pan) / 256;
+                                let pan = (clamp((instrument.pan[index] + this.controller.tracks[msg.track].pan) - 128, -64, 63) + 64) / 127;
 
                                 let track = this.controller.tracks[msg.track];
-                                let synthInstrIndex = this.synthesizer.play(sample, hz, noteVolume / 127 * 1 * (track.volume / 127), pan, this.controller.ticksElapsed);
+                                let synthInstrIndex = this.synthesizers[msg.track].play(sample, hz, noteVolume / 127, pan, this.controller.ticksElapsed);
 
-                                this.noteCutTimes.addEntry({ synthInstrIndex: synthInstrIndex, startTime: this.controller.ticksElapsed }, this.controller.ticksElapsed + duration);
+                                this.noteCutTimes.addEntry({ trackNum: msg.track, synthInstrIndex: synthInstrIndex, startTime: this.controller.ticksElapsed }, this.controller.ticksElapsed + duration);
                                 break;
                             }
                         case MessageType.Jump: {
@@ -1347,6 +1358,10 @@
                             if (tracksActive == 0) {
                                 this.fadingStart = true;
                             }
+                            break;
+                        }
+                        case MessageType.VolumeChange: {
+                            this.synthesizers[msg.track].volume = msg.param0 / 127;
                             break;
                         }
                     }
@@ -1382,7 +1397,7 @@
                 currentPlayer.ctx.close();
             }
 
-            const BUFFER_SIZE = 512;
+            const BUFFER_SIZE = 8192;
             const SAMPLE_RATE = 32768;
 
             let id = sdat.sseqNameIdDict[name];
@@ -1417,9 +1432,16 @@
 
                     // synthesizer.play(440);
 
-                    bridge.synthesizer.nextSample();
-                    bufferL[i] = bridge.synthesizer.valL;
-                    bufferR[i] = bridge.synthesizer.valR;
+                    let valL = 0;
+                    let valR = 0;
+                    for (let i = 0; i < 16; i++) {
+                        bridge.synthesizers[i].nextSample();
+                        valL += bridge.synthesizers[i].valL;
+                        valR += bridge.synthesizers[i].valR;
+                    }
+
+                    bufferL[i] = valL;
+                    bufferR[i] = valR;
 
                     if (bridge.controller.destroyed) {
                         return;
@@ -1480,7 +1502,6 @@
                     bridge.tick();
                 }
 
-
                 if (bridge.fadingStart) {
                     bridge.fadingStart = false;
                     fadingOut = true;
@@ -1505,9 +1526,16 @@
                     }
                 }
 
-                bridge.synthesizer.nextSample();
-                bufferL.push(bridge.synthesizer.valL * 0.5 * fadeoutVolMul);
-                bufferR.push(bridge.synthesizer.valR * 0.5 * fadeoutVolMul);
+                let valL = 0;
+                let valR = 0;
+                for (let i = 0; i < 16; i++) {
+                    bridge.synthesizers[i].nextSample();
+                    valL += bridge.synthesizers[i].valL;
+                    valR += bridge.synthesizers[i].valR;
+                }
+
+                bufferL.push(valL * 0.5 * fadeoutVolMul);
+                bufferR.push(valR * 0.5 * fadeoutVolMul);
 
                 sample++;
             }
