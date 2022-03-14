@@ -38,11 +38,11 @@
 
         .container {
             display: grid;
-            grid-template-columns: 0.7fr 1.5fr 0.8fr;
+            grid-template-columns: 0.7fr 1.0fr 0.8fr;
             grid-template-rows: 0.7fr 1.3fr 1fr;
             gap: 0px 0px;
             grid-template-areas:
-                "song-picker channels ."
+                "song-picker channels visualizer-canvas"
                 "song-picker . ."
                 "song-picker . .";
         }
@@ -56,6 +56,10 @@
 
         .channels {
             grid-area: channels;
+        }
+
+        #visualizer-canvas {
+            image-rendering: pixelated;
         }
     </style>
 
@@ -459,7 +463,7 @@
 
         class Message {
             constructor(channel, type, param0, param1, param2) {
-                this.track = channel;
+                this.trackNum = channel;
                 this.type = type;
                 this.param0 = param0;
                 this.param1 = param1;
@@ -1267,11 +1271,16 @@
                 this.messageBuffer = new CircularBuffer(1024);
                 this.controller = new SseqController(file, dataOffset, this.messageBuffer);
 
+                /** @type {Uint8Array[]} */
+                this.notesOn = [];
+                for (let i = 0; i < 16; i++) {
+                    this.notesOn[i] = new Uint8Array(128);
+                }
+
                 /** @type {Synthesizer[]} */
                 this.synthesizers = new Array(16);
-
                 for (let i = 0; i < 16; i++) {
-                    this.synthesizers[i] = new Synthesizer(sampleRate, 256);
+                    this.synthesizers[i] = new Synthesizer(sampleRate, 16);
                 }
                 this.destroyed = false;
 
@@ -1293,6 +1302,7 @@
                     let instr = this.synthesizers[entry.data.trackNum].instrs[entry.data.synthInstrIndex];
                     if (instr.meta == entry.data.startTime) {
                         this.synthesizers[entry.data.trackNum].cutInstrument(entry.data.synthInstrIndex);
+                        this.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
                     }
                 }
 
@@ -1302,17 +1312,19 @@
 
                     switch (msg.type) {
                         case MessageType.PlayNote:
-                            if (enabledTrack[msg.track]) {
+                            if (enabledTrack[msg.trackNum]) {
                                 let midiNote = msg.param0;
                                 let noteVolume = msg.param1;
                                 let duration = msg.param2;
+
+                                if (midiNote < 21 || midiNote > 108) console.log("MIDI note out of piano range: " + midiNote);
 
                                 let hz = 440 * 2 ** ((midiNote - 69) / 12);
 
                                 // The archive ID inside each instrument record inside each SBNK file
                                 // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
 
-                                let instrument = this.bank.instruments[this.controller.tracks[msg.track].program];
+                                let instrument = this.bank.instruments[this.controller.tracks[msg.trackNum].program];
 
                                 let index = instrument.resolveEntryIndex(midiNote);
                                 let archiveId = instrument.swarInfoId[index];
@@ -1327,12 +1339,17 @@
                                     sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
                                 }
 
-                                let pan = (clamp((instrument.pan[index] + this.controller.tracks[msg.track].pan) - 128, -64, 63) + 64) / 127;
+                                // TODO: implement per-instrument pan
+                                let pan = this.controller.tracks[msg.trackNum].pan / 128;
 
-                                let track = this.controller.tracks[msg.track];
-                                let synthInstrIndex = this.synthesizers[msg.track].play(sample, hz, noteVolume / 127, pan, this.controller.ticksElapsed);
+                                let track = this.controller.tracks[msg.trackNum];
+                                let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, hz, noteVolume / 127, pan, this.controller.ticksElapsed);
 
-                                this.noteCutTimes.addEntry({ trackNum: msg.track, synthInstrIndex: synthInstrIndex, startTime: this.controller.ticksElapsed }, this.controller.ticksElapsed + duration);
+                                this.notesOn[msg.trackNum][midiNote] = 1;
+                                this.noteCutTimes.addEntry(
+                                    { trackNum: msg.trackNum, midiNote: midiNote, synthInstrIndex: synthInstrIndex, startTime: this.controller.ticksElapsed },
+                                    this.controller.ticksElapsed + duration
+                                );
                                 break;
                             }
                         case MessageType.Jump: {
@@ -1361,7 +1378,7 @@
                             break;
                         }
                         case MessageType.VolumeChange: {
-                            this.synthesizers[msg.track].volume = msg.param0 / 127;
+                            this.synthesizers[msg.trackNum].volume = msg.param0 / 127;
                             break;
                         }
                     }
@@ -1397,7 +1414,7 @@
                 currentPlayer.ctx.close();
             }
 
-            const BUFFER_SIZE = 8192;
+            const BUFFER_SIZE = 512;
             const SAMPLE_RATE = 32768;
 
             let id = sdat.sseqNameIdDict[name];
@@ -1486,8 +1503,8 @@
             let fadingOut = false;
             let fadeoutStartSample = 0;
 
-            let synthtestSample = decodeWavToSample(await downloadFileFromUrl("synthtest-amp.wav"), 440 * 2 ** ((9) / 12));
-            let synthtest2Sample = decodeWavToSample(await downloadFileFromUrl("synthtest2-amp.wav"), 440 * 2 ** ((3 - 24) / 12));
+            // let synthtestSample = decodeWavToSample(await downloadFileFromUrl("synthtest-amp.wav"), 440 * 2 ** ((9) / 12));
+            // let synthtest2Sample = decodeWavToSample(await downloadFileFromUrl("synthtest2-amp.wav"), 440 * 2 ** ((3 - 24) / 12));
 
             let timer = 0;
             let playing = true;
@@ -2214,6 +2231,18 @@
             });
         }
 
+        /** @returns {Promise<HTMLImageElement>} */
+        function loadHtmlImageElementFromUrl(url) {
+            return new Promise((resolve, reject) => {
+                let htmlImageElement = new Image();
+                htmlImageElement.src = url;
+                htmlImageElement.onload = () => {
+                    resolve(htmlImageElement);
+                }
+                htmlImageElement.onerror = () => reject();
+            });
+        }
+
         async function loadNdsRom(data) {
             console.log(`ROM size: ${data.length} bytes`);
 
@@ -2356,6 +2385,123 @@
                 };
 
             }
+
+            Promise.all(
+                [
+                    loadHtmlImageElementFromUrl("assets/piano_section_1.png"),
+                    loadHtmlImageElementFromUrl("assets/piano_section_2.png"),
+                    loadHtmlImageElementFromUrl("assets/piano_section_3.png")
+                ]
+            ).then(([section1Img, section2Img, section3Img]) => {
+                console.log("start");
+
+                /** @type {HTMLCanvasElement} */
+                let visualizerCanvas = document.querySelector("#visualizer-canvas");
+                let ctx = visualizerCanvas.getContext('2d');
+
+                function drawVisualizer() {
+                    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+                    let midsections = 5;
+                    // 15 left-section keys + 5 * 12 mid-section keys + 13 right-section keys
+                    // = 88 keys 
+
+                    let sectionHeight = 43;
+                    let whiteKeyWidth = 6;
+                    let whiteKeyHeight = 31;
+                    let blackKeyWidth = 4;
+                    let blackKeyHeight = 19;
+
+
+                    for (let trackNum = 0; trackNum < 16; trackNum++) {
+                        function drawKeys(black) {
+                            // piano has 88 keys
+                            for (let j = 0; j < 88; j++) {
+                                let midiNote = j + 21; // lowest piano note is 21 on midi
+
+                                // using the key of A as octave base
+                                let octave = Math.floor(j / 12);
+                                let keyInOctave = j % 12;
+
+                                let keyNum = 0;
+                                let blackKey = false;
+
+                                // THIS IS STARTING FROM THE KEY OF A
+                                switch (keyInOctave) {
+                                    case 0: blackKey = false; keyNum = 0; break;
+                                    case 2: blackKey = false; keyNum = 1; break;
+                                    case 3: blackKey = false; keyNum = 2; break;
+                                    case 5: blackKey = false; keyNum = 3; break;
+                                    case 7: blackKey = false; keyNum = 4; break;
+                                    case 8: blackKey = false; keyNum = 5; break;
+                                    case 10: blackKey = false; keyNum = 6; break;
+
+                                    case 1: blackKey = true; keyNum = 0; break;
+                                    case 4: blackKey = true; keyNum = 2; break;
+                                    case 6: blackKey = true; keyNum = 3; break;
+                                    case 9: blackKey = true; keyNum = 5; break;
+                                    case 11: blackKey = true; keyNum = 6; break;
+                                }
+
+                                if (blackKey == black) {
+                                    let whiteKeyNum = octave * 7 + keyNum;
+
+                                    let fillStyle;
+                                    if (!blackKey) {
+                                        if (currentlyPlaying?.notesOn[trackNum][midiNote]) {
+                                            fillStyle = "#000000";
+                                        } else {
+                                            fillStyle = "#ffffff";
+                                        }
+
+                                        if (ctx.fillStyle != fillStyle) {
+                                            ctx.fillStyle = fillStyle;
+                                        }
+                                        ctx.fillRect(3 + whiteKeyNum * whiteKeyWidth, 3 + trackNum * sectionHeight, whiteKeyWidth, whiteKeyHeight);
+                                    } else {
+                                        if (currentlyPlaying?.notesOn[trackNum][midiNote]) {
+                                            fillStyle = "#000000";
+                                        } else {
+                                            fillStyle = "#dddddd";
+                                        }
+
+                                        if (ctx.fillStyle != fillStyle) {
+                                            ctx.fillStyle = fillStyle;
+                                        }
+
+                                        ctx.fillRect(8 + whiteKeyNum * whiteKeyWidth, 3 + trackNum * sectionHeight, blackKeyWidth, blackKeyHeight);
+                                    }
+                                }
+                            }
+                        }
+
+                        drawKeys(false); // draw white keys
+                        drawKeys(true); // then draw black keys on top
+
+                        if (!currentlyPlaying?.controller.tracks[trackNum].active) {
+                            ctx.globalAlpha = 0.25;
+                        }
+
+                        ctx.drawImage(section1Img, 0, trackNum * sectionHeight);
+
+                        for (let j = 0; j < midsections; j++) {
+                            ctx.drawImage(section2Img, section1Img.width + j * section2Img.width, trackNum * sectionHeight);
+                        }
+
+                        ctx.drawImage(section3Img, section1Img.width + midsections * section2Img.width, trackNum * sectionHeight);
+
+                        ctx.globalAlpha = 1;
+                    }
+                }
+
+                function animationFrameHandler() {
+                    requestAnimationFrame(animationFrameHandler);
+
+                    drawVisualizer();
+                }
+
+                requestAnimationFrame(animationFrameHandler);
+            })
         }
     </script>
 </head>
@@ -2375,6 +2521,8 @@
     <div class="container">
         <div class="song-picker"></div>
         <div class="channels"></div>
+
+        <canvas id="visualizer-canvas" width="324" height="688"> </canvas>
     </div>
 </body>
 
