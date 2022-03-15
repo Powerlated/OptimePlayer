@@ -573,6 +573,7 @@
                 this.pan = new Uint8Array(128);
             }
 
+            /** @returns {number} */
             resolveEntryIndex(note) {
                 switch (this.fRecord) {
                     case InstrumentType.SingleSample:
@@ -623,7 +624,9 @@
 
                 this.pan = 0.5;
 
-                this.meta = 0;
+                this.startTime = 0;
+
+                this.envelopeVolume = 0;
             }
 
             changeSample(sample) {
@@ -643,8 +646,8 @@
                 }
 
                 if (sampleSample >= 0 && sampleSample < this.sample.data.length) {
-                    this.valL = this.sample.data[sampleSample] * this.volume * (1 - this.pan);
-                    this.valR = this.sample.data[sampleSample] * this.volume * this.pan;
+                    this.valL = this.sample.data[sampleSample] * this.envelopeVolume * this.volume * (1 - this.pan);
+                    this.valR = this.sample.data[sampleSample] * this.envelopeVolume * this.volume * this.pan;
                     return true;
                 } else {
                     this.valL = 0;
@@ -1043,7 +1046,8 @@
                 this.instrs[this.playingIndex].sample = sample;
                 this.instrs[this.playingIndex].frequency = frequency;
                 this.instrs[this.playingIndex].volume = volume;
-                this.instrs[this.playingIndex].meta = meta;
+                this.instrs[this.playingIndex].envelopeVolume = 0;
+                this.instrs[this.playingIndex].startTime = meta;
                 this.instrs[this.playingIndex].playing = true;
                 this.instrsStartSample[this.playingIndex] = this.sampleNum;
 
@@ -1222,10 +1226,20 @@
             }
         }
 
+        const AdsrState = {
+            Attack: 0,
+            Decay: 1,
+            Sustain: 2,
+            Release: 3,
+        }
+
         // TODO: Write a square synthesizer
         let square50 = new Sample(new Float64Array([-0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0);
 
         class ControllerBridge {
+            /** @param {number} sampleRate */
+            /** @param {Sdat} sdat */
+            /** @param {string} id */
             constructor(sampleRate, sdat, id) {
                 let info = sdat.sseqInfos[id];
                 this.bankInfo = sdat.sbnkInfos[info.bank];
@@ -1290,99 +1304,169 @@
                 this.loop = 0;
 
                 this.noteCutTimes = new MinHeap(1024);
+
+                this.bpmTimer = 0;
             }
 
             tick() {
-                // 48 ticks per beat
-                this.controller.tick();
-
-                while (this.noteCutTimes.heapEntries > 0 && this.noteCutTimes.getFirstEntry().priority < this.controller.ticksElapsed) {
-                    let entry = this.noteCutTimes.popFirstEntry();
+                for (let i = 0; i < this.noteCutTimes.heapEntries; i++) {
+                    let entry = this.noteCutTimes.heap[i];
+                    let data = entry.data;
+                    /** @type {InstrumentRecord} */
+                    let instrument = data.instrument;
 
                     let instr = this.synthesizers[entry.data.trackNum].instrs[entry.data.synthInstrIndex];
-                    if (instr.meta == entry.data.startTime) {
-                        this.synthesizers[entry.data.trackNum].cutInstrument(entry.data.synthInstrIndex);
-                        this.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
+                    if (instr.startTime == entry.data.startTime) {
+                        if (this.controller.ticksElapsed >= entry.priority) {
+                            if (data.adsrState != AdsrState.Release) {
+                                console.log("to release: " + instrument.release[data.instrumentEntryIndex]);
+                                this.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
+                                data.adsrState = AdsrState.Release;
+                            }
+                        }
+
+                        switch (data.adsrState) {
+                            case AdsrState.Attack:
+                                // gbatek says this is a division by 255 but I have a hard time believing that
+                                // considering how slow division is on the DS
+                                data.adsrTimer = instrument.attack[data.instrumentEntryIndex] * Math.ceil(data.adsrTimer / 255);
+                                instr.envelopeVolume = (128 + data.adsrTimer / 723) / 128;
+                                // one instrument hits full volume, start decay
+                                if (data.adsrTimer == 0) {
+                                    console.log("to decay: " + instrument.decay[data.instrumentEntryIndex])
+                                    data.adsrState = AdsrState.Decay;
+                                }
+                                break;
+                            case AdsrState.Decay:
+                                data.adsrTimer -= instrument.decay[data.instrumentEntryIndex];
+                                instr.envelopeVolume = (128 + data.adsrTimer / 723) / 128;
+                                // when instrument decays to sustain volume, go into sustain state
+
+                                if (128 + data.adsrTimer / 723 <= instrument.sustain[data.instrumentEntryIndex]) {
+                                    console.log("to sustain: " + instrument.sustain[data.instrumentEntryIndex]);
+                                    console.log("vol: " + (128 + data.adsrTimer / 723));
+                                    data.adsrState = AdsrState.Sustain;
+                                }
+                                break;
+                            case AdsrState.Sustain:
+                                break;
+                            case AdsrState.Release:
+                                if (data.adsrTimer <= -92544 || instrument.fRecord == InstrumentType.PsgPulse) {
+                                    this.synthesizers[data.trackNum].cutInstrument(entry.data.synthInstrIndex);
+                                    data.scheduledForDeletion = true;
+                                } else {
+                                    data.adsrTimer -= instrument.release[data.instrumentEntryIndex];
+                                    instr.envelopeVolume = (128 + data.adsrTimer / 723) / 128;
+                                }
+                                break;
+                        }
                     }
                 }
 
-                while (this.messageBuffer.entries > 0) {
-                    /** @type {Message} */
-                    let msg = this.messageBuffer.pop();
+                this.bpmTimer += this.controller.tracks[0].bpm * 4;
+                while (this.bpmTimer >= 240) {
+                    this.bpmTimer -= 240;
 
-                    switch (msg.type) {
-                        case MessageType.PlayNote:
-                            if (enabledTrack[msg.trackNum]) {
-                                let midiNote = msg.param0;
-                                let noteVolume = msg.param1;
-                                let duration = msg.param2;
 
-                                if (midiNote < 21 || midiNote > 108) console.log("MIDI note out of piano range: " + midiNote);
+                    // 48 ticks per beat
+                    this.controller.tick();
 
-                                let hz = 440 * 2 ** ((midiNote - 69) / 12);
+                    // remove stale entries from heap
+                    if (this.noteCutTimes.heapEntries > 0) {
+                        let entry = this.noteCutTimes.getFirstEntry();
+                        if (entry.data.scheduledForDeletion) {
+                            this.noteCutTimes.popFirstEntry();
+                        }
+                    }
 
-                                // The archive ID inside each instrument record inside each SBNK file
-                                // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
+                    while (this.messageBuffer.entries > 0) {
+                        /** @type {Message} */
+                        let msg = this.messageBuffer.pop();
 
-                                let instrument = this.bank.instruments[this.controller.tracks[msg.trackNum].program];
+                        switch (msg.type) {
+                            case MessageType.PlayNote:
+                                if (enabledTrack[msg.trackNum]) {
+                                    let midiNote = msg.param0;
+                                    let noteVolume = msg.param1;
+                                    let duration = msg.param2;
 
-                                let index = instrument.resolveEntryIndex(midiNote);
-                                let archiveId = instrument.swarInfoId[index];
-                                let sampleId = instrument.swavInfoId[index];
+                                    if (midiNote < 21 || midiNote > 108) console.log("MIDI note out of piano range: " + midiNote);
 
-                                let archive = this.sdat.sampleArchives[this.bankInfo.swarId[archiveId]];
-                                let sample = archive[sampleId];
+                                    let hz = 440 * 2 ** ((midiNote - 69) / 12);
 
-                                if (instrument.fRecord == InstrumentType.PsgPulse) {
-                                    sample = square50;
-                                } else {
-                                    sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
+                                    // The archive ID inside each instrument record inside each SBNK file
+                                    // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
+
+                                    let instrument = this.bank.instruments[this.controller.tracks[msg.trackNum].program];
+
+                                    let index = instrument.resolveEntryIndex(midiNote);
+                                    let archiveId = instrument.swarInfoId[index];
+                                    let sampleId = instrument.swavInfoId[index];
+
+                                    let archive = this.sdat.sampleArchives[this.bankInfo.swarId[archiveId]];
+                                    let sample = archive[sampleId];
+
+                                    if (instrument.fRecord == InstrumentType.PsgPulse) {
+                                        sample = square50;
+                                    } else {
+                                        sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
+                                    }
+
+                                    // TODO: implement per-instrument pan
+                                    let pan = this.controller.tracks[msg.trackNum].pan / 128;
+
+                                    let track = this.controller.tracks[msg.trackNum];
+                                    let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, hz, noteVolume / 127, pan, this.controller.ticksElapsed);
+
+                                    this.notesOn[msg.trackNum][midiNote] = 1;
+                                    this.noteCutTimes.addEntry(
+                                        {
+                                            trackNum: msg.trackNum,
+                                            midiNote: midiNote,
+                                            synthInstrIndex: synthInstrIndex,
+                                            startTime: this.controller.ticksElapsed,
+                                            instrument: instrument,
+                                            instrumentEntryIndex: index,
+                                            adsrState: AdsrState.Attack,
+                                            adsrTimer: -92544 // idk why this number, ask gbatek
+                                        },
+                                        this.controller.ticksElapsed + duration
+                                    );
+                                    break;
                                 }
+                            case MessageType.Jump: {
+                                this.jumps++;
+                                if (this.jumps > 0) {
+                                    this.jumps = 0;
+                                    this.loop++;
 
-                                // TODO: implement per-instrument pan
-                                let pan = this.controller.tracks[msg.trackNum].pan / 128;
-
-                                let track = this.controller.tracks[msg.trackNum];
-                                let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, hz, noteVolume / 127, pan, this.controller.ticksElapsed);
-
-                                this.notesOn[msg.trackNum][midiNote] = 1;
-                                this.noteCutTimes.addEntry(
-                                    { trackNum: msg.trackNum, midiNote: midiNote, synthInstrIndex: synthInstrIndex, startTime: this.controller.ticksElapsed },
-                                    this.controller.ticksElapsed + duration
-                                );
+                                    if (this.loop == 2) {
+                                        this.fadingStart = true;
+                                    }
+                                }
                                 break;
                             }
-                        case MessageType.Jump: {
-                            this.jumps++;
-                            if (this.jumps > 0) {
-                                this.jumps = 0;
-                                this.loop++;
+                            case MessageType.TrackEnded: {
+                                let tracksActive = 0;
+                                for (let i = 0; i < 16; i++) {
+                                    if (this.controller.tracks[i].active) {
+                                        tracksActive++;
+                                    }
+                                }
 
-                                if (this.loop == 2) {
+                                if (tracksActive == 0) {
                                     this.fadingStart = true;
                                 }
+                                break;
                             }
-                            break;
-                        }
-                        case MessageType.TrackEnded: {
-                            let tracksActive = 0;
-                            for (let i = 0; i < 16; i++) {
-                                if (this.controller.tracks[i].active) {
-                                    tracksActive++;
-                                }
+                            case MessageType.VolumeChange: {
+                                this.synthesizers[msg.trackNum].volume = msg.param0 / 127;
+                                break;
                             }
-
-                            if (tracksActive == 0) {
-                                this.fadingStart = true;
-                            }
-                            break;
-                        }
-                        case MessageType.VolumeChange: {
-                            this.synthesizers[msg.trackNum].volume = msg.param0 / 127;
-                            break;
                         }
                     }
                 }
+
             }
 
             destroy() {
@@ -1440,9 +1524,10 @@
             let timer = 0;
             function synthesizeMore() {
                 for (let i = 0; i < BUFFER_SIZE; i++) {
-                    timer += bridge.controller.tracks[0].bpm * 102;
-                    while (timer >= SAMPLE_RATE) {
-                        timer -= SAMPLE_RATE;
+                    timer += (1 / (64 * 2728 / 33513982)) * SAMPLE_RATE;
+                    // nintendo DS clock speed
+                    while (timer >= 33513982) {
+                        timer -= 33513982;
 
                         bridge.tick();
                     }
@@ -1512,9 +1597,10 @@
 
             // keep it under 480 seconds
             while (playing && bufferL.length < SAMPLE_RATE * 480) {
-                timer += bridge.controller.tracks[0].bpm * 102;
-                while (timer >= SAMPLE_RATE) {
-                    timer -= SAMPLE_RATE;
+                timer += (1 / (64 * 2728 / 33513982)) * SAMPLE_RATE;
+                // nintendo DS clock speed
+                while (timer >= 33513982) {
+                    timer -= 33513982;
 
                     bridge.tick();
                 }
