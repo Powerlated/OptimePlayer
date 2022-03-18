@@ -1319,7 +1319,7 @@
                     if (instr.startTime == entry.data.startTime) {
                         if (this.controller.ticksElapsed >= entry.priority) {
                             if (data.adsrState != AdsrState.Release) {
-                                console.log("to release: " + instrument.release[data.instrumentEntryIndex]);
+                                // console.log("to release: " + instrument.release[data.instrumentEntryIndex]);
                                 this.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
                                 data.adsrState = AdsrState.Release;
                             }
@@ -1333,7 +1333,7 @@
                                 instr.envelopeVolume = (128 + data.adsrTimer / 723) / 128;
                                 // one instrument hits full volume, start decay
                                 if (data.adsrTimer == 0) {
-                                    console.log("to decay: " + instrument.decay[data.instrumentEntryIndex])
+                                    // console.log("to decay: " + instrument.decay[data.instrumentEntryIndex])
                                     data.adsrState = AdsrState.Decay;
                                 }
                                 break;
@@ -1343,8 +1343,8 @@
                                 // when instrument decays to sustain volume, go into sustain state
 
                                 if (128 + data.adsrTimer / 723 <= instrument.sustain[data.instrumentEntryIndex]) {
-                                    console.log("to sustain: " + instrument.sustain[data.instrumentEntryIndex]);
-                                    console.log("vol: " + (128 + data.adsrTimer / 723));
+                                    // console.log("to sustain:  " + instrument.sustain[data.instrumentEntryIndex]);
+                                    // console.log("vol: " + (12 8 + data.adsrTimer / 723));
                                     data.adsrState = AdsrState.Sustain;
                                 }
                                 break;
@@ -1482,6 +1482,8 @@
 
         /** @type {ControllerBridge} */
         let currentlyPlaying = null;
+        /** @type {string} */
+        let currentlyPlayingName= null;
         /** @type {AudioPlayer} */
         let currentPlayer = null;
 
@@ -1493,6 +1495,7 @@
          * @param {string} name
          */
         async function playSeq(sdat, name) {
+            currentlyPlayingName = name;
             if (currentlyPlaying) {
                 currentlyPlaying.destroy();
                 currentPlayer.ctx.close();
@@ -2356,7 +2359,7 @@
                             document.querySelector(".song-picker").appendChild(button);
                             button.onclick = e => {
                                 console.log(seqName);
-                                if (!e.shiftKey) {
+                                if (currentlyPlayingName != seqName) {
                                     playSeq(sdat, seqName);
                                 } else {
                                     renderAndDownloadSeq(sdat, seqName);
