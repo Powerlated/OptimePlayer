@@ -1464,7 +1464,8 @@
                         // all thanks to ipatix at pret/pokediamond
                         switch (data.adsrState) {
                             case AdsrState.Attack:
-                                data.adsrTimer = -((instrument.attackCoefficient[data.instrumentEntryIndex] * data.adsrTimer) >> 8);
+                                data.adsrTimer = -((-instrument.attackCoefficient[data.instrumentEntryIndex] * data.adsrTimer) >> 8);
+                                // console.log(data.adsrTimer);
                                 instr.volume = calcChannelVolume(data.velocity, data.adsrTimer);
                                 // one instrument hits full volume, start decay
                                 if (data.adsrTimer == 0) {
@@ -1572,7 +1573,8 @@
                                     let pan = this.controller.tracks[msg.trackNum].pan / 128;
 
                                     let track = this.controller.tracks[msg.trackNum];
-                                    let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, hz, calcChannelVolume(velocity, 0), pan, this.controller.ticksElapsed);
+                                    let initialVolume = instrument.attackCoefficient[index] == 0 ? calcChannelVolume(velocity, 0) : 0; 
+                                    let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, hz, initialVolume, pan, this.controller.ticksElapsed);
 
                                     this.notesOn[msg.trackNum][midiNote] = 1;
                                     this.noteCutTimes.addEntry(
@@ -2325,8 +2327,7 @@
 
                         // Thanks to ipatix and pret/pokediamond
                         function getSustainLevel(sustain) {
-                            // mask and sign extend again to 32-bit
-                            return ((SNDi_DecibelSquareTable[sustain] << 7) & 0xFFFF) << 16 >> 16;
+                            return SNDi_DecibelSquareTable[sustain] << 7;
                         }
 
                         function readRecordData(index, offset) {
@@ -2910,6 +2911,11 @@
                         if (isNote) {
                             event.preventDefault();
                         }
+
+                        // note += octaveShift || 0 * 12;
+
+                        if (note < 0) note = 0;
+                        if (note > 127) note = 127;
 
                         if (down) {
                             currentlyPlaying.controller.tracks[currentlyPlaying.activeKeyboardTrackNum].sendMessage(true, MessageType.PlayNote, note, 127, 2000);
