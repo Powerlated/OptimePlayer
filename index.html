@@ -2325,7 +2325,8 @@
 
                         // Thanks to ipatix and pret/pokediamond
                         function getSustainLevel(sustain) {
-                            return SNDi_DecibelSquareTable[sustain] << 7;
+                            // mask and sign extend again to 32-bit
+                            return ((SNDi_DecibelSquareTable[sustain] << 7) & 0xFFFF) << 16 >> 16;
                         }
 
                         function readRecordData(index, offset) {
