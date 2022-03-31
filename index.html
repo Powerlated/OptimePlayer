@@ -83,6 +83,13 @@
         let synthtestSample;
         let synthtest2Sample;
 
+        function downloadUint8Array(name, array) {
+            let blob = new Blob([array], { type: "application/octet-stream" });
+            let link = document.createElement('a');
+            link.href = window.URL.createObjectURL(blob);
+            link.download = name;
+            link.click();
+        }
 
         //@ts-check
         class WavDownloader {
@@ -669,7 +676,7 @@
                 // if (window.lerp) {
                 //     valLerp = val0 + subsample * (val1 - val0);
                 // } else {
-                    valLerp = val0;
+                valLerp = val0;
                 // }
 
                 this.valL = valLerp * this.volume * (1 - this.pan);
@@ -1571,25 +1578,27 @@
                                         sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
                                     }
 
-                                    if (msg.fromKeyboard) {
-                                        // console.log("MIDI Note " + midiNote);
-                                        // console.log("Base MIDI Note: " + instrument.noteNumber[index]);
+                                    // if (msg.fromKeyboard) { 
+                                    // console.log(this.bank);
+                                    // console.log("Program " + this.controller.tracks[msg.trackNum].program);
+                                    // console.log("MIDI Note " + midiNote);
+                                    // console.log("Base MIDI Note: " + instrument.noteNumber[index]);
 
-                                        // if (instrument.fRecord == InstrumentType.PsgPulse) {
-                                        //     console.log("PSG Pulse");
-                                        // }
+                                    // if (instrument.fRecord == InstrumentType.PsgPulse) {
+                                    //     console.log("PSG Pulse");
+                                    // }
 
-                                        // console.log("Attack: " + instrument.attack[index]);
-                                        // console.log("Decay: " + instrument.decay[index]);
-                                        // console.log("Sustain: " + instrument.sustain[index]);
-                                        // console.log("Release: " + instrument.release[index]);
+                                    // console.log("Attack: " + instrument.attack[index]);
+                                    // console.log("Decay: " + instrument.decay[index]);
+                                    // console.log("Sustain: " + instrument.sustain[index]);
+                                    // console.log("Release: " + instrument.release[index]);
 
-                                        // console.log("Attack Coefficient: " + instrument.attackCoefficient[index]);
-                                        // console.log("Decay Coefficient: " + instrument.decayCoefficient[index]);
-                                        // console.log("Sustain Level: " + instrument.sustainLevel[index]);
-                                        // console.log("Release Coefficient: " + instrument.releaseCoefficient[index]);
+                                    // console.log("Attack Coefficient: " + instrument.attackCoefficient[index]);
+                                    // console.log("Decay Coefficient: " + instrument.decayCoefficient[index]);
+                                    // console.log("Sustain Level: " + instrument.sustainLevel[index]);
+                                    // console.log("Release Coefficient: " + instrument.releaseCoefficient[index]);
 
-                                    }
+                                    // }
 
                                     // TODO: implement per-instrument pan
                                     let pan = this.controller.tracks[msg.trackNum].pan / 128;
@@ -2315,8 +2324,10 @@
                 if (bankInfo != null) {
                     let bankFile = sdat.fat[bankInfo.fileId];
 
+                    // downloadUint8Array(sdat.sbnkIdNameDict[i] + ".sbnk", bankFile);
+
                     let numberOfInstruments = read32LE(bankFile, 0x38);
-                    // console.log(`Bank ${i} / ${sdat.sbnkIdNameDict[i]}: ${numberOfInstruments} instruments`);
+                    console.log(`Bank ${i} / ${sdat.sbnkIdNameDict[i]}: ${numberOfInstruments} instruments`);
                     for (let j = 0; j < numberOfInstruments; j++) {
                         let fRecord = bankFile[0x3C + j * 4 + 0];
                         let recordOffset = read16LE(bankFile, 0x3C + j * 4 + 1);
@@ -2352,6 +2363,10 @@
                         function readRecordData(index, offset) {
                             instrument.swavInfoId[index] = read16LE(bankFile, recordOffset + 0x0 + offset);
                             instrument.swarInfoId[index] = read16LE(bankFile, recordOffset + 0x2 + offset);
+                            // if (i == 4) {
+                            //     console.log(`Instrument ${j}, Record ${index}: SWAV Info ID offset:${hex(recordOffset + 0x0 + offset, 0)} value:${instrument.swavInfoId[index]}`);
+                            //     console.log(`Instrument ${j}, Record ${index}: SWAR Info ID offset:${hex(recordOffset + 0x2 + offset, 0)} value:${instrument.swarInfoId[index]}`);
+                            // }
                             instrument.noteNumber[index] = bankFile[recordOffset + 0x4 + offset];
                             instrument.attack[index] = bankFile[recordOffset + 0x5 + offset];
                             instrument.attackCoefficient[index] = getEffectiveAttack(instrument.attack[index]);
@@ -2389,23 +2404,35 @@
                             case InstrumentType.MultiSample: // Multi-Sample Instrument
                                 {
                                     let instrumentCount = 0;
+
                                     for (let k = 0; k < 8; k++) {
                                         let end = bankFile[recordOffset + k];
                                         instrument.regionEnd[k] = end;
-                                        if (end == 0x7F) {
-                                            instrumentCount = k + 1;
+                                        if (end == 0) {
+                                            instrumentCount = k;
                                             break;
                                         }
                                     }
 
+                                    // if (i === 4) {
+                                    //     console.log(`Multi-Sample record offset: ${hex(recordOffset, 0)}`);
+                                    //     console.log(`Instrument count: ` + instrumentCount);
+                                    // }
+
+
                                     for (let k = 0; k < instrumentCount; k++) {
                                         readRecordData(k, 10 + k * 12);
+
+                                        // if (i == 4) {
+                                        //     console.log(`Read in record data offset:${hex(10 + k * 12, 0)}`);
+                                        // }
+
                                     }
                                     break;
                                 }
 
                             default:
-                                console.warn(`Instrument ${j}: Invalid fRecord: ${fRecord} Offset:${recordOffset}`);
+                                alert(`Instrument ${j}: Invalid fRecord: ${fRecord} Offset:${recordOffset}`);
                                 break;
                         }
 
