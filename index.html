@@ -38,7 +38,7 @@
 
         .container {
             display: grid;
-            grid-template-columns: 0.7fr 1.0fr 0.8fr;
+            grid-template-columns: 0.8fr 1.0fr 0.8fr;
             grid-template-rows: 0.7fr 1.3fr 1fr;
             gap: 0px 0px;
             grid-template-areas:
@@ -60,6 +60,8 @@
 
         #visualizer-pane {
             columns: 1;
+
+            display: none;
         }
     </style>
 
@@ -80,6 +82,13 @@
         /** @type {boolean[]} */
         let trackEnables = new Array(16).fill(true);
 
+        function downloadUint8Array(name, array) {
+            let blob = new Blob([array], { type: "application/octet-stream" });
+            let link = document.createElement('a');
+            link.href = window.URL.createObjectURL(blob);
+            link.download = name;
+            link.click();
+        }
 
         //@ts-check
         class WavDownloader {
@@ -209,11 +218,7 @@
                     wave[44 + i] = this.recordBuffer[i];
                 }
 
-                let blob = new Blob([wave], { type: "application/octet-stream" });
-                let link = document.createElement('a');
-                link.href = window.URL.createObjectURL(blob);
-                link.download = name;
-                link.click();
+                downloadUint8Array(name, wave);
             }
         }
 
@@ -1573,7 +1578,7 @@
                                     let pan = this.controller.tracks[msg.trackNum].pan / 128;
 
                                     let track = this.controller.tracks[msg.trackNum];
-                                    let initialVolume = instrument.attackCoefficient[index] == 0 ? calcChannelVolume(velocity, 0) : 0; 
+                                    let initialVolume = instrument.attackCoefficient[index] == 0 ? calcChannelVolume(velocity, 0) : 0;
                                     let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, hz, initialVolume, pan, this.controller.ticksElapsed);
 
                                     this.notesOn[msg.trackNum][midiNote] = 1;
@@ -2066,6 +2071,8 @@
             for (let i = 0; i < sdatSize; i++) {
                 sdatData[i] = data[offset + i];
             }
+
+            // downloadUint8Array("pokemon black 2.sdat", sdatData);
 
             let numOfBlocks = read16LE(sdatData, 0xE);
             let headerSize = read16LE(sdatData, 0xC);
@@ -2574,6 +2581,9 @@
             let filePickerContainer = document.querySelector("#file-picker-container");
             // filePickerContainer.style.display = 'none';
 
+            let visualizerPane = document.querySelector("#visualizer-pane");
+            visualizerPane.style.display = 'block';
+
         }
 
         window.onload = async () => {
@@ -2960,6 +2970,7 @@
                 /** @type {HTMLButtonElement} */
                 let restartSequenceButton = document.querySelector("#restart-sequence-button");
                 restartSequenceButton.onclick = () => {
+                    pauseButton.innerText = "Pause Sequence Player";
                     playSeq(currentlyPlayingSdat, currentlyPlayingName);
                 };
             });
