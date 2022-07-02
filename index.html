@@ -2411,6 +2411,9 @@
                                         if (end == 0) {
                                             instrumentCount = k;
                                             break;
+                                        } else if (end == 0x7F) {
+                                            instrumentCount = k + 1;
+                                            break;
                                         }
                                     }
 
