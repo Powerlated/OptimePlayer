@@ -2044,7 +2044,7 @@
             let out = new Float64Array(pcm8Data.length);
 
             for (let i = 0; i < out.length; i++) {
-                out[i] = (pcm8Data[i] - 127) / 128;
+                out[i] = (pcm8Data[i] << 24 >> 24) / 128;
             }
 
             return out;
