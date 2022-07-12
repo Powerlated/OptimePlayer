@@ -1833,14 +1833,6 @@
                                 break;
                             case MessageType.Jump: {
                                 this.jumps++;
-                                if (this.jumps > 0) {
-                                    this.jumps = 0;
-                                    this.loop++;
-
-                                    if (this.loop == 2) {
-                                        this.fadingStart = true;
-                                    }
-                                }
                                 break;
                             }
                             case MessageType.TrackEnded: {
@@ -1977,10 +1969,12 @@
             let sample = 0;
             let fadingOut = false;
             let fadeoutStartSample = 0;
+            let loop = 0;
 
             let timer = 0;
             let playing = true;
             let fadeoutLength = 10; // in seconds 
+
 
             // keep it under 480 seconds
             while (playing && bufferL.length < SAMPLE_RATE * 480) {
@@ -1990,6 +1984,15 @@
                     timer -= 64 * 2728 * SAMPLE_RATE;
 
                     bridge.tick();
+                }
+
+                if (bridge.jumps > 0) {
+                    bridge.jumps = 0;
+                    loop++;
+
+                    if (loop == 2) {
+                        bridge.fadingStart = true;
+                    }
                 }
 
                 if (bridge.fadingStart) {
