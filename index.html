@@ -52,6 +52,7 @@
 
             display: flex;
             flex-direction: column;
+
         }
 
         #visualizer-canvas {
@@ -89,6 +90,28 @@
 
         let synthtestSample;
         let synthtest2Sample;
+
+        /* @param {number} t
+         * @param {number} dt
+         */
+        function polyBlep(t, dt) {
+            // 0 <= t < 1
+            if (t < dt) {
+                t /= dt;
+                // 2 * (t - t^2/2 - 0.5)
+                return t + t - t * t - 1.;
+            }
+            // -1 < t < 0
+            else if (t > 1. - dt) {
+                t = (t - 1.) / dt;
+                // 2 * (t^2/2 + t + 0.5)
+                return t * t + t + t + 1.;
+            }
+            // 0 otherwise
+            else {
+                return 0.;
+            }
+        }
 
         // Based off NAudio's BiQuadFilter, look there for comments
         class BiQuadFilter {
@@ -172,19 +195,19 @@
                 this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
             }
 
-            lowPassFilter(sampleRate, cutoffFrequency, q) {
+            static lowPassFilter(sampleRate, cutoffFrequency, q) {
                 var filter = new BiQuadFilter();
                 filter.setLowPassFilter(sampleRate, cutoffFrequency, q);
                 return filter;
             }
 
-            highPassFilter(sampleRate, cutoffFrequency, q) {
+            static highPassFilter(sampleRate, cutoffFrequency, q) {
                 var filter = new BiQuadFilter();
                 filter.setHighPassFilter(sampleRate, cutoffFrequency, q);
                 return filter;
             }
 
-            bandPassFilterConstantSkirtGain(sampleRate, centreFrequency, q) {
+            static bandPassFilterConstantSkirtGain(sampleRate, centreFrequency, q) {
                 var w0 = 2 * Math.PI * centreFrequency / sampleRate;
                 var cosw0 = Math.cos(w0);
                 var sinw0 = Math.sin(w0);
@@ -199,7 +222,7 @@
                 return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
             }
 
-            bandPassFilterConstantPeakGain(sampleRate, centreFrequency, q) {
+            static bandPassFilterConstantPeakGain(sampleRate, centreFrequency, q) {
                 var w0 = 2 * Math.PI * centreFrequency / sampleRate;
                 var cosw0 = Math.cos(w0);
                 var sinw0 = Math.sin(w0);
@@ -214,7 +237,7 @@
                 return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
             }
 
-            notchFilter(sampleRate, centreFrequency, q) {
+            static notchFilter(sampleRate, centreFrequency, q) {
                 var w0 = 2 * Math.PI * centreFrequency / sampleRate;
                 var cosw0 = Math.cos(w0);
                 var sinw0 = Math.sin(w0);
@@ -229,7 +252,7 @@
                 return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
             }
 
-            allPassFilter(sampleRate, centreFrequency, q) {
+            static allPassFilter(sampleRate, centreFrequency, q) {
                 var w0 = 2 * Math.PI * centreFrequency / sampleRate;
                 var cosw0 = Math.cos(w0);
                 var sinw0 = Math.sin(w0);
@@ -244,13 +267,13 @@
                 return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
             }
 
-            peakingEQ(sampleRate, centreFrequency, q, dbGain) {
+            static peakingEQ(sampleRate, centreFrequency, q, dbGain) {
                 var filter = new BiQuadFilter();
                 filter.setPeakingEq(sampleRate, centreFrequency, q, dbGain);
                 return filter;
             }
 
-            lowShelf(sampleRate, cutoffFrequency, shelfSlope, dbGain) {
+            static lowShelf(sampleRate, cutoffFrequency, shelfSlope, dbGain) {
                 var w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
                 var cosw0 = Math.cos(w0);
                 var sinw0 = Math.sin(w0);
@@ -267,7 +290,7 @@
                 return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
             }
 
-            highShelf(sampleRate, cutoffFrequency, shelfSlope, dbGain) {
+            static highShelf(sampleRate, cutoffFrequency, shelfSlope, dbGain) {
                 var w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
                 var cosw0 = Math.cos(w0);
                 var sinw0 = Math.sin(w0);
@@ -286,6 +309,85 @@
 
             constructor(a0 = 0, a1 = 0, a2 = 0, b0 = 0, b1 = 0, b2 = 0) {
                 this.setCoefficients(a0, a1, a2, b0, b1, b2);
+            }
+        }
+
+        class SoundgoodizerFilterChannel {
+            // Each biquad filter has a slope of 12db/oct so 2 biquads chained gets us 24db/oct
+            /** @type {BiQuadFilter[]} */ lowFilters = new Array(2);
+            /** @type {BiQuadFilter[]} */ midFilters = new Array(4);
+            /** @type {BiQuadFilter[]} */ highFilters = new Array(2);
+
+            outLow = 0;
+            outMid = 0;
+            outHigh = 0;
+
+            dbPerOct24 = false;
+
+            /**
+             * @param {boolean} dbPerOct24
+             * @param {number} sampleRate
+             * @param {number} lowHz
+             * @param {number} highHz
+             **/
+            constructor(dbPerOct24, sampleRate, lowHz, highHz) {
+                this.dbPerOct24 = dbPerOct24;
+
+                // q = 1/sqrt(2) maximally flat "butterworth" filter
+                let q = 1 / Math.SQRT2;
+                this.lowFilters[0] = BiQuadFilter.lowPassFilter(sampleRate, lowHz, q);
+                this.lowFilters[1] = BiQuadFilter.lowPassFilter(sampleRate, lowHz, q);
+
+                this.midFilters[0] = BiQuadFilter.highPassFilter(sampleRate, lowHz, q);
+                this.midFilters[1] = BiQuadFilter.lowPassFilter(sampleRate, highHz, q);
+                this.midFilters[2] = BiQuadFilter.highPassFilter(sampleRate, lowHz, q);
+                this.midFilters[3] = BiQuadFilter.lowPassFilter(sampleRate, highHz, q);
+
+                this.highFilters[0] = BiQuadFilter.highPassFilter(sampleRate, highHz, q);
+                this.highFilters[1] = BiQuadFilter.highPassFilter(sampleRate, highHz, q);
+            }
+
+            /**
+             * @param {boolean} dbPerOct24
+             * @param {number} sampleRate
+             * @param {number} lowHz
+             * @param {number} highHz
+             * */
+            changeFilterParams(dbPerOct24, sampleRate, lowHz, highHz) {
+                this.dbPerOct24 = dbPerOct24;
+
+                let q = 1 / Math.SQRT2;
+                this.lowFilters[0].setLowPassFilter(sampleRate, lowHz, q);
+                this.lowFilters[1].setLowPassFilter(sampleRate, lowHz, q);
+
+                this.midFilters[0].setHighPassFilter(sampleRate, lowHz, q);
+                this.midFilters[1].setLowPassFilter(sampleRate, highHz, q);
+                this.midFilters[2].setHighPassFilter(sampleRate, lowHz, q);
+                this.midFilters[3].setLowPassFilter(sampleRate, highHz, q);
+
+                this.highFilters[0].setHighPassFilter(sampleRate, highHz, q);
+                this.highFilters[1].setHighPassFilter(sampleRate, highHz, q);
+            }
+
+            /**
+             * @param {number} inVal
+             * */
+            process(inVal) {
+                this.outLow = inVal;
+                this.outMid = inVal;
+                this.outHigh = inVal;
+
+                for (let i = 0; i < (this.dbPerOct24 ? 2 : 1); i++) {
+                    this.outLow = this.lowFilters[i].transform(this.outLow);
+                }
+
+                for (let i = 0; i < (this.dbPerOct24 ? 4 : 2); i++) {
+                    this.outMid = this.midFilters[i].transform(this.outMid);
+                }
+
+                for (let i = 0; i < (this.dbPerOct24 ? 2 : 1); i++) {
+                    this.outHigh = this.highFilters[i].transform(this.outHigh);
+                }
             }
         }
 
@@ -505,13 +607,8 @@
                 this.bufferPoolAt++;
                 this.bufferPoolAt &= 255;
 
-                if (!this.safariHax) {
-                    buffer.copyToChannel(bufferLeft, 0);
-                    buffer.copyToChannel(bufferRight, 1);
-                } else {
-                    buffer.getChannelData(0).set(bufferLeft);
-                    buffer.getChannelData(1).set(bufferRight);
-                }
+                buffer.getChannelData(0).set(bufferLeft);
+                buffer.getChannelData(1).set(bufferRight);
 
                 let bufferSource = this.ctx.createBufferSource();
 
@@ -713,45 +810,6 @@
             VolumeChange: 4, // P0: Volume
         };
 
-        class PsgSquareInstrument {
-            constructor(sampleRate) {
-                this.valL = 0;
-                this.valR = 0;
-                this.frequency = 440;
-                this.sampleRate = sampleRate;
-                this.volume = 1;
-
-                this.playing = false;
-            }
-
-            sampleAt(sample) {
-                let t = sample / this.sampleRate;
-
-                let continuePlaying = true;
-
-                // TODO: a better envelope
-                let envVol = 0;
-                if (t < 0.4) {
-                    envVol = 1 - t / 0.4;
-                } else {
-                    envVol = 0;
-                    continuePlaying = false;
-                }
-
-                let periodTime = 1 / this.frequency;
-
-                if ((t % periodTime) >= periodTime / 2) {
-                    this.valL = this.volume * envVol;
-                    this.valR = this.volume * envVol;
-                } else {
-                    this.valL = -this.volume * envVol;
-                    this.valR = -this.volume * envVol;
-                }
-
-                return continuePlaying;
-            }
-        }
-
         class Sample {
             /**
             * @param {Float64Array} data 
@@ -849,6 +907,7 @@
             */
             constructor(sampleRate, sample) {
                 this.sampleRate = sampleRate;
+                this.secondsPerSample = 1 / sampleRate;
                 /** @type {Sample} */
                 this.sample = sample;
 
@@ -869,24 +928,18 @@
                 this.sample = sample;
             }
 
-            sampleAt(sample) {
+            sampleAt(outT) {
                 let ratio = this.frequency / this.sample.frequency;
-                let t = sample / this.sampleRate * ratio;
+                let t = outT / this.sampleRate * ratio;
 
-                let sampleSample = t * this.sample.sampleRate;
-                let val0 = this.getSampleDataAt(Math.floor(sampleSample + 0));
-                let val1 = this.getSampleDataAt(Math.floor(sampleSample + 1));
+                let sampleT = t * this.sample.sampleRate;
+                let val0 = this.getSampleDataAt(Math.floor(sampleT + 0));
+                let val1 = this.getSampleDataAt(Math.floor(sampleT + 1));
 
-                let subsample = sampleSample % 1;
-                let valLerp;
-                // if (window.lerp) {
-                //     valLerp = val0 + subsample * (val1 - val0);
-                // } else {
-                valLerp = val0;
-                // }
+                let subsampleT = sampleT % 1;
 
-                this.valL = valLerp * this.volume * (1 - this.pan);
-                this.valR = valLerp * this.volume * this.pan;
+                this.valL = val0 * this.volume * (1 - this.pan);
+                this.valR = val0 * this.volume * this.pan;
                 return true;
             }
 
@@ -1263,7 +1316,7 @@
                                 break;
                             }
                         default:
-                            alert(`${this.id}: Unknown opcode: ` + hex(opcode, 2) + " PC: " + hex(opcodePc, 6));
+                            console.error(`${this.id}: Unknown opcode: ` + hex(opcode, 2) + " PC: " + hex(opcodePc, 6));
                     }
                 }
             }
@@ -1344,12 +1397,14 @@
             }
         }
 
+        /** @template T */
         class MinHeapEntry {
-            data = null;
+            data /** @type {T} */ = null;
             index = 0;
             priority = 0;
         }
 
+        /** @template T */
         class MinHeap {
             static parent(n) { return (n - 1) >> 1; }
             static leftChild(n) { return n * 2 + 1; }
@@ -1357,7 +1412,7 @@
 
             /** @param {number} size */
             constructor(size) {
-                /** @type {MinHeapEntry[]} */
+                /** @type {MinHeapEntry<T>[]} */
                 this.heap = new Array(size);
 
                 for (let i = 0; i < this.heap.length; i++) {
@@ -1664,6 +1719,7 @@
 
                 this.loop = 0;
 
+                // /** @type {MinHeap<}
                 this.noteCutTimes = new MinHeap(1024);
 
                 this.bpmTimer = 0;
@@ -2909,19 +2965,102 @@
                 let sectionHeight = 43;
                 let whiteKeyWidth = 6;
                 let whiteKeyHeight = 31;
-                let blackKeyWidth = 4;
-                let blackKeyHeight = 19;
+                let blackKeyWidth = 3;
+                let blackKeyHeight = 17;
 
                 let midsections = 5;
 
                 /**
                  * @param {number} ofsX
                  * @param {number} ofsY
+                 * @param {boolean} layer2
                  */
-                function drawVisualizer(ofsX, ofsY) {
+                function createBackdropCanvas(ofsX, ofsY, layer2) {
+                    let canvas = document.createElement("canvas");
+                    canvas.width = 400;
+                    canvas.height = 688;
+                    let ctx = canvas.getContext("2d");
+
                     // 15 left-section keys + 5 * 12 mid-section keys + 13 right-section keys
                     // = 88 keys 
+                    for (let trackNum = 0; trackNum < 16; trackNum++) {
+                        function drawKeys(black) {
+                            // piano has 88 keys
+                            for (let j = 0; j < 88; j++) {
+                                let midiNote = j + 21; // lowest piano note is 21 on midi
 
+                                // using the key of A as octave base
+                                let octave = Math.floor(j / 12);
+                                let keyInOctave = j % 12;
+
+                                let keyNum = 0;
+                                let blackKey = false;
+
+                                // THIS IS STARTING FROM THE KEY OF A
+                                switch (keyInOctave) {
+                                    case 0: blackKey = false; keyNum = 0; break;
+                                    case 2: blackKey = false; keyNum = 1; break;
+                                    case 3: blackKey = false; keyNum = 2; break;
+                                    case 5: blackKey = false; keyNum = 3; break;
+                                    case 7: blackKey = false; keyNum = 4; break;
+                                    case 8: blackKey = false; keyNum = 5; break;
+                                    case 10: blackKey = false; keyNum = 6; break;
+
+                                    case 1: blackKey = true; keyNum = 0; break;
+                                    case 4: blackKey = true; keyNum = 2; break;
+                                    case 6: blackKey = true; keyNum = 3; break;
+                                    case 9: blackKey = true; keyNum = 5; break;
+                                    case 11: blackKey = true; keyNum = 6; break;
+                                }
+
+                                if (blackKey == black) {
+                                    let whiteKeyNum = octave * 7 + keyNum;
+
+                                    let fillStyle;
+                                    if (!blackKey) {
+                                        if (ctx.fillStyle != fillStyle) {
+                                            ctx.fillStyle = "#ffffff";
+                                        }
+
+                                        ctx.fillRect(ofsX + 3 + whiteKeyNum * whiteKeyWidth, ofsY + 3 + trackNum * sectionHeight, whiteKeyWidth, whiteKeyHeight);
+                                    } else {
+                                        if (ctx.fillStyle != fillStyle) {
+                                            ctx.fillStyle = "#dddddd";;
+                                        }
+
+                                        ctx.fillRect(ofsX + 8 + whiteKeyNum * whiteKeyWidth, ofsY + 4 + trackNum * sectionHeight, blackKeyWidth, blackKeyHeight);
+                                    }
+                                }
+                            }
+                        }
+
+                        if (!layer2) {
+                            drawKeys(false); // draw white keys
+
+                            ctx.drawImage(section1Img, ofsX + 0, ofsY + trackNum * sectionHeight);
+
+                            for (let j = 0; j < midsections; j++) {
+                                ctx.drawImage(section2Img, ofsX + section1Img.width + j * section2Img.width, ofsY + trackNum * sectionHeight);
+                            }
+
+                            ctx.drawImage(section3Img, ofsX + section1Img.width + midsections * section2Img.width, ofsY + trackNum * sectionHeight);
+                        } else {
+
+                            drawKeys(true); // then draw black keys on top
+                        }
+
+
+
+                    }
+
+                    return canvas;
+                }
+
+                function drawVisualizerBackdrop(backdropCanvas) {
+                    ctx.drawImage(backdropCanvas, 0, 0);
+                }
+
+                function drawVisualizer(ofsX, ofsY, black) {
                     for (let trackNum = 0; trackNum < 16; trackNum++) {
                         function drawKeys(black) {
                             // piano has 88 keys
@@ -2958,59 +3097,37 @@
                                     let fillStyle;
                                     if (!blackKey) {
                                         if (currentlyPlaying?.notesOn[trackNum][midiNote]) {
-                                            fillStyle = "#000000";
-                                        } else {
-                                            fillStyle = "#ffffff";
+                                            ctx.fillStyle = "#000000";
+                                            ctx.fillRect(ofsX + 3 + whiteKeyNum * whiteKeyWidth, ofsY + 3 + trackNum * sectionHeight, whiteKeyWidth, whiteKeyHeight);
                                         }
-
-                                        if (ctx.fillStyle != fillStyle) {
-                                            ctx.fillStyle = fillStyle;
-                                        }
-                                        ctx.fillRect(ofsX + 3 + whiteKeyNum * whiteKeyWidth, ofsY + 3 + trackNum * sectionHeight, whiteKeyWidth, whiteKeyHeight);
                                     } else {
                                         if (currentlyPlaying?.notesOn[trackNum][midiNote]) {
-                                            fillStyle = "#000000";
-                                        } else {
-                                            fillStyle = "#dddddd";
+                                            ctx.fillStyle = "#000000";
+                                            ctx.fillRect(ofsX + 8 + whiteKeyNum * whiteKeyWidth, ofsY + 4 + trackNum * sectionHeight, blackKeyWidth, blackKeyHeight);
                                         }
-
-                                        if (ctx.fillStyle != fillStyle) {
-                                            ctx.fillStyle = fillStyle;
-                                        }
-
-                                        ctx.fillRect(ofsX + 8 + whiteKeyNum * whiteKeyWidth, ofsY + 3 + trackNum * sectionHeight, blackKeyWidth, blackKeyHeight);
                                     }
                                 }
                             }
                         }
 
-                        drawKeys(false); // draw white keys
-                        drawKeys(true); // then draw black keys on top
+                        if (!black) {
+                            drawKeys(false); // draw white keys
 
-                        if (!currentlyPlaying?.controller.tracks[trackNum].active) {
-                            ctx.globalAlpha = 0.25;
+                            if (trackNum == currentlyPlaying?.activeKeyboardTrackNum) {
+                                let x0 = ofsX + 0;
+                                let y0 = ofsY + trackNum * sectionHeight;
+                                let x1 = ofsX + section1Img.width + midsections * section2Img.width + section3Img.width;
+                                let y1 = y0 + section3Img.height;
+
+                                ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+                            }
+
+                        } else {
+                            drawKeys(true); // then draw black keys on top
                         }
-
-
-                        ctx.drawImage(section1Img, ofsX + 0, ofsY + trackNum * sectionHeight);
-
-                        for (let j = 0; j < midsections; j++) {
-                            ctx.drawImage(section2Img, ofsX + section1Img.width + j * section2Img.width, ofsY + trackNum * sectionHeight);
-                        }
-
-                        ctx.drawImage(section3Img, ofsX + section1Img.width + midsections * section2Img.width, ofsY + trackNum * sectionHeight);
-
-                        ctx.globalAlpha = 1;
-                        if (trackNum == currentlyPlaying?.activeKeyboardTrackNum) {
-                            let x0 = ofsX + 0;
-                            let y0 = ofsY + trackNum * sectionHeight;
-                            let x1 = ofsX + section1Img.width + midsections * section2Img.width + section3Img.width;
-                            let y1 = y0 + section3Img.height;
-
-                            ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
-                        }
-
                     }
+
+
                 }
 
                 /**
@@ -3031,13 +3148,23 @@
                     }
                 }
 
+                let backdropCanvas1 = createBackdropCanvas(24, 2, false);
+                let backdropCanvas2 = createBackdropCanvas(24, 2, true);
                 function animationFrameHandler() {
                     requestAnimationFrame(animationFrameHandler);
 
                     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
+                    if (!currentlyPlaying) {
+                        ctx.globalAlpha = 0.25;
+                    } else {
+                        ctx.globalAlpha = 1;
+                    }
                     drawToggleButtons(2, 2);
-                    drawVisualizer(24, 2);
+                    drawVisualizerBackdrop(backdropCanvas1);
+                    drawVisualizer(24, 2, false);
+                    drawVisualizerBackdrop(backdropCanvas2);
+                    drawVisualizer(24, 2, true);
                 }
 
                 requestAnimationFrame(animationFrameHandler);
