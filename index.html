@@ -62,11 +62,21 @@
         #visualizer-pane {
             columns: 1;
 
-            display: none;
+            /* display: none; */
         }
 
         #soundgoodizer-container {
             display: none;
+        }
+
+        #fullscreen-vis-canvas {
+            display: none;
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
         }
     </style>
 
@@ -77,7 +87,9 @@
         let debug = false;
 
         /** @type {ControllerBridge} */
-        let currentlyPlaying = null;
+        let currentBridge = null;
+        /** @type {FsVisControllerBridge} */
+        let currentFsVisBridge = null;
         /** @type {string} */
         let currentlyPlayingName = null;
         /** @type {Sdat} */
@@ -675,10 +687,12 @@
             return pad(i.toString(16), digits, '0').toUpperCase();
         }
 
+        /** @template T */
         class CircularBuffer {
             /** @param {number} size */
             constructor(size) {
                 this.size = size;
+                /** @type T[] */
                 this.buffer = new Array(size);
 
                 this.entries = 0;
@@ -686,6 +700,7 @@
                 this.writePos = 0;
             }
 
+            /** @param {T} data */
             insert(data) {
                 if (this.entries < this.size) {
                     this.entries++;
@@ -703,6 +718,7 @@
                 return false;
             }
 
+            /** @returns {T} */
             pop() {
                 let data;
                 if (this.entries > 0) {
@@ -720,6 +736,7 @@
                 return data;
             }
 
+            /** @returns {T} */
             peek(offset) {
                 return this.buffer[(this.readPos + offset) % this.size];
             }
@@ -799,6 +816,7 @@
                 this.param0 = param0;
                 this.param1 = param1;
                 this.param2 = param2;
+                this.timestamp = 0;
             }
         }
 
@@ -962,7 +980,7 @@
         class SseqController {
             /** @param {Array | Uint8Array} sseqFile
              *  @param {number} dataOffset
-             *  @param {CircularBuffer} messageBuffer
+             *  @param {CircularBuffer<Message>} messageBuffer
              **/
             constructor(sseqFile, dataOffset, messageBuffer) {
                 this.sseqFile = sseqFile;
@@ -983,6 +1001,11 @@
 
                 this.ticksElapsed = 0;
                 this.paused = false;
+            }
+
+            /** @param {Message} message */
+            sendMessage(message) {
+                this.messageBuffer.insert(message);
             }
 
             tick() {
@@ -1652,6 +1675,55 @@
             return result / 127;
         }
 
+        class FsVisControllerBridge {
+            /** @param {Sdat} sdat */
+            /** @param {string} id */
+            /** @param {number} runAheadTicks */
+            constructor(sdat, id, runAheadTicks) {
+                this.runAheadTicks = runAheadTicks;
+
+                let info = sdat.sseqInfos[id];
+                let file = sdat.fat[info.fileId];
+                let dataOffset = read32LE(file, 0x18);
+
+                /** @type {CircularBuffer<Message>} */
+                this.messageBuffer = new CircularBuffer(512);
+                this.controller = new SseqController(file, dataOffset, this.messageBuffer);
+                /** @type {CircularBuffer<Message>} */
+                this.activeNotes = new CircularBuffer(512);
+
+                this.bpmTimer = 0;
+
+                for (let i = 0; i < runAheadTicks; i++) {
+                    this.tick();
+                }
+            }
+
+            tick() {
+                this.bpmTimer += this.controller.tracks[0].bpm;
+                while (this.bpmTimer >= 240) {
+                    this.bpmTimer -= 240;
+
+                    this.controller.tick();
+
+                    while (this.messageBuffer.entries > 0) {
+                        let msg = this.messageBuffer.pop();
+
+                        switch (msg.type) {
+                            case MessageType.PlayNote:
+                                if (this.activeNotes.entries >= this.activeNotes.size) {
+                                    this.activeNotes.pop();
+                                }
+
+                                msg.timestamp = this.controller.ticksElapsed;
+                                this.activeNotes.insert(msg);
+                                break;
+                        }
+                    }
+                }
+            }
+        }
+
         class ControllerBridge {
             /** @param {number} sampleRate */
             /** @param {Sdat} sdat */
@@ -1698,6 +1770,7 @@
                 if (dataOffset != 0x1C) alert("SSEQ offset is not 0x1C? it is: " + hex(dataOffset, 8));
 
                 this.sdat = sdat;
+                /** @type {CircularBuffer<Message>} */
                 this.messageBuffer = new CircularBuffer(1024);
                 this.controller = new SseqController(file, dataOffset, this.messageBuffer);
 
@@ -1791,7 +1864,6 @@
                 while (this.bpmTimer >= 240) {
                     this.bpmTimer -= 240;
 
-                    // 48 ticks per beat
                     this.controller.tick();
 
                     // remove stale entries from heap
@@ -1923,6 +1995,7 @@
             return (i & (1 << bit)) !== 0;
         }
 
+
         /**
          * @param {Sdat} sdat
          * @param {string} name
@@ -1930,8 +2003,8 @@
         async function playSeq(sdat, name) {
             currentlyPlayingSdat = sdat;
             currentlyPlayingName = name;
-            if (currentlyPlaying) {
-                currentlyPlaying.destroy();
+            if (currentBridge) {
+                currentBridge.destroy();
                 currentPlayer.ctx.close();
             }
 
@@ -1943,6 +2016,7 @@
             let bufferL = new Float32Array(BUFFER_SIZE);
             let bufferR = new Float32Array(BUFFER_SIZE);
 
+            let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 2);
             let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
             let inBufferPos = 0;
 
@@ -1956,7 +2030,8 @@
             //     }
             //     console.log(str);
             // }
-            currentlyPlaying = bridge;
+            currentBridge = bridge;
+            currentFsVisBridge = fsVisBridge;
 
             let timer = 0;
             function synthesizeMore() {
@@ -1967,6 +2042,7 @@
                         timer -= 64 * 2728 * SAMPLE_RATE;
 
                         bridge.tick();
+                        fsVisBridge.tick();
                     }
                     // synthesizer.play(440);
 
@@ -2002,6 +2078,30 @@
             synthesizeMore();
         }
 
+        /**
+         * @param {Sample} sample
+         */
+        async function downloadSample(sample) {
+            let totalSamples = 0;
+            let downloader = new WavDownloader(sample.sampleRate, 16);
+            for (let i = 0; i < sample.data.length; i++) {
+                let val = sample.data[i];
+                downloader.addSample(val, val);
+                totalSamples++;
+            }
+
+            for (let i = 0; i < 2; i++) {
+                let pos = sample.loopPoint;
+                console.log(totalSamples);
+                while (pos < sample.data.length) {
+                    let val = sample.data[pos++];
+                    downloader.addSample(val, val);
+                    totalSamples++;
+                }
+            }
+
+            downloader.download("sample.wav");
+        }
 
         /**
         * @param {Sdat} sdat
@@ -2360,7 +2460,7 @@
                 sdatData[i] = data[offset + i];
             }
 
-            // downloadUint8Array("pokemon black 2.sdat", sdatData);
+            // downloadUint8Array("platinum.sdat", sdatData);
 
             let numOfBlocks = read16LE(sdatData, 0xE);
             let headerSize = read16LE(sdatData, 0xC);
@@ -2848,11 +2948,7 @@
                             document.querySelector(".song-picker").appendChild(button);
                             button.onclick = e => {
                                 console.log(seqName);
-                                if (currentlyPlayingName != seqName) {
-                                    playSeq(sdat, seqName);
-                                } else {
-                                    renderAndDownloadSeq(sdat, seqName);
-                                }
+                                playSeq(sdat, seqName);
                             };
                         }
                     }
@@ -2884,9 +2980,10 @@
             let filePickerContainer = document.querySelector("#file-picker-container");
             // filePickerContainer.style.display = 'none';
 
+            /** @type {HTMLElement} */
             let visualizerPane = document.querySelector("#visualizer-pane");
             visualizerPane.style.display = 'block';
-            document.querySelector('#soundgoodizer-container').style.display = 'block';
+            (/** @type {HTMLElement} */ (document.querySelector('#soundgoodizer-container'))).style.display = 'block';
 
         }
 
@@ -2946,6 +3043,48 @@
                 }
             });
 
+            function getKeyNum(keyInOctave) {
+                // THIS IS STARTING FROM THE KEY OF A
+                switch (keyInOctave) {
+                    case 0: return 0;
+                    case 2: return 1;
+                    case 3: return 2;
+                    case 5: return 3;
+                    case 7: return 4;
+                    case 8: return 5;
+                    case 10: return 6;
+
+                    case 1: return 0;
+                    case 4: return 2;
+                    case 6: return 3;
+                    case 9: return 5;
+                    case 11: return 6;
+
+                    default: return 0;
+                }
+            }
+
+            function isBlackKey(keyInOctave) {
+                // THIS IS STARTING FROM THE KEY OF A
+                switch (keyInOctave) {
+                    case 0: return false;
+                    case 2: return false;
+                    case 3: return false;
+                    case 5: return false;
+                    case 7: return false;
+                    case 8: return false;
+                    case 10: return false;
+
+                    case 1: return true;
+                    case 4: return true;
+                    case 6: return true;
+                    case 9: return true;
+                    case 11: return true;
+
+                    default: return false;
+                }
+            }
+
             Promise.all(
                 [
                     loadHtmlImageElementFromUrl("assets/piano_section_1.png"),
@@ -2988,25 +3127,8 @@
                                 let octave = Math.floor(j / 12);
                                 let keyInOctave = j % 12;
 
-                                let keyNum = 0;
-                                let blackKey = false;
-
-                                // THIS IS STARTING FROM THE KEY OF A
-                                switch (keyInOctave) {
-                                    case 0: blackKey = false; keyNum = 0; break;
-                                    case 2: blackKey = false; keyNum = 1; break;
-                                    case 3: blackKey = false; keyNum = 2; break;
-                                    case 5: blackKey = false; keyNum = 3; break;
-                                    case 7: blackKey = false; keyNum = 4; break;
-                                    case 8: blackKey = false; keyNum = 5; break;
-                                    case 10: blackKey = false; keyNum = 6; break;
-
-                                    case 1: blackKey = true; keyNum = 0; break;
-                                    case 4: blackKey = true; keyNum = 2; break;
-                                    case 6: blackKey = true; keyNum = 3; break;
-                                    case 9: blackKey = true; keyNum = 5; break;
-                                    case 11: blackKey = true; keyNum = 6; break;
-                                }
+                                let keyNum = getKeyNum(keyInOctave);
+                                let blackKey = isBlackKey(keyInOctave);
 
                                 if (blackKey == black) {
                                     let whiteKeyNum = octave * 7 + keyNum;
@@ -3066,37 +3188,20 @@
                                 let octave = Math.floor(j / 12);
                                 let keyInOctave = j % 12;
 
-                                let keyNum = 0;
-                                let blackKey = false;
-
-                                // THIS IS STARTING FROM THE KEY OF A
-                                switch (keyInOctave) {
-                                    case 0: blackKey = false; keyNum = 0; break;
-                                    case 2: blackKey = false; keyNum = 1; break;
-                                    case 3: blackKey = false; keyNum = 2; break;
-                                    case 5: blackKey = false; keyNum = 3; break;
-                                    case 7: blackKey = false; keyNum = 4; break;
-                                    case 8: blackKey = false; keyNum = 5; break;
-                                    case 10: blackKey = false; keyNum = 6; break;
-
-                                    case 1: blackKey = true; keyNum = 0; break;
-                                    case 4: blackKey = true; keyNum = 2; break;
-                                    case 6: blackKey = true; keyNum = 3; break;
-                                    case 9: blackKey = true; keyNum = 5; break;
-                                    case 11: blackKey = true; keyNum = 6; break;
-                                }
+                                let keyNum = getKeyNum(keyInOctave);
+                                let blackKey = isBlackKey(keyInOctave);
 
                                 if (blackKey == black) {
                                     let whiteKeyNum = octave * 7 + keyNum;
 
                                     let fillStyle;
                                     if (!blackKey) {
-                                        if (currentlyPlaying?.notesOn[trackNum][midiNote]) {
+                                        if (currentBridge?.notesOn[trackNum][midiNote]) {
                                             ctx.fillStyle = "#000000";
                                             ctx.fillRect(ofsX + 3 + whiteKeyNum * whiteKeyWidth, ofsY + 3 + trackNum * sectionHeight, whiteKeyWidth, whiteKeyHeight);
                                         }
                                     } else {
-                                        if (currentlyPlaying?.notesOn[trackNum][midiNote]) {
+                                        if (currentBridge?.notesOn[trackNum][midiNote]) {
                                             ctx.fillStyle = "#000000";
                                             ctx.fillRect(ofsX + 8 + whiteKeyNum * whiteKeyWidth, ofsY + 4 + trackNum * sectionHeight, blackKeyWidth, blackKeyHeight);
                                         }
@@ -3108,7 +3213,7 @@
                         if (!black) {
                             drawKeys(false); // draw white keys
 
-                            if (trackNum == currentlyPlaying?.activeKeyboardTrackNum) {
+                            if (trackNum == currentBridge?.activeKeyboardTrackNum) {
                                 let x0 = ofsX + 0;
                                 let y0 = ofsY + trackNum * sectionHeight;
                                 let x1 = ofsX + section1Img.width + midsections * section2Img.width + section3Img.width;
@@ -3150,7 +3255,7 @@
 
                     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
-                    if (!currentlyPlaying) {
+                    if (!currentBridge) {
                         ctx.globalAlpha = 0.25;
                     } else {
                         ctx.globalAlpha = 1;
@@ -3207,11 +3312,11 @@
                         clickRect.y1 = ofsY + trackNum * sectionHeight + section3Img.height;
 
                         clickRect.callback = () => {
-                            if (currentlyPlaying) {
-                                if (currentlyPlaying.activeKeyboardTrackNum == trackNum) {
-                                    currentlyPlaying.activeKeyboardTrackNum = null;
+                            if (currentBridge) {
+                                if (currentBridge.activeKeyboardTrackNum == trackNum) {
+                                    currentBridge.activeKeyboardTrackNum = null;
                                 } else {
-                                    currentlyPlaying.activeKeyboardTrackNum = trackNum;
+                                    currentBridge.activeKeyboardTrackNum = trackNum;
                                 }
                             }
                         };
@@ -3252,7 +3357,7 @@
                 });
 
                 function keyboardPress(key, down) {
-                    if (currentlyPlaying?.activeKeyboardTrackNum != null) {
+                    if (currentBridge?.activeKeyboardTrackNum != null) {
                         let isNote = false;
                         let note = 0;
 
@@ -3299,22 +3404,20 @@
 
                         if (isNote) {
                             event.preventDefault();
-                        }
 
-                        // note += octaveShift || 0 * 12;
+                            if (note < 0) note = 0;
+                            if (note > 127) note = 127;
 
-                        if (note < 0) note = 0;
-                        if (note > 127) note = 127;
+                            if (down) {
+                                currentBridge.controller.sendMessage(new Message(true, currentBridge.activeKeyboardTrackNum, MessageType.PlayNote, note, 127, 2000));
+                            } else {
+                                for (let i = 0; i < currentBridge.noteCutTimes.heapEntries; i++) {
+                                    let entry = currentBridge.noteCutTimes.heap[i];
 
-                        if (down) {
-                            currentlyPlaying.controller.tracks[currentlyPlaying.activeKeyboardTrackNum].sendMessage(true, MessageType.PlayNote, note, 127, 2000);
-                        } else {
-                            for (let i = 0; i < currentlyPlaying.noteCutTimes.heapEntries; i++) {
-                                let entry = currentlyPlaying.noteCutTimes.heap[i];
-
-                                if (entry.data.trackNum == currentlyPlaying.activeKeyboardTrackNum && entry.data.midiNote == note) {
-                                    currentlyPlaying.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
-                                    entry.data.adsrState = AdsrState.Release;
+                                    if (entry.data.trackNum == currentBridge.activeKeyboardTrackNum && entry.data.midiNote == note) {
+                                        currentBridge.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
+                                        entry.data.adsrState = AdsrState.Release;
+                                    }
                                 }
                             }
                         }
@@ -3337,9 +3440,12 @@
 
                 /** @type {HTMLButtonElement} */
                 let pauseButton = document.querySelector("#pause-button");
+                let paused = false;
                 pauseButton.onclick = () => {
-                    currentlyPlaying.controller.paused = !currentlyPlaying.controller.paused;
-                    if (currentlyPlaying.controller.paused) {
+                    paused = !paused;
+                    if (currentBridge) currentBridge.controller.paused = paused;
+                    if (currentFsVisBridge) currentFsVisBridge.controller.paused = paused;
+                    if (paused) {
                         pauseButton.innerText = "Unpause Sequence Player";
                     } else {
                         pauseButton.innerText = "Pause Sequence Player";
@@ -3353,6 +3459,195 @@
                     playSeq(currentlyPlayingSdat, currentlyPlayingName);
                 };
             });
+
+
+            const fsVisPalette = [
+                "#da3fb1",
+                "#ad42ba",
+                "#5443c2",
+                "#2b68d7",
+                "#3095f2",
+                "#2acdfe",
+                "#2bceff",
+                "#52ddf6",
+                "#57d677",
+                "#5ed62e",
+                "#aeeb20",
+                "#fef711",
+                "#ff991d",
+                "#ff641d",
+                "#ff1434",
+                "#fa30a3",
+            ];
+
+            /** @type {HTMLCanvasElement} */
+            let fsVisCanvas = document.querySelector("#fullscreen-vis-canvas");
+            let fsVisCtx = fsVisCanvas.getContext("2d");
+            (/** @type {HTMLButtonElement} */ (document.querySelector("#fullscreen-vis-button"))).onclick = e => {
+                showFsVis();
+                fsVisCanvas.requestFullscreen();
+            };
+
+            fsVisCanvas.onfullscreenchange = () => {
+                if (!document.fullscreenElement) {
+                    hideFsVis();
+                }
+            };
+
+            let fsVisVisible = false;
+
+            function showFsVis() {
+                fsVisVisible = true;
+                fsVisCanvas.style.display = "block";
+            }
+
+            function hideFsVis() {
+                fsVisVisible = false;
+                fsVisCanvas.style.display = "none";
+            }
+
+            let activeNoteTrackNums = new Int8Array(128).fill(-1);
+
+            let lastTickTime = 0;
+            let lastTicks = 0;
+            let lastDrawFsVisTime = 0;
+            function drawFsVis(time) {
+                let dt = time - lastDrawFsVisTime;
+                lastDrawFsVisTime = time;
+
+                if (fsVisVisible) {
+                    fsVisCtx.imageSmoothingEnabled = false;
+                    fsVisCanvas.width = window.innerWidth;
+                    fsVisCanvas.height = window.innerHeight;
+                    // normalize to 0-1 on both axes
+                    fsVisCtx.setTransform(1, 0, 0, 1, 0, 0);
+                    fsVisCtx.scale(fsVisCanvas.width - 1, fsVisCanvas.height - 1);
+                    fsVisCtx.fillStyle = "#222222";
+                    fsVisCtx.fillRect(0, 0, 1, 1);
+
+                    let wKeyWidth = 1 / 52;
+                    let wKeyHeight = 1 / 7;
+                    let pixelX = 1 / fsVisCanvas.width;
+                    let pixelY = 1 / fsVisCanvas.height;
+
+                    fsVisCtx.fillStyle = "#FF0000";
+                    if (currentFsVisBridge) {
+                        let activeNotes = currentFsVisBridge.activeNotes;
+
+                        if (lastTicks != currentFsVisBridge.controller.ticksElapsed) {
+                            lastTickTime = time;
+                        }
+
+                        let drew = 0;
+                        for (let i = 0; i < activeNotes.entries; i++) {
+                            let entry = activeNotes.peek(i);
+                            let midiNote = entry.param0;
+                            let duration = entry.param2;
+
+                            let bpm = currentBridge.controller.tracks[0].bpm;
+                            let sPerTick = (1 / (bpm / 60)) / 48;
+
+                            let ticksAdj = currentBridge.controller.ticksElapsed;
+                            ticksAdj += (time - lastTickTime) / 1000 / sPerTick;
+                            let relTime = entry.timestamp - ticksAdj;
+
+                            let pianoKey = midiNote - 21;
+
+                            let height = duration / 192;
+                            let y = 1 - relTime / 192 - height - wKeyHeight;
+                            if (y + height >= 1 - wKeyHeight) {
+                                height = 1 - wKeyHeight - y;
+                            }
+
+                            let octave = Math.floor(pianoKey / 12);
+                            let keyInOctave = pianoKey % 12;
+
+                            let keyNum = getKeyNum(keyInOctave);
+                            let blackKey = isBlackKey(keyInOctave);
+
+                            let whiteKeyNum = octave * 7 + keyNum;
+
+                            if (y < 1 - wKeyHeight) {
+                                if (!blackKey) {
+                                    fsVisCtx.fillStyle = fsVisPalette[entry.trackNum];
+
+                                    fsVisCtx.fillRect(whiteKeyNum * wKeyWidth, y, wKeyWidth - pixelX * 2, height);
+                                    if (relTime < 0 && relTime > -duration) {
+                                        activeNoteTrackNums[midiNote] = entry.trackNum;
+                                    }
+                                } else {
+                                    fsVisCtx.fillStyle = fsVisPalette[entry.trackNum];
+
+                                    fsVisCtx.fillRect(whiteKeyNum * wKeyWidth + wKeyWidth * 0.5, y, wKeyWidth - pixelX * 2, height);
+                                    if (relTime < 0 && relTime > -duration) {
+                                        activeNoteTrackNums[midiNote] = entry.trackNum;
+                                    }
+                                }
+                                drew++;
+                            }
+                        }
+
+                        console.log("Drew " + drew + "Notes");
+
+                        function drawKeys(black) {
+                            // piano has 88 keys
+                            for (let j = 0; j < 88; j++) {
+                                let midiNote = j + 21; // lowest piano note is 21 on midi
+
+                                // using the key of A as octave base
+                                let octave = Math.floor(j / 12);
+                                let keyInOctave = j % 12;
+
+                                let keyNum = getKeyNum(keyInOctave);
+                                let blackKey = isBlackKey(keyInOctave);
+
+                                if (blackKey == black) {
+                                    let whiteKeyNum = octave * 7 + keyNum;
+
+                                    let fillStyle;
+                                    if (!blackKey) {
+                                        if (activeNoteTrackNums[midiNote] != -1) {
+                                            fsVisCtx.fillStyle = fsVisPalette[activeNoteTrackNums[midiNote]];
+                                            activeNoteTrackNums[midiNote] = -1;
+                                        } else {
+                                            fsVisCtx.fillStyle = "#ffffff";
+                                        }
+
+                                        fsVisCtx.fillRect(whiteKeyNum * wKeyWidth, 1 - wKeyHeight, wKeyWidth - pixelX * 2, wKeyHeight);
+
+                                    } else {
+                                        if (activeNoteTrackNums[midiNote] != -1) {
+                                            fsVisCtx.fillStyle = fsVisPalette[activeNoteTrackNums[midiNote]];
+                                            activeNoteTrackNums[midiNote] = -1;
+                                        } else {
+                                            fsVisCtx.fillStyle = "#000000";
+                                        }
+
+                                        fsVisCtx.fillRect(whiteKeyNum * wKeyWidth + wKeyWidth * 0.5, 1 - wKeyHeight, wKeyWidth - pixelX * 2, wKeyHeight * 0.58);
+                                    }
+                                }
+                            }
+                        }
+
+                        drawKeys(false);
+                        drawKeys(true);
+
+                    }
+
+                }
+
+                if (currentFsVisBridge)
+                    lastTicks = currentFsVisBridge.controller.ticksElapsed;
+
+                requestAnimationFrame(drawFsVis);
+            }
+            requestAnimationFrame(drawFsVis);
+
+            (/** @type {HTMLButtonElement} */ (document.querySelector("#download-playing-button"))).onclick = e => {
+                renderAndDownloadSeq(currentlyPlayingSdat, currentlyPlayingName);
+            };
+
+
         }
     </script>
 </head>
@@ -3380,6 +3675,12 @@
 
         <div id="visualizer-pane">
             <div>
+                <button id="fullscreen-vis-button">Open Fullscreen Visualizer</button>
+            </div>
+            <div>
+                <button id="download-playing-button">Download Currently Playing Song</button>
+            </div>
+            <div>
                 <button id="pause-button">Pause Sequence Player</button>
                 <button id="restart-sequence-button">Restart Sequence</button>
             </div>
@@ -3388,6 +3689,8 @@
             </div>
         </div>
     </div>
+
+    <canvas id="fullscreen-vis-canvas"></canvas>
 </body>
 
 </html>
