@@ -2734,11 +2734,6 @@
 
                         let sampleDataLength = (swarLoopOffset + swarSampleLength) * 4;
 
-                        // add 4 byte ADPCM header to length
-                        if (wavType == 2) {
-                            sampleDataLength += 4;
-                        }
-
                         let sampleData = new Uint8Array(sampleDataLength);
                         for (let k = 0; k < sampleDataLength; k++) {
                             sampleData[k] = swarFile[sampleOffset + k + 0xC];
@@ -2759,7 +2754,7 @@
                                 // console.log(`Archive ${i}, Sample ${j}: PCM16`);
                                 break;
                             case 2: // IMA-ADPCM
-                                loopPoint = swarLoopOffset * 8;
+                                loopPoint = swarLoopOffset * 8 - 8;
                                 decoded = decodeAdpcm(sampleData);
                                 // console.log(`Archive ${i}, Sample ${j}: ADPCM`);
                                 break;
