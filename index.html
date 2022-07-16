@@ -3566,19 +3566,34 @@
                             let blackKey = isBlackKey(keyInOctave);
 
                             let whiteKeyNum = octave * 7 + keyNum;
+                            fsVisCtx.strokeStyle = "#444444";
+
+                            fsVisCtx.lineWidth = 0.001;
 
                             if (y < 1 - wKeyHeight) {
                                 if (!blackKey) {
                                     fsVisCtx.fillStyle = fsVisPalette[entry.trackNum];
 
-                                    fsVisCtx.fillRect(whiteKeyNum * wKeyWidth, y, wKeyWidth - pixelX * 2, height);
+                                    let x = whiteKeyNum * wKeyWidth;
+                                    let w = wKeyWidth - pixelX * 2;
+                                    let h = height;
+
+                                    fsVisCtx.fillRect(x, y, w, h);
+                                    fsVisCtx.strokeRect(x, y, w, h);
+
                                     if (relTime < 0 && relTime > -duration) {
                                         activeNoteTrackNums[midiNote] = entry.trackNum;
                                     }
                                 } else {
                                     fsVisCtx.fillStyle = fsVisPalette[entry.trackNum];
 
-                                    fsVisCtx.fillRect(whiteKeyNum * wKeyWidth + wKeyWidth * 0.5, y, wKeyWidth - pixelX * 2, height);
+                                    let x = whiteKeyNum * wKeyWidth + wKeyWidth * 0.5;
+                                    let w = wKeyWidth - pixelX * 2;
+                                    let h = height;
+
+                                    fsVisCtx.fillRect(x, y, w, h);
+                                    fsVisCtx.strokeRect(x, y, w, h);
+
                                     if (relTime < 0 && relTime > -duration) {
                                         activeNoteTrackNums[midiNote] = entry.trackNum;
                                     }
@@ -3587,7 +3602,7 @@
                             }
                         }
 
-                        console.log("Drew " + drew + "Notes");
+                        // console.log("Drew " + drew + "Notes");
 
                         function drawKeys(black) {
                             // piano has 88 keys
@@ -3601,6 +3616,7 @@
                                 let keyNum = getKeyNum(keyInOctave);
                                 let blackKey = isBlackKey(keyInOctave);
 
+
                                 if (blackKey == black) {
                                     let whiteKeyNum = octave * 7 + keyNum;
 
@@ -3613,8 +3629,12 @@
                                             fsVisCtx.fillStyle = "#ffffff";
                                         }
 
-                                        fsVisCtx.fillRect(whiteKeyNum * wKeyWidth, 1 - wKeyHeight, wKeyWidth - pixelX * 2, wKeyHeight);
+                                        let x = whiteKeyNum * wKeyWidth;
+                                        let y = 1 - wKeyHeight;
+                                        let w = wKeyWidth - pixelX * 2;
+                                        let h = wKeyHeight;
 
+                                        fsVisCtx.fillRect(x, y, w, h);
                                     } else {
                                         if (activeNoteTrackNums[midiNote] != -1) {
                                             fsVisCtx.fillStyle = fsVisPalette[activeNoteTrackNums[midiNote]];
@@ -3623,7 +3643,12 @@
                                             fsVisCtx.fillStyle = "#000000";
                                         }
 
-                                        fsVisCtx.fillRect(whiteKeyNum * wKeyWidth + wKeyWidth * 0.5, 1 - wKeyHeight, wKeyWidth - pixelX * 2, wKeyHeight * 0.58);
+                                        let x = whiteKeyNum * wKeyWidth + wKeyWidth * 0.5;
+                                        let y = 1 - wKeyHeight;
+                                        let w = wKeyWidth - pixelX * 2;
+                                        let h = wKeyHeight * 0.58;
+
+                                        fsVisCtx.fillRect(x, y, w, h);
                                     }
                                 }
                             }
