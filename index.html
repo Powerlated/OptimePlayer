@@ -94,6 +94,8 @@
         let currentlyPlayingName = null;
         /** @type {Sdat} */
         let currentlyPlayingSdat = null;
+        /** @type {number} */
+        let currentlyPlayingId = null;
         /** @type {AudioPlayer} */
         let currentPlayer = null;
 
@@ -782,6 +784,8 @@
             constructor() {
                 /** @type {Uint8Array[]} */
                 this.fat = [];
+
+                this.sseqList = [];
 
                 /** @type {SseqInfo[]} */
                 this.sseqInfos = [];
@@ -1690,7 +1694,7 @@
                 this.messageBuffer = new CircularBuffer(512);
                 this.controller = new SseqController(file, dataOffset, this.messageBuffer);
                 /** @type {CircularBuffer<Message>} */
-                this.activeNotes = new CircularBuffer(512);
+                this.activeNotes = new CircularBuffer(1024);
 
                 this.bpmTimer = 0;
 
@@ -1995,6 +1999,13 @@
             return (i & (1 << bit)) !== 0;
         }
 
+        /**
+        * @param {Sdat} sdat
+        * @param {number} id
+        */
+        function playSeqById(sdat, id) {
+            playSeq(sdat, sdat.sseqIdNameDict[id]);
+        }
 
         /**
          * @param {Sdat} sdat
@@ -2012,6 +2023,8 @@
             const SAMPLE_RATE = 32768;
 
             let id = sdat.sseqNameIdDict[name];
+
+            currentlyPlayingId = id;
 
             let bufferL = new Float32Array(BUFFER_SIZE);
             let bufferR = new Float32Array(BUFFER_SIZE);
@@ -2590,6 +2603,7 @@
                         info.ply = sdatData[infoOffs + infoSseqNameOffs + 9];
 
                         sdat.sseqInfos[i] = info;
+                        sdat.sseqList.push(i);
                     } else {
                         sdat.sseqInfos[i] = null;
                     }
@@ -3357,6 +3371,23 @@
                 });
 
                 function keyboardPress(key, down) {
+                    if (down) {
+                        let currentSseqListIndex = currentlyPlayingSdat.sseqList.indexOf(currentlyPlayingId);
+                        switch (key) {
+                            case "ArrowLeft":
+                                let prevSseqListIndex = currentlyPlayingSdat.sseqList[currentSseqListIndex - 1];
+                                if (prevSseqListIndex != undefined) {
+                                    playSeqById(currentlyPlayingSdat, prevSseqListIndex);
+                                }
+                                break;
+                            case "ArrowRight":
+                                let nextSseqListIndex = currentlyPlayingSdat.sseqList[currentSseqListIndex + 1];
+                                if (nextSseqListIndex != undefined) {
+                                    playSeqById(currentlyPlayingSdat, nextSseqListIndex);
+                                }
+                                break;
+                        }
+                    }
                     if (currentBridge?.activeKeyboardTrackNum != null) {
                         let isNote = false;
                         let note = 0;
@@ -3510,10 +3541,7 @@
 
             let lastTickTime = 0;
             let lastTicks = 0;
-            let lastDrawFsVisTime = 0;
             function drawFsVis(time) {
-                let dt = time - lastDrawFsVisTime;
-                lastDrawFsVisTime = time;
 
                 if (fsVisVisible) {
                     fsVisCtx.imageSmoothingEnabled = false;
@@ -3532,11 +3560,13 @@
 
                     fsVisCtx.fillStyle = "#FF0000";
                     if (currentFsVisBridge) {
+
                         let activeNotes = currentFsVisBridge.activeNotes;
 
                         if (lastTicks != currentFsVisBridge.controller.ticksElapsed) {
                             lastTickTime = time;
                         }
+                        fsVisCtx.globalAlpha = 1;
 
                         let drew = 0;
                         for (let i = 0; i < activeNotes.entries; i++) {
@@ -3553,8 +3583,10 @@
 
                             let pianoKey = midiNote - 21;
 
-                            let height = duration / 192;
-                            let y = 1 - relTime / 192 - height - wKeyHeight;
+                            let ticksToDisplay = 384;
+
+                            let height = duration / ticksToDisplay;
+                            let y = 1 - relTime / ticksToDisplay - height - wKeyHeight;
                             if (y + height >= 1 - wKeyHeight) {
                                 height = 1 - wKeyHeight - y;
                             }
@@ -3603,6 +3635,7 @@
                         }
 
                         // console.log("Drew " + drew + "Notes");
+                        fsVisCtx.globalAlpha = 1;
 
                         function drawKeys(black) {
                             // piano has 88 keys
@@ -3656,7 +3689,6 @@
 
                         drawKeys(false);
                         drawKeys(true);
-
                     }
 
                 }
