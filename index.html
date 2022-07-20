@@ -1055,10 +1055,10 @@
                 this.program = 0;
                 this.bank = 0;
 
-                this.modulationDepth = 0;
-                this.modulationSpeed = 0;
-                this.modulationType = 0;
-                this.modulationRange = 0;
+                this.lfoDepth = 0;
+                this.lfoSpeed = 0;
+                this.lfoType = 0;
+                this.lfoRange = 0;
 
                 this.pitchBend = 0;
                 this.pitchBendRange = 0;
@@ -1238,28 +1238,30 @@
                                 this.debugLog("Pitch Bend Range: " + this.pitchBendRange);
                                 break;
                             }
-                        case 0xCA: // Modulation Depth
+                        case 0xCA: // LFO Depth
                             {
-                                this.modulationDepth = this.readPcInc();
-                                this.debugLog("Modulation Depth: " + this.modulationDepth);
+                                this.lfoDepth = this.readPcInc();
+                                this.debugLog("LFO Depth: " + this.lfoDepth);
                                 break;
                             }
-                        case 0xCB: // Modulation Speed
+                        case 0xCB: // LFO Speed
                             {
-                                this.modulationSpeed = this.readPcInc();
-                                this.debugLog("Modulation Speed: " + this.modulationSpeed);
+                                this.lfoSpeed = this.readPcInc();
+                                this.debugLog("LFO Speed: " + this.lfoSpeed);
                                 break;
                             }
-                        case 0xCC: // Modulation Type
+                        case 0xCC: // LFO Type
                             {
-                                this.modulationType = this.readPcInc();
-                                this.debugLog("Modulation Type: " + this.modulationType);
+                                this.lfoType = this.readPcInc();
+                                this.debugLog("LFO Type: " + this.lfoType);
+                                console.warn("Unimplemented LFO");
                                 break;
                             }
-                        case 0xCD: // Modulation Range
+                        case 0xCD: // LFO Range
                             {
-                                this.modulationRange = this.readPcInc();
-                                this.debugLog("ModulationRange: " + this.modulationRange);
+                                this.lfoRange = this.readPcInc();
+                                this.debugLog("LFO Range: " + this.lfoRange);
+                                console.warn("Unimplemented LFO");
                                 break;
                             }
                         case 0xC4: // Pitch Bend
@@ -1302,10 +1304,10 @@
                                 this.readPcInc(3);
                                 break;
                             }
-                        case 0xE0: // Modulation Delay
+                        case 0xE0: // LFO Delay
                             {
-                                this.modulationDelay = this.readPcInc(2);
-                                this.debugLog("Modulation Delay: " + this.modulationDelay);
+                                this.LFODelay = this.readPcInc(2);
+                                this.debugLog("LFO Delay: " + this.LFODelay);
                                 break;
                             }
                         case 0xD5: // Expression
@@ -3689,6 +3691,13 @@
 
                         drawKeys(false);
                         drawKeys(true);
+
+                        fsVisCtx.setTransform(1, 0, 0, 1, 0, 0);
+
+                        fsVisCtx.textBaseline = "top";
+                        fsVisCtx.fillStyle = "#ffffff";
+                        fsVisCtx.font = 'bold 24px monospace';
+                        fsVisCtx.fillText(`ID: ${currentlyPlayingId} ${currentlyPlayingSdat.sseqIdNameDict[currentlyPlayingId]}`, 24, 24);
                     }
 
                 }
@@ -3713,7 +3722,8 @@
     <div id='drop-zone'>
         <h1>Drop file!</h1>
     </div>
-    <h1>Optime Player</h1>
+    <h1 style="margin-bottom: 0">Optime Player</h1>
+    <a href="https://github.com/Powerlated/OptimePlayer">https://github.com/Powerlated/OptimePlayer</a>
 
 
     <div class="container">
