@@ -246,48 +246,6 @@
                 }
             });
 
-            function getKeyNum(keyInOctave) {
-                // THIS IS STARTING FROM THE KEY OF A
-                switch (keyInOctave) {
-                    case 0: return 0;
-                    case 2: return 1;
-                    case 3: return 2;
-                    case 5: return 3;
-                    case 7: return 4;
-                    case 8: return 5;
-                    case 10: return 6;
-
-                    case 1: return 0;
-                    case 4: return 2;
-                    case 6: return 3;
-                    case 9: return 5;
-                    case 11: return 6;
-
-                    default: return 0;
-                }
-            }
-
-            function isBlackKey(keyInOctave) {
-                // THIS IS STARTING FROM THE KEY OF A
-                switch (keyInOctave) {
-                    case 0: return false;
-                    case 2: return false;
-                    case 3: return false;
-                    case 5: return false;
-                    case 7: return false;
-                    case 8: return false;
-                    case 10: return false;
-
-                    case 1: return true;
-                    case 4: return true;
-                    case 6: return true;
-                    case 9: return true;
-                    case 11: return true;
-
-                    default: return false;
-                }
-            }
-
             Promise.all(
                 [
                     loadHtmlImageElementFromUrl("assets/piano_section_1.png"),
@@ -680,26 +638,6 @@
                 };
             });
 
-
-            const fsVisPalette = [
-                "#da3fb1",
-                "#ad42ba",
-                "#5443c2",
-                "#2b68d7",
-                "#3095f2",
-                "#2acdfe",
-                "#2bceff",
-                "#52ddf6",
-                "#57d677",
-                "#5ed62e",
-                "#aeeb20",
-                "#fef711",
-                "#ff991d",
-                "#ff641d",
-                "#ff1434",
-                "#fa30a3",
-            ];
-
             /** @type {HTMLCanvasElement} */
             let fsVisCanvas = document.querySelector("#fullscreen-vis-canvas");
             let fsVisCtx = fsVisCanvas.getContext("2d");
@@ -726,175 +664,13 @@
                 fsVisCanvas.style.display = "none";
             }
 
-            let activeNoteTrackNums = new Int8Array(128).fill(-1);
-
-            let lastTickTime = 0;
-            let lastTicks = 0;
-            function drawFsVis(time) {
-
-                if (fsVisVisible) {
-                    fsVisCtx.imageSmoothingEnabled = false;
-                    fsVisCanvas.width = window.innerWidth;
-                    fsVisCanvas.height = window.innerHeight;
-                    // normalize to 0-1 on both axes
-                    fsVisCtx.setTransform(1, 0, 0, 1, 0, 0);
-                    fsVisCtx.scale(fsVisCanvas.width - 1, fsVisCanvas.height - 1);
-                    fsVisCtx.fillStyle = "#222222";
-                    fsVisCtx.fillRect(0, 0, 1, 1);
-
-                    let wKeyWidth = 1 / 52;
-                    let wKeyHeight = 1 / 7;
-                    let pixelX = 1 / fsVisCanvas.width;
-                    let pixelY = 1 / fsVisCanvas.height;
-
-                    fsVisCtx.fillStyle = "#FF0000";
-                    if (currentFsVisBridge) {
-
-                        let activeNotes = currentFsVisBridge.activeNotes;
-
-                        if (lastTicks != currentFsVisBridge.controller.ticksElapsed) {
-                            lastTickTime = time;
-                        }
-                        fsVisCtx.globalAlpha = 1;
-
-                        let drew = 0;
-                        for (let i = 0; i < activeNotes.entries; i++) {
-                            let entry = activeNotes.peek(i);
-                            let midiNote = entry.param0;
-                            let duration = entry.param2;
-
-                            let bpm = currentBridge.controller.tracks[0].bpm;
-                            let sPerTick = (1 / (bpm / 60)) / 48;
-
-                            let ticksAdj = currentBridge.controller.ticksElapsed;
-                            ticksAdj += (time - lastTickTime) / 1000 / sPerTick;
-                            let relTime = entry.timestamp - ticksAdj;
-
-                            let pianoKey = midiNote - 21;
-
-                            let ticksToDisplay = 384;
-
-                            let height = duration / ticksToDisplay;
-                            let y = 1 - relTime / ticksToDisplay - height - wKeyHeight;
-                            if (y + height >= 1 - wKeyHeight) {
-                                height = 1 - wKeyHeight - y;
-                            }
-
-                            let octave = Math.floor(pianoKey / 12);
-                            let keyInOctave = pianoKey % 12;
-
-                            let keyNum = getKeyNum(keyInOctave);
-                            let blackKey = isBlackKey(keyInOctave);
-
-                            let whiteKeyNum = octave * 7 + keyNum;
-                            fsVisCtx.strokeStyle = "#444444";
-
-                            fsVisCtx.lineWidth = 0.001;
-
-                            if (y < 1 - wKeyHeight && y + height > 0) {
-                                if (!blackKey) {
-                                    fsVisCtx.fillStyle = fsVisPalette[entry.trackNum];
-
-                                    let x = whiteKeyNum * wKeyWidth;
-                                    let w = wKeyWidth - pixelX * 2;
-                                    let h = height;
-
-                                    fsVisCtx.fillRect(x, y, w, h);
-                                    fsVisCtx.strokeRect(x, y, w, h);
-
-                                    if (relTime < 0 && relTime > -duration) {
-                                        activeNoteTrackNums[midiNote] = entry.trackNum;
-                                    }
-                                } else {
-                                    fsVisCtx.fillStyle = fsVisPalette[entry.trackNum];
-
-                                    let x = whiteKeyNum * wKeyWidth + wKeyWidth * 0.5;
-                                    let w = wKeyWidth - pixelX * 2;
-                                    let h = height;
-
-                                    fsVisCtx.fillRect(x, y, w, h);
-                                    fsVisCtx.strokeRect(x, y, w, h);
-
-                                    if (relTime < 0 && relTime > -duration) {
-                                        activeNoteTrackNums[midiNote] = entry.trackNum;
-                                    }
-                                }
-                                drew++;
-                            }
-                        }
-
-                        // console.log("Drew " + drew + "Notes");
-                        fsVisCtx.globalAlpha = 1;
-
-                        function drawKeys(black) {
-                            // piano has 88 keys
-                            for (let j = 0; j < 88; j++) {
-                                let midiNote = j + 21; // lowest piano note is 21 on midi
-
-                                // using the key of A as octave base
-                                let octave = Math.floor(j / 12);
-                                let keyInOctave = j % 12;
-
-                                let keyNum = getKeyNum(keyInOctave);
-                                let blackKey = isBlackKey(keyInOctave);
-
-
-                                if (blackKey == black) {
-                                    let whiteKeyNum = octave * 7 + keyNum;
-
-                                    let fillStyle;
-                                    if (!blackKey) {
-                                        if (activeNoteTrackNums[midiNote] != -1) {
-                                            fsVisCtx.fillStyle = fsVisPalette[activeNoteTrackNums[midiNote]];
-                                            activeNoteTrackNums[midiNote] = -1;
-                                        } else {
-                                            fsVisCtx.fillStyle = "#ffffff";
-                                        }
-
-                                        let x = whiteKeyNum * wKeyWidth;
-                                        let y = 1 - wKeyHeight;
-                                        let w = wKeyWidth - pixelX * 2;
-                                        let h = wKeyHeight;
-
-                                        fsVisCtx.fillRect(x, y, w, h);
-                                    } else {
-                                        if (activeNoteTrackNums[midiNote] != -1) {
-                                            fsVisCtx.fillStyle = fsVisPalette[activeNoteTrackNums[midiNote]];
-                                            activeNoteTrackNums[midiNote] = -1;
-                                        } else {
-                                            fsVisCtx.fillStyle = "#000000";
-                                        }
-
-                                        let x = whiteKeyNum * wKeyWidth + wKeyWidth * 0.5;
-                                        let y = 1 - wKeyHeight;
-                                        let w = wKeyWidth - pixelX * 2;
-                                        let h = wKeyHeight * 0.58;
-
-                                        fsVisCtx.fillRect(x, y, w, h);
-                                    }
-                                }
-                            }
-                        }
-
-                        drawKeys(false);
-                        drawKeys(true);
-
-                        fsVisCtx.setTransform(1, 0, 0, 1, 0, 0);
-
-                        fsVisCtx.textBaseline = "top";
-                        fsVisCtx.fillStyle = "#ffffff";
-                        fsVisCtx.font = 'bold 24px monospace';
-                        fsVisCtx.fillText(`${currentlyPlayingSdat.sseqIdNameDict[currentlyPlayingId]} (ID: ${currentlyPlayingId})`, 24, 24);
-                    }
-
-                }
-
-                if (currentFsVisBridge)
-                    lastTicks = currentFsVisBridge.controller.ticksElapsed;
-
-                requestAnimationFrame(drawFsVis);
+            function fsVisFrame(time) {
+                fsVisCanvas.width = window.innerWidth;
+                fsVisCanvas.height = window.innerHeight;
+                drawFsVis(fsVisCtx, time);
+                requestAnimationFrame(fsVisFrame);
             }
-            requestAnimationFrame(drawFsVis);
+            requestAnimationFrame(fsVisFrame);
 
             (/** @type {HTMLButtonElement} */ (document.querySelector("#download-playing-button"))).onclick = e => {
                 renderAndDownloadSeq(currentlyPlayingSdat, currentlyPlayingName);
@@ -934,6 +710,7 @@
                 <button onclick="loadDemo('new-super-mario-bros')">New Super Mario Bros.</button>
                 <button onclick="loadDemo('super-mario-64-ds')">Super Mario 64 DS</button>
                 <button onclick="loadDemo('pokemon-platinum')">Pokémon Platinum</button>
+                <button onclick="loadDemo('pokemon-black-2')">Pokémon Black 2</button>
                 <button onclick="loadDemo('ace-attorney')">Phoenix Wright: Ace Attorney</button>
             </div>
         </div>

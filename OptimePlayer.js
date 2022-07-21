@@ -14,8 +14,8 @@ let currentFsVisBridge = null;
 let currentlyPlayingName = null;
 /** @type {Sdat | null} */
 let currentlyPlayingSdat = null;
-/** @type {number | null} */
-let currentlyPlayingId = null;
+/** @type {number} */
+let currentlyPlayingId = 0;
 /** @type {AudioPlayer | null} */
 let currentPlayer = null;
 
@@ -353,7 +353,7 @@ function downloadUint8Array(name, array) {
 }
 
 //@ts-check
-class WavDownloader {
+class WavEncoder {
     constructor(sampleRate, bits) {
         this.sampleRate = sampleRate;
         this.bits = bits;
@@ -397,7 +397,7 @@ class WavDownloader {
 
     }
 
-    download(name) {
+    encode() {
         // Allocate exactly enough for a WAV header
         const wave = new Uint8Array(this.recordBufferAt + 44);
 
@@ -480,7 +480,7 @@ class WavDownloader {
             wave[44 + i] = this.recordBuffer[i];
         }
 
-        downloadUint8Array(name, wave);
+        return wave;
     }
 }
 
@@ -1860,59 +1860,61 @@ class ControllerBridge {
                             let sampleId = instrument.swavInfoId[index];
 
                             let archive = this.sdat.sampleArchives[this.bankInfo.swarId[archiveId]];
-                            let sample = archive[sampleId];
+                            if (archive) {
+                                let sample = archive[sampleId];
 
-                            if (instrument.fRecord == InstrumentType.PsgPulse) {
-                                sample = square50;
-                            } else {
-                                sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
+                                if (instrument.fRecord == InstrumentType.PsgPulse) {
+                                    sample = square50;
+                                } else {
+                                    sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
+                                }
+
+                                // if (msg.fromKeyboard) { 
+                                // console.log(this.bank);
+                                // console.log("Program " + this.controller.tracks[msg.trackNum].program);
+                                // console.log("MIDI Note " + midiNote);
+                                // console.log("Base MIDI Note: " + instrument.noteNumber[index]);
+
+                                // if (instrument.fRecord == InstrumentType.PsgPulse) {
+                                //     console.log("PSG Pulse");
+                                // }
+
+                                // console.log("Attack: " + instrument.attack[index]);
+                                // console.log("Decay: " + instrument.decay[index]);
+                                // console.log("Sustain: " + instrument.sustain[index]);
+                                // console.log("Release: " + instrument.release[index]);
+
+                                // console.log("Attack Coefficient: " + instrument.attackCoefficient[index]);
+                                // console.log("Decay Coefficient: " + instrument.decayCoefficient[index]);
+                                // console.log("Sustain Level: " + instrument.sustainLevel[index]);
+                                // console.log("Release Coefficient: " + instrument.releaseCoefficient[index]);
+
+                                // }
+
+                                // TODO: implement per-instrument pan
+                                let pan = this.controller.tracks[msg.trackNum].pan / 128;
+
+                                let track = this.controller.tracks[msg.trackNum];
+                                let initialVolume = instrument.attackCoefficient[index] == 0 ? calcChannelVolume(velocity, 0) : 0;
+                                let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, hz, initialVolume, pan, this.controller.ticksElapsed);
+
+                                this.notesOn[msg.trackNum][midiNote] = 1;
+                                this.noteCutTimes.addEntry(
+                                    {
+                                        trackNum: msg.trackNum,
+                                        midiNote: midiNote,
+                                        velocity: velocity,
+                                        synthInstrIndex: synthInstrIndex,
+                                        startTime: this.controller.ticksElapsed,
+                                        instrument: instrument,
+                                        instrumentEntryIndex: index,
+                                        adsrState: AdsrState.Attack,
+                                        adsrTimer: -92544, // idk why this number, ask gbatek
+                                        fromKeyboard: msg.fromKeyboard
+                                    },
+                                    this.controller.ticksElapsed + duration
+                                );
                             }
-
-                            // if (msg.fromKeyboard) { 
-                            // console.log(this.bank);
-                            // console.log("Program " + this.controller.tracks[msg.trackNum].program);
-                            // console.log("MIDI Note " + midiNote);
-                            // console.log("Base MIDI Note: " + instrument.noteNumber[index]);
-
-                            // if (instrument.fRecord == InstrumentType.PsgPulse) {
-                            //     console.log("PSG Pulse");
-                            // }
-
-                            // console.log("Attack: " + instrument.attack[index]);
-                            // console.log("Decay: " + instrument.decay[index]);
-                            // console.log("Sustain: " + instrument.sustain[index]);
-                            // console.log("Release: " + instrument.release[index]);
-
-                            // console.log("Attack Coefficient: " + instrument.attackCoefficient[index]);
-                            // console.log("Decay Coefficient: " + instrument.decayCoefficient[index]);
-                            // console.log("Sustain Level: " + instrument.sustainLevel[index]);
-                            // console.log("Release Coefficient: " + instrument.releaseCoefficient[index]);
-
-                            // }
-
-                            // TODO: implement per-instrument pan
-                            let pan = this.controller.tracks[msg.trackNum].pan / 128;
-
-                            let track = this.controller.tracks[msg.trackNum];
-                            let initialVolume = instrument.attackCoefficient[index] == 0 ? calcChannelVolume(velocity, 0) : 0;
-                            let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, hz, initialVolume, pan, this.controller.ticksElapsed);
-
-                            this.notesOn[msg.trackNum][midiNote] = 1;
-                            this.noteCutTimes.addEntry(
-                                {
-                                    trackNum: msg.trackNum,
-                                    midiNote: midiNote,
-                                    velocity: velocity,
-                                    synthInstrIndex: synthInstrIndex,
-                                    startTime: this.controller.ticksElapsed,
-                                    instrument: instrument,
-                                    instrumentEntryIndex: index,
-                                    adsrState: AdsrState.Attack,
-                                    adsrTimer: -92544, // idk why this number, ask gbatek
-                                    fromKeyboard: msg.fromKeyboard
-                                },
-                                this.controller.ticksElapsed + duration
-                            );
                         }
                         break;
                     case MessageType.Jump: {
@@ -2048,7 +2050,7 @@ async function playSeq(sdat, name) {
  */
 async function downloadSample(sample) {
     let totalSamples = 0;
-    let downloader = new WavDownloader(sample.sampleRate, 16);
+    let downloader = new WavEncoder(sample.sampleRate, 16);
     for (let i = 0; i < sample.data.length; i++) {
         let val = sample.data[i];
         downloader.addSample(val, val);
@@ -2065,7 +2067,7 @@ async function downloadSample(sample) {
         }
     }
 
-    downloader.download("sample.wav");
+    downloadUint8Array("sample.wav", downloader.encode());
 }
 
 /**
@@ -2157,9 +2159,9 @@ async function renderAndDownloadSeq(sdat, name) {
     }
 
     // console.log(bufferL)
-    let downloader = new WavDownloader(SAMPLE_RATE, 16);
-    downloader.addSamples(bufferL, bufferR, sample);
-    downloader.download(name + ".wav");
+    let encoder = new WavEncoder(SAMPLE_RATE, 16);
+    encoder.addSamples(bufferL, bufferR, sample);
+    downloadUint8Array(name + ".wav", encoder.encode());
 }
 
 function clamp(val, min, max) {
@@ -2854,4 +2856,232 @@ function searchForSequences(data, sequence) {
     }
 
     return seqs;
+}
+
+function getKeyNum(keyInOctave) {
+    // THIS IS STARTING FROM THE KEY OF A
+    switch (keyInOctave) {
+        case 0: return 0;
+        case 2: return 1;
+        case 3: return 2;
+        case 5: return 3;
+        case 7: return 4;
+        case 8: return 5;
+        case 10: return 6;
+
+        case 1: return 0;
+        case 4: return 2;
+        case 6: return 3;
+        case 9: return 5;
+        case 11: return 6;
+
+        default: return 0;
+    }
+}
+
+function isBlackKey(keyInOctave) {
+    // THIS IS STARTING FROM THE KEY OF A
+    switch (keyInOctave) {
+        case 0: return false;
+        case 2: return false;
+        case 3: return false;
+        case 5: return false;
+        case 7: return false;
+        case 8: return false;
+        case 10: return false;
+
+        case 1: return true;
+        case 4: return true;
+        case 6: return true;
+        case 9: return true;
+        case 11: return true;
+
+        default: return false;
+    }
+}
+
+const fsVisPalette = [
+    "#da3fb1",
+    "#ad42ba",
+    "#5443c2",
+    "#2b68d7",
+    "#3095f2",
+    "#2acdfe",
+    "#2bceff",
+    "#52ddf6",
+    "#57d677",
+    "#5ed62e",
+    "#aeeb20",
+    "#fef711",
+    "#ff991d",
+    "#ff641d",
+    "#ff1434",
+    "#fa30a3",
+];
+
+
+let activeNoteTrackNums = new Int8Array(128).fill(-1);
+let lastTickTime = 0;
+let lastTicks = 0;
+/** @param {CanvasRenderingContext2D} ctx */
+/** @param {number} time */
+/** @param {number} noteAlpha */
+function drawFsVis(ctx, time, noteAlpha) {
+    ctx.imageSmoothingEnabled = false;
+
+    // normalize to 0-1 on both axes
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(ctx.canvas.width - 1, ctx.canvas.height - 1);
+    ctx.fillStyle = "#222222";
+    ctx.fillRect(0, 0, 1, 1);
+
+    let wKeyWidth = 1 / 52;
+    let wKeyHeight = 1 / 7;
+    let pixelX = 1 / ctx.canvas.width;
+    let pixelY = 1 / ctx.canvas.height;
+
+    ctx.fillStyle = "#FF0000";
+    if (currentFsVisBridge && currentBridge && currentlyPlayingSdat) {
+
+        let activeNotes = currentFsVisBridge.activeNotes;
+
+        if (lastTicks != currentFsVisBridge.controller.ticksElapsed) {
+            lastTickTime = time;
+        }
+        ctx.globalAlpha = noteAlpha;
+
+        let drew = 0;
+        for (let i = 0; i < activeNotes.entries; i++) {
+            let entry = activeNotes.peek(i);
+            let midiNote = entry.param0;
+            let duration = entry.param2;
+
+            let bpm = currentBridge.controller.tracks[0].bpm;
+            let sPerTick = (1 / (bpm / 60)) / 48;
+
+            let ticksAdj = currentBridge.controller.ticksElapsed;
+            ticksAdj += (time - lastTickTime) / 1000 / sPerTick;
+            let relTime = entry.timestamp - ticksAdj;
+
+            let pianoKey = midiNote - 21;
+
+            let ticksToDisplay = 384;
+
+            let height = duration / ticksToDisplay;
+            let y = 1 - relTime / ticksToDisplay - height - wKeyHeight;
+            if (y + height >= 1 - wKeyHeight) {
+                height = 1 - wKeyHeight - y;
+            }
+
+            let octave = Math.floor(pianoKey / 12);
+            let keyInOctave = pianoKey % 12;
+
+            let keyNum = getKeyNum(keyInOctave);
+            let blackKey = isBlackKey(keyInOctave);
+
+            let whiteKeyNum = octave * 7 + keyNum;
+            ctx.strokeStyle = "#444444";
+
+            ctx.lineWidth = 0.001;
+
+            if (y < 1 - wKeyHeight && y + height > 0) {
+                if (!blackKey) {
+                    ctx.fillStyle = fsVisPalette[entry.trackNum];
+
+                    let x = whiteKeyNum * wKeyWidth;
+                    let w = wKeyWidth - pixelX * 2;
+                    let h = height;
+
+                    ctx.fillRect(x, y, w, h);
+                    ctx.strokeRect(x, y, w, h);
+
+                    if (relTime < 0 && relTime > -duration) {
+                        activeNoteTrackNums[midiNote] = entry.trackNum;
+                    }
+                } else {
+                    ctx.fillStyle = fsVisPalette[entry.trackNum];
+
+                    let x = whiteKeyNum * wKeyWidth + wKeyWidth * 0.5;
+                    let w = wKeyWidth - pixelX * 2;
+                    let h = height;
+
+                    ctx.fillRect(x, y, w, h);
+                    ctx.strokeRect(x, y, w, h);
+
+                    if (relTime < 0 && relTime > -duration) {
+                        activeNoteTrackNums[midiNote] = entry.trackNum;
+                    }
+                }
+                drew++;
+            }
+        }
+
+        // console.log("Drew " + drew + "Notes");
+
+        function drawKeys(black) {
+            // piano has 88 keys
+            for (let j = 0; j < 88; j++) {
+                let midiNote = j + 21; // lowest piano note is 21 on midi
+
+                // using the key of A as octave base
+                let octave = Math.floor(j / 12);
+                let keyInOctave = j % 12;
+
+                let keyNum = getKeyNum(keyInOctave);
+                let blackKey = isBlackKey(keyInOctave);
+
+
+                if (blackKey == black) {
+                    let whiteKeyNum = octave * 7 + keyNum;
+
+                    let fillStyle;
+                    if (!blackKey) {
+                        if (activeNoteTrackNums[midiNote] != -1) {
+                            ctx.fillStyle = fsVisPalette[activeNoteTrackNums[midiNote]];
+                            activeNoteTrackNums[midiNote] = -1;
+                        } else {
+                            ctx.fillStyle = "#ffffff";
+                        }
+
+                        let x = whiteKeyNum * wKeyWidth;
+                        let y = 1 - wKeyHeight;
+                        let w = wKeyWidth - pixelX * 2;
+                        let h = wKeyHeight;
+
+                        ctx.fillRect(x, y, w, h);
+                    } else {
+                        if (activeNoteTrackNums[midiNote] != -1) {
+                            ctx.fillStyle = fsVisPalette[activeNoteTrackNums[midiNote]];
+                            activeNoteTrackNums[midiNote] = -1;
+                        } else {
+                            ctx.fillStyle = "#000000";
+                        }
+
+                        let x = whiteKeyNum * wKeyWidth + wKeyWidth * 0.5;
+                        let y = 1 - wKeyHeight;
+                        let w = wKeyWidth - pixelX * 2;
+                        let h = wKeyHeight * 0.58;
+
+                        ctx.fillRect(x, y, w, h);
+                    }
+                }
+            }
+        }
+
+        drawKeys(false);
+        drawKeys(true);
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+        ctx.globalAlpha = 1;
+
+        ctx.textBaseline = "top";
+        ctx.fillStyle = "#ffffff";
+        ctx.font = 'bold 24px monospace';
+        ctx.fillText(`${currentlyPlayingSdat.sseqIdNameDict[currentlyPlayingId]} (ID: ${currentlyPlayingId})`, 24, 24);
+    }
+
+
+    if (currentFsVisBridge)
+        lastTicks = currentFsVisBridge.controller.ticksElapsed;
 }

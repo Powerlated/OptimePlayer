@@ -1,0 +1,26 @@
+{
+  "name": "optimeplayer",
+  "version": "1.0.0",
+  "description": "This is a web application for playing music from Nintendo DS ROMs.",
+  "main": "video-exporter.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Powerlated/OptimePlayer.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Powerlated/OptimePlayer/issues"
+  },
+  "homepage": "https://github.com/Powerlated/OptimePlayer#readme",
+  "dependencies": {
+    "canvas": "^2.9.3",
+    "fluent-ffmpeg": "^2.1.2"
+  }
+}
