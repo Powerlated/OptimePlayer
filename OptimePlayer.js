@@ -998,7 +998,7 @@ class SseqTrack {
         this.bpm = 0;
 
         this.pc = 0;
-        this.pan = 0;
+        this.pan = 64;
         this.mono = false;
         this.volume = 0;
         this.priority = 0;
@@ -2046,7 +2046,7 @@ async function playSeq(sdat, name) {
 }
 
 /**
- * @param {Sample} sample
+ * @param {Sample} sample 
  */
 async function downloadSample(sample) {
     let totalSamples = 0;
