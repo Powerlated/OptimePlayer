@@ -76,7 +76,11 @@
             top: 0;
             width: 100%;
             height: 100%;
-            pointer-events: none;
+        }
+
+        .button-group {
+            margin-top: 4px;
+            margin-bottom: 4px;
         }
     </style>
 
@@ -85,6 +89,9 @@
 
         /** GLOBALS GO HERE **/
         let debug = false;
+
+        let enableAntiAliasing = true;
+        const toggleAntiAliasing = () => { enableAntiAliasing = !enableAntiAliasing; };
 
         /** @type {ControllerBridge} */
         let currentBridge = null;
@@ -113,17 +120,32 @@
             if (t < dt) {
                 t /= dt;
                 // 2 * (t - t^2/2 - 0.5)
-                return t + t - t * t - 1.;
+                return t + t - t * t - 1.0;
             }
             // -1 < t < 0
-            else if (t > 1. - dt) {
-                t = (t - 1.) / dt;
+            else if (t > 1.0 - dt) {
+                t = (t - 1.0) / dt;
                 // 2 * (t^2/2 + t + 0.5)
-                return t * t + t + t + 1.;
+                return t * t + t + t + 1.0;
             }
             // 0 otherwise
             else {
-                return 0.;
+                return 0.0;
+            }
+        }
+
+        function polyBlepTest(t, dt) {
+            // 0 <= t < 1
+            if (t < dt) {
+                return 1;
+            }
+            // -1 < t < 0
+            else if (t > 1.0 - dt) {
+                return -1;
+            }
+            // 0 otherwise
+            else {
+                return 0.0;
             }
         }
 
@@ -807,8 +829,8 @@
                 /** @type {Bank[]} */
                 this.banks = new Array(128);
 
-                /** @type {Sample[][]} */
-                this.sampleArchives = new Array(256).fill(null).map(() => new Array());
+                /** @type {Object.<number, Sample[]>} */
+                this.sampleArchives = {};
             }
         }
 
@@ -834,7 +856,7 @@
 
         class Sample {
             /**
-            * @param {Float64Array} data 
+            * @param {Float32Array} data 
             * @param {number} frequency
             * @param {number} sampleRate
             * @param {boolean} looping
@@ -944,24 +966,35 @@
                 this.pan = 0.5;
 
                 this.startTime = 0;
+
+
+                // trackEnables.fill(false);
+                // trackEnables[7] = true;
             }
 
             changeSample(sample) {
                 this.sample = sample;
             }
 
-            sampleAt(outT) {
+            sampleAt(sampleNumber) {
+                let seconds = sampleNumber / this.sampleRate;
                 let ratio = this.frequency / this.sample.frequency;
-                let t = outT / this.sampleRate * ratio;
 
-                let sampleT = t * this.sample.sampleRate;
+                let convertedSampleRate = ratio * this.sample.sampleRate;
+                let sampleT = seconds * convertedSampleRate;
                 let val0 = this.getSampleDataAt(Math.floor(sampleT + 0));
                 let val1 = this.getSampleDataAt(Math.floor(sampleT + 1));
 
-                let subsampleT = sampleT % 1;
+                let finalVal = val0;
+                if (enableAntiAliasing) {
+                    let subsampleT = sampleT % 1;
+                    let deltaVal = val1 - val0;
+                    finalVal = subsampleT < 0.5 ? val0 : val1; 
+                    finalVal += polyBlep((subsampleT + 0.5) % 1, this.secondsPerSample * convertedSampleRate) * deltaVal;
+                }
 
-                this.valL = val0 * this.volume * (1 - this.pan);
-                this.valR = val0 * this.volume * this.pan;
+                this.valL = finalVal * this.volume * (1 - this.pan);
+                this.valR = finalVal * this.volume * this.pan;
                 return true;
             }
 
@@ -1368,7 +1401,7 @@
 
                 this.playingIndex = 0;
 
-                let emptySample = new Sample(new Float64Array(1), 440, sampleRate, false, 0);
+                let emptySample = new Sample(new Float32Array(1), 440, sampleRate, false, 0);
 
                 for (let i = 0; i < this.instrs.length; i++) {
                     this.instrs[i] = new SampleInstrument(this.sampleRate, emptySample);
@@ -1650,7 +1683,7 @@
         ];
 
         // TODO: Write a square synthesizer
-        const square50 = new Sample(new Float64Array([-0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0);
+        const square50 = new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0);
 
         // based off SND_CalcChannelVolume from pret/pokediamond
         function calcChannelVolume(velocity, adsrTimer) {
@@ -2021,8 +2054,8 @@
                 currentPlayer.ctx.close();
             }
 
-            const BUFFER_SIZE = 512;
-            const SAMPLE_RATE = 32768;
+            const BUFFER_SIZE = 1024;
+            const SAMPLE_RATE = 65536;
 
             let id = sdat.sseqNameIdDict[name];
 
@@ -2123,7 +2156,7 @@
         * @param {string} name
         */
         async function renderAndDownloadSeq(sdat, name) {
-            const SAMPLE_RATE = 32768;
+            const SAMPLE_RATE = 65536;
 
             let id = sdat.sseqNameIdDict[name];
 
@@ -2194,8 +2227,10 @@
                 let valR = 0;
                 for (let i = 0; i < 16; i++) {
                     bridge.synthesizers[i].nextSample();
-                    valL += bridge.synthesizers[i].valL;
-                    valR += bridge.synthesizers[i].valR;
+                    if (trackEnables[i]) {
+                        valL += bridge.synthesizers[i].valL;
+                        valR += bridge.synthesizers[i].valR;
+                    }
                 }
 
                 bufferL.push(valL * 0.5 * fadeoutVolMul);
@@ -2215,7 +2250,7 @@
         }
 
         function decodePcm8(pcm8Data) {
-            let out = new Float64Array(pcm8Data.length);
+            let out = new Float32Array(pcm8Data.length);
 
             for (let i = 0; i < out.length; i++) {
                 out[i] = (pcm8Data[i] << 24 >> 24) / 128;
@@ -2225,7 +2260,7 @@
         }
 
         function decodePcm16(pcm16Data) {
-            let out = new Float64Array(pcm16Data.length >> 1);
+            let out = new Float32Array(pcm16Data.length >> 1);
 
             for (let i = 0; i < out.length; i++) {
                 out[i] = ((read16LE(pcm16Data, i * 2) << 16) >> 16) / 32768;
@@ -2248,7 +2283,7 @@
 
         // Decodes IMA-ADPCM to PCM16
         function decodeAdpcm(adpcmData) {
-            let out = new Float64Array((adpcmData.length - 4) * 2);
+            let out = new Float32Array((adpcmData.length - 4) * 2);
             let outOffs = 0;
 
             let adpcmIndex = 0;
@@ -2318,7 +2353,7 @@
                 }
             }
 
-            return new Sample(Float64Array.from(sampleData), sampleFrequency, sampleRate, false, 0);
+            return new Sample(Float32Array.from(sampleData), sampleFrequency, sampleRate, false, 0);
         }
 
         function playStrm(strmData) {
@@ -2463,7 +2498,7 @@
             return 440 * 2 ** ((note - 69) / 12);
         }
 
-        function loadSdatFromRom(data, offset) {
+        function parseSdatFromRom(data, offset) {
             let sdat = new Sdat();
 
             let sdatSize = read32LE(data, offset + 0x8);
@@ -2475,7 +2510,7 @@
                 sdatData[i] = data[offset + i];
             }
 
-            // downloadUint8Array("platinum.sdat", sdatData);
+            // downloadUint8Array("OptimePlayer extracted.sdat", sdatData);
 
             let numOfBlocks = read16LE(sdatData, 0xE);
             let headerSize = read16LE(sdatData, 0xC);
@@ -2850,10 +2885,7 @@
 
                         let sampleDataLength = (swarLoopOffset + swarSampleLength) * 4;
 
-                        let sampleData = new Uint8Array(sampleDataLength);
-                        for (let k = 0; k < sampleDataLength; k++) {
-                            sampleData[k] = swarFile[sampleOffset + k + 0xC];
-                        }
+                        let sampleData = new Uint8Array(swarFile.buffer, sampleOffset + 0xC, sampleDataLength);
 
                         let decoded;
                         let loopPoint = 0;
@@ -2938,6 +2970,11 @@
         }
 
         async function loadNdsRom(data) {
+            let songPicker = document.querySelector(".song-picker");
+            while (songPicker.firstChild) {
+                songPicker.removeChild(songPicker.firstChild);
+            }
+
             console.log(`ROM size: ${data.length} bytes`);
 
             let sequence = [0x53, 0x44, 0x41, 0x54, 0xFF, 0xFE, 0x00, 0x01]; // "SDAT", then byte order 0xFEFF, then version 0x0100
@@ -2952,14 +2989,14 @@
             }
 
             for (let i = 0; i < res.length; i++) {
-                let sdat = loadSdatFromRom(data, res[i]);
+                let sdat = parseSdatFromRom(data, res[i]);
 
                 if (sdat != null) {
                     for (let i = 0; i < sdat.sseqIdNameDict.length; i++) {
                         let seqName = sdat.sseqIdNameDict[i];
                         if (seqName != undefined) {
                             let button = document.createElement('button');
-                            button.innerText = `ID: ${i} ${seqName}`;
+                            button.innerText = `${seqName} (ID: ${i})`;
                             button.style.textAlign = 'left';
                             document.querySelector(".song-picker").appendChild(button);
                             button.onclick = e => {
@@ -3697,7 +3734,7 @@
                         fsVisCtx.textBaseline = "top";
                         fsVisCtx.fillStyle = "#ffffff";
                         fsVisCtx.font = 'bold 24px monospace';
-                        fsVisCtx.fillText(`ID: ${currentlyPlayingId} ${currentlyPlayingSdat.sseqIdNameDict[currentlyPlayingId]}`, 24, 24);
+                        fsVisCtx.fillText(`${currentlyPlayingSdat.sseqIdNameDict[currentlyPlayingId]} (ID: ${currentlyPlayingId})`, 24, 24);
                     }
 
                 }
@@ -3714,6 +3751,13 @@
             };
 
 
+        };
+
+        /** @param {string} name */
+        function loadDemo(name) {
+            downloadFileFromUrl("demos/" + name + ".sdat").then(data => {
+                loadNdsRom(data);
+            });
         }
     </script>
 </head>
@@ -3735,19 +3779,23 @@
                 <p>or</p>
                 <input type="file" id="file-picker" accept=".nds">
             </div>
-            <!-- <div id="soundgoodizer-container">
-                <h3>Soundgoodizer</h3>
-            </div> -->
+            <div id="demos">
+                <h3>Demos</h3>
+                <button onclick="loadDemo('new-super-mario-bros')">New Super Mario Bros.</button>
+                <button onclick="loadDemo('super-mario-64-ds')">Super Mario 64 DS</button>
+                <button onclick="loadDemo('pokemon-platinum')">Pokémon Platinum</button>
+                <button onclick="loadDemo('ace-attorney')">Phoenix Wright: Ace Attorney</button>
+            </div>
         </div>
 
         <div id="visualizer-pane">
-            <div>
+            <div class="button-group">
                 <button id="fullscreen-vis-button">Open Fullscreen Visualizer</button>
             </div>
-            <div>
+            <div class="button-group">
                 <button id="download-playing-button">Download Currently Playing Song</button>
             </div>
-            <div>
+            <div class="button-group">
                 <button id="pause-button">Pause Sequence Player</button>
                 <button id="restart-sequence-button">Restart Sequence</button>
             </div>
