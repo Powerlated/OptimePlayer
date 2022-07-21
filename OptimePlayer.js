@@ -1973,7 +1973,7 @@ async function playSeq(sdat, name) {
         currentPlayer?.ctx.close();
     }
 
-    const BUFFER_SIZE = 1024;
+    const BUFFER_SIZE = 2048;
     const SAMPLE_RATE = 65536;
 
     let id = sdat.sseqNameIdDict[name];
