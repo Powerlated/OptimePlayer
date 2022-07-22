@@ -589,8 +589,8 @@
                             if (down) {
                                 currentBridge.controller.sendMessage(new Message(true, currentBridge.activeKeyboardTrackNum, MessageType.PlayNote, note, 127, 2000));
                             } else {
-                                for (let i = 0; i < currentBridge.noteCutTimes.heapEntries; i++) {
-                                    let entry = currentBridge.noteCutTimes.heap[i];
+                                for (let i = 0; i < currentBridge.activeNoteData.heapEntries; i++) {
+                                    let entry = currentBridge.activeNoteData.heap[i];
 
                                     if (entry.data.trackNum == currentBridge.activeKeyboardTrackNum && entry.data.midiNote == note) {
                                         currentBridge.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
@@ -667,7 +667,7 @@
             function fsVisFrame(time) {
                 fsVisCanvas.width = window.innerWidth;
                 fsVisCanvas.height = window.innerHeight;
-                drawFsVis(fsVisCtx, time);
+                drawFsVis(fsVisCtx, time, 1);
                 requestAnimationFrame(fsVisFrame);
             }
             requestAnimationFrame(fsVisFrame);
@@ -710,6 +710,7 @@
                 <button onclick="loadDemo('new-super-mario-bros')">New Super Mario Bros.</button>
                 <button onclick="loadDemo('super-mario-64-ds')">Super Mario 64 DS</button>
                 <button onclick="loadDemo('pokemon-platinum')">Pokémon Platinum</button>
+                <button onclick="loadDemo('pokemon-heartgold')">Pokémon HeartGold</button>
                 <button onclick="loadDemo('pokemon-black-2')">Pokémon Black 2</button>
                 <button onclick="loadDemo('ace-attorney')">Phoenix Wright: Ace Attorney</button>
             </div>

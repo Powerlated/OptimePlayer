@@ -48,16 +48,11 @@ function loadSdatsFromRom(data) {
     return sdats;
 }
 
-function sleep(ms) {
-    return new Promise((resolve) => {
-        setTimeout(resolve, ms);
-    });
-}
-
 async function renderVideoSeq(sdat, id, outFile) {
-    const SAMPLE_RATE = 65536;
+    const OVERSAMPLE = 4;
+    const SAMPLE_RATE = 32768;
 
-    let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
+    let bridge = new ControllerBridge(SAMPLE_RATE * OVERSAMPLE, sdat, id);
     let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 3);
 
     console.log("Rendering SSEQ Id:" + id);
@@ -69,7 +64,7 @@ async function renderVideoSeq(sdat, id, outFile) {
 
     let timer = 0;
     let playing = true;
-    let fadeoutLength = 10; // in seconds 
+    let fadeoutLength = .1; // in seconds 
 
     let encoder = new WavEncoder(SAMPLE_RATE, 16);
 
@@ -81,16 +76,16 @@ async function renderVideoSeq(sdat, id, outFile) {
     currentFsVisBridge = fsVisBridge;
     currentlyPlayingId = id;
 
-    let videoStream = new stream.PassThrough({ highWaterMark: 50000000 });
+    let videoStream = new stream.PassThrough({ highWaterMark: WIDTH * HEIGHT * 4 * 2 });
     let videoFfmpeg = ffmpeg(videoStream);
     videoFfmpeg.inputFormat("rawvideo")
         .inputOptions(`-s ${WIDTH}x${HEIGHT}`)
         .inputOptions(`-framerate ${FPS}`)
         .inputOptions("-pix_fmt rgba")
         .videoCodec('libx264')
-        .outputOptions('-crf 17')
+        .outputOptions('-crf 30')
         .outputOptions("-vf format=yuv420p")
-        .output("temp.mp4")
+        .output(outFile + "temp.mp4")
         .on('start', (cmdline) => console.log(cmdline))
         .run();
 
@@ -110,6 +105,7 @@ async function renderVideoSeq(sdat, id, outFile) {
             loop++;
 
             if (loop == 2) {
+                fadeoutLength = 5;
                 bridge.fadingStart = true;
             }
         }
@@ -162,15 +158,19 @@ async function renderVideoSeq(sdat, id, outFile) {
         let valL = 0;
         let valR = 0;
         for (let i = 0; i < 16; i++) {
-            bridge.synthesizers[i].nextSample();
             if (trackEnables[i]) {
-                valL += bridge.synthesizers[i].valL;
-                valR += bridge.synthesizers[i].valR;
+                for (let j = 0; j < OVERSAMPLE; j++) {
+                    bridge.synthesizers[i].nextSample();
+                    valL += bridge.synthesizers[i].valL;
+                    valR += bridge.synthesizers[i].valR;
+                }
             }
         }
+        valL /= OVERSAMPLE;
+        valR /= OVERSAMPLE;
 
-        valL *= 0.6 * fadeoutVolMul;
-        valR *= 0.6 * fadeoutVolMul;
+        valL *= 0.4 * fadeoutVolMul;
+        valR *= 0.4 * fadeoutVolMul;
         if (Math.abs(valL) > 1.0 || Math.abs(valR) > 1.0) {
             console.error("CLIPPING!");
         }
@@ -187,10 +187,10 @@ async function renderVideoSeq(sdat, id, outFile) {
                 .audioFrequency(48000)
                 .audioCodec('aac')
                 .audioBitrate('264k')
-                .input("temp.mp4")
+                .input(outFile + "temp.mp4")
                 .videoCodec("copy")
                 .on('start', (cmdline) => console.log(cmdline))
-                .on('end', () => { fs.rmSync('temp.mp4'); })
+                .on('end', () => { fs.rmSync(outFile + 'temp.mp4'); })
                 .save(outFile + ".mp4");
         });
     });
@@ -214,9 +214,6 @@ for (let i in sdats) {
     }
 }
 
-if (outFile == null) {
-    outFile = sseqName;
-}
 
 if (sseqId) {
     renderVideoSeq(sdat, sseqId, outFile);

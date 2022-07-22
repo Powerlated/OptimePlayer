@@ -62,288 +62,6 @@ function polyBlepTest(t, dt) {
     }
 }
 
-// Based off NAudio's BiQuadFilter, look there for comments
-class BiQuadFilter {
-    // coefficients
-    a0 = 0;
-    a1 = 0;
-    a2 = 0;
-    a3 = 0;
-    a4 = 0;
-
-    // state
-    x1 = 0;
-    x2 = 0;
-    y1 = 0;
-    y2 = 0;
-
-    transform(inSample) {
-        // compute result
-        var result = this.a0 * inSample + this.a1 * this.x1 + this.a2 * this.x2 - this.a3 * this.y1 - this.a4 * this.y2;
-
-        // shift x1 to x2, sample to x1 
-        this.x2 = this.x1;
-        this.x1 = inSample;
-
-        // shift y1 to y2, result to y1 
-        this.y2 = this.y1;
-        this.y1 = result;
-
-        return this.y1;
-    }
-
-    setCoefficients(aa0, aa1, aa2, b0, b1, b2) {
-        this.a0 = b0 / aa0;
-        this.a1 = b1 / aa0;
-        this.a2 = b2 / aa0;
-        this.a3 = aa1 / aa0;
-        this.a4 = aa2 / aa0;
-    }
-
-    setLowPassFilter(sampleRate, cutoffFrequency, q) {
-        var w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
-        var cosw0 = Math.cos(w0);
-        var alpha = Math.sin(w0) / (2 * q);
-
-        var b0 = (1 - cosw0) / 2;
-        var b1 = 1 - cosw0;
-        var b2 = (1 - cosw0) / 2;
-        var aa0 = 1 + alpha;
-        var aa1 = -2 * cosw0;
-        var aa2 = 1 - alpha;
-        this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
-    }
-
-    setPeakingEq(sampleRate, centreFrequency, q, dbGain) {
-        var w0 = 2 * Math.PI * centreFrequency / sampleRate;
-        var cosw0 = Math.cos(w0);
-        var sinw0 = Math.sin(w0);
-        var alpha = sinw0 / (2 * q);
-        var a = Math.pow(10, dbGain / 40);
-
-        var b0 = 1 + alpha * a;
-        var b1 = -2 * cosw0;
-        var b2 = 1 - alpha * a;
-        var aa0 = 1 + alpha / a;
-        var aa1 = -2 * cosw0;
-        var aa2 = 1 - alpha / a;
-        this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
-    }
-
-    setHighPassFilter(sampleRate, cutoffFrequency, q) {
-        var w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
-        var cosw0 = Math.cos(w0);
-        var alpha = Math.sin(w0) / (2 * q);
-
-        var b0 = (1 + cosw0) / 2;
-        var b1 = -(1 + cosw0);
-        var b2 = (1 + cosw0) / 2;
-        var aa0 = 1 + alpha;
-        var aa1 = -2 * cosw0;
-        var aa2 = 1 - alpha;
-        this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
-    }
-
-    static lowPassFilter(sampleRate, cutoffFrequency, q) {
-        var filter = new BiQuadFilter();
-        filter.setLowPassFilter(sampleRate, cutoffFrequency, q);
-        return filter;
-    }
-
-    static highPassFilter(sampleRate, cutoffFrequency, q) {
-        var filter = new BiQuadFilter();
-        filter.setHighPassFilter(sampleRate, cutoffFrequency, q);
-        return filter;
-    }
-
-    static bandPassFilterConstantSkirtGain(sampleRate, centreFrequency, q) {
-        var w0 = 2 * Math.PI * centreFrequency / sampleRate;
-        var cosw0 = Math.cos(w0);
-        var sinw0 = Math.sin(w0);
-        var alpha = sinw0 / (2 * q);
-
-        var b0 = sinw0 / 2;
-        var b1 = 0;
-        var b2 = -sinw0 / 2;
-        var a0 = 1 + alpha;
-        var a1 = -2 * cosw0;
-        var a2 = 1 - alpha;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
-    }
-
-    static bandPassFilterConstantPeakGain(sampleRate, centreFrequency, q) {
-        var w0 = 2 * Math.PI * centreFrequency / sampleRate;
-        var cosw0 = Math.cos(w0);
-        var sinw0 = Math.sin(w0);
-        var alpha = sinw0 / (2 * q);
-
-        var b0 = alpha;
-        var b1 = 0;
-        var b2 = -alpha;
-        var a0 = 1 + alpha;
-        var a1 = -2 * cosw0;
-        var a2 = 1 - alpha;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
-    }
-
-    static notchFilter(sampleRate, centreFrequency, q) {
-        var w0 = 2 * Math.PI * centreFrequency / sampleRate;
-        var cosw0 = Math.cos(w0);
-        var sinw0 = Math.sin(w0);
-        var alpha = sinw0 / (2 * q);
-
-        var b0 = 1;
-        var b1 = -2 * cosw0;
-        var b2 = 1;
-        var a0 = 1 + alpha;
-        var a1 = -2 * cosw0;
-        var a2 = 1 - alpha;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
-    }
-
-    static allPassFilter(sampleRate, centreFrequency, q) {
-        var w0 = 2 * Math.PI * centreFrequency / sampleRate;
-        var cosw0 = Math.cos(w0);
-        var sinw0 = Math.sin(w0);
-        var alpha = sinw0 / (2 * q);
-
-        var b0 = 1 - alpha;
-        var b1 = -2 * cosw0;
-        var b2 = 1 + alpha;
-        var a0 = 1 + alpha;
-        var a1 = -2 * cosw0;
-        var a2 = 1 - alpha;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
-    }
-
-    static peakingEQ(sampleRate, centreFrequency, q, dbGain) {
-        var filter = new BiQuadFilter();
-        filter.setPeakingEq(sampleRate, centreFrequency, q, dbGain);
-        return filter;
-    }
-
-    static lowShelf(sampleRate, cutoffFrequency, shelfSlope, dbGain) {
-        var w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
-        var cosw0 = Math.cos(w0);
-        var sinw0 = Math.sin(w0);
-        var a = Math.pow(10, dbGain / 40);
-        var alpha = sinw0 / 2 * Math.sqrt((a + 1 / a) * (1 / shelfSlope - 1) + 2);
-        var temp = 2 * Math.sqrt(a) * alpha;
-
-        var b0 = a * ((a + 1) - (a - 1) * cosw0 + temp);
-        var b1 = 2 * a * ((a - 1) - (a + 1) * cosw0);
-        var b2 = a * ((a + 1) - (a - 1) * cosw0 - temp);
-        var a0 = (a + 1) + (a - 1) * cosw0 + temp;
-        var a1 = -2 * ((a - 1) + (a + 1) * cosw0);
-        var a2 = (a + 1) + (a - 1) * cosw0 - temp;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
-    }
-
-    static highShelf(sampleRate, cutoffFrequency, shelfSlope, dbGain) {
-        var w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
-        var cosw0 = Math.cos(w0);
-        var sinw0 = Math.sin(w0);
-        var a = Math.pow(10, dbGain / 40);
-        var alpha = sinw0 / 2 * Math.sqrt((a + 1 / a) * (1 / shelfSlope - 1) + 2);
-        var temp = 2 * Math.sqrt(a) * alpha;
-
-        var b0 = a * ((a + 1) + (a - 1) * cosw0 + temp);
-        var b1 = -2 * a * ((a - 1) + (a + 1) * cosw0);
-        var b2 = a * ((a + 1) + (a - 1) * cosw0 - temp);
-        var a0 = (a + 1) - (a - 1) * cosw0 + temp;
-        var a1 = 2 * ((a - 1) - (a + 1) * cosw0);
-        var a2 = (a + 1) - (a - 1) * cosw0 - temp;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
-    }
-
-    constructor(a0 = 0, a1 = 0, a2 = 0, b0 = 0, b1 = 0, b2 = 0) {
-        this.setCoefficients(a0, a1, a2, b0, b1, b2);
-    }
-}
-
-class SoundgoodizerFilterChannel {
-            // Each biquad filter has a slope of 12db/oct so 2 biquads chained gets us 24db/oct
-            /** @type {BiQuadFilter[]} */ lowFilters = new Array(2);
-            /** @type {BiQuadFilter[]} */ midFilters = new Array(4);
-            /** @type {BiQuadFilter[]} */ highFilters = new Array(2);
-
-    outLow = 0;
-    outMid = 0;
-    outHigh = 0;
-
-    dbPerOct24 = false;
-
-    /**
-     * @param {boolean} dbPerOct24
-     * @param {number} sampleRate
-     * @param {number} lowHz
-     * @param {number} highHz
-     **/
-    constructor(dbPerOct24, sampleRate, lowHz, highHz) {
-        this.dbPerOct24 = dbPerOct24;
-
-        // q = 1/sqrt(2) maximally flat "butterworth" filter
-        let q = 1 / Math.SQRT2;
-        this.lowFilters[0] = BiQuadFilter.lowPassFilter(sampleRate, lowHz, q);
-        this.lowFilters[1] = BiQuadFilter.lowPassFilter(sampleRate, lowHz, q);
-
-        this.midFilters[0] = BiQuadFilter.highPassFilter(sampleRate, lowHz, q);
-        this.midFilters[1] = BiQuadFilter.lowPassFilter(sampleRate, highHz, q);
-        this.midFilters[2] = BiQuadFilter.highPassFilter(sampleRate, lowHz, q);
-        this.midFilters[3] = BiQuadFilter.lowPassFilter(sampleRate, highHz, q);
-
-        this.highFilters[0] = BiQuadFilter.highPassFilter(sampleRate, highHz, q);
-        this.highFilters[1] = BiQuadFilter.highPassFilter(sampleRate, highHz, q);
-    }
-
-    /**
-     * @param {boolean} dbPerOct24
-     * @param {number} sampleRate
-     * @param {number} lowHz
-     * @param {number} highHz
-     * */
-    changeFilterParams(dbPerOct24, sampleRate, lowHz, highHz) {
-        this.dbPerOct24 = dbPerOct24;
-
-        let q = 1 / Math.SQRT2;
-        this.lowFilters[0].setLowPassFilter(sampleRate, lowHz, q);
-        this.lowFilters[1].setLowPassFilter(sampleRate, lowHz, q);
-
-        this.midFilters[0].setHighPassFilter(sampleRate, lowHz, q);
-        this.midFilters[1].setLowPassFilter(sampleRate, highHz, q);
-        this.midFilters[2].setHighPassFilter(sampleRate, lowHz, q);
-        this.midFilters[3].setLowPassFilter(sampleRate, highHz, q);
-
-        this.highFilters[0].setHighPassFilter(sampleRate, highHz, q);
-        this.highFilters[1].setHighPassFilter(sampleRate, highHz, q);
-    }
-
-    /**
-     * @param {number} inVal
-     * */
-    process(inVal) {
-        this.outLow = inVal;
-        this.outMid = inVal;
-        this.outHigh = inVal;
-
-        for (let i = 0; i < (this.dbPerOct24 ? 2 : 1); i++) {
-            this.outLow = this.lowFilters[i].transform(this.outLow);
-        }
-
-        for (let i = 0; i < (this.dbPerOct24 ? 4 : 2); i++) {
-            this.outMid = this.midFilters[i].transform(this.outMid);
-        }
-
-        for (let i = 0; i < (this.dbPerOct24 ? 2 : 1); i++) {
-            this.outHigh = this.highFilters[i].transform(this.outHigh);
-        }
-    }
-}
-
-class Soundgoodizer {
-
-}
-
 function downloadUint8Array(name, array) {
     let blob = new Blob([array], { type: "application/octet-stream" });
     let link = document.createElement('a');
@@ -372,8 +90,6 @@ class WavEncoder {
     }
 
     addSample(left, right) {
-        // This is literally a C++ vector. In freaking TypeScript.
-        // I need to reevaluate my life choices.
         if (this.recordBufferAt + 16 > this.recordBuffer.length) {
             const oldBuf = this.recordBuffer;
             this.recordBuffer = new Uint8ClampedArray(this.recordBufferAt * 2);
@@ -765,6 +481,7 @@ const MessageType = {
     Jump: 2,
     TrackEnded: 3,
     VolumeChange: 4, // P0: Volume
+    PanChange: 5, // P0: Pan (0-127)
 };
 
 class Sample {
@@ -871,8 +588,7 @@ class SampleInstrument {
         this.sample = sample;
 
         // sampleFrequency is the sample's tone frequency when played at sampleSampleRate
-        this.valL = 0;
-        this.valR = 0;
+        this.val = 0;
         this.frequency = 440;
         this.volume = 1;
 
@@ -881,6 +597,10 @@ class SampleInstrument {
         this.pan = 0.5;
 
         this.startTime = 0;
+
+        this.midiNote = 0;
+
+        this.sampleT = 0;
 
 
         // trackEnables.fill(false);
@@ -891,26 +611,23 @@ class SampleInstrument {
         this.sample = sample;
     }
 
-    sampleAt(sampleNumber) {
-        let seconds = sampleNumber / this.sampleRate;
-        let ratio = this.frequency / this.sample.frequency;
+    advance() {
+        let freqRatio = this.frequency / this.sample.frequency;
+        let convertedSampleRate = freqRatio * this.sample.sampleRate;
+        this.sampleT += this.secondsPerSample * convertedSampleRate;
 
-        let convertedSampleRate = ratio * this.sample.sampleRate;
-        let sampleT = seconds * convertedSampleRate;
-        let val0 = this.getSampleDataAt(Math.floor(sampleT + 0));
-        let val1 = this.getSampleDataAt(Math.floor(sampleT + 1));
+        let val0 = this.getSampleDataAt(Math.floor(this.sampleT + 0));
+        let val1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
 
         let finalVal = val0;
         if (enableAntiAliasing) {
-            let subsampleT = sampleT % 1;
+            let subsampleT = this.sampleT % 1;
             let deltaVal = val1 - val0;
             finalVal = subsampleT < 0.5 ? val0 : val1;
             finalVal += polyBlep((subsampleT + 0.5) % 1, this.secondsPerSample * convertedSampleRate) * deltaVal;
         }
 
-        this.valL = finalVal * this.volume * (1 - this.pan);
-        this.valR = finalVal * this.volume * this.pan;
-        return true;
+        this.val = finalVal * this.volume;
     }
 
     getSampleDataAt(sample) {
@@ -926,6 +643,17 @@ class SampleInstrument {
         } else {
             return 0;
         }
+    }
+
+    /** @param {number} midiNote */
+    setNote(midiNote) {
+        this.midiNote = midiNote;
+        this.frequency = midiNoteToHz(midiNote);
+    }
+
+    /** @param {number} semitones */
+    setFinetune(semitones) {
+        this.frequency = midiNoteToHz(this.midiNote + semitones);
     }
 }
 
@@ -1005,10 +733,11 @@ class SseqTrack {
         this.program = 0;
         this.bank = 0;
 
-        this.lfoDepth = 0;
-        this.lfoSpeed = 0;
         this.lfoType = 0;
-        this.lfoRange = 0;
+        this.lfoDepth = 0;
+        this.lfoRange = 1;
+        this.lfoSpeed = 16;
+        this.lfoDelay = 0;
 
         this.pitchBend = 0;
         this.pitchBendRange = 0;
@@ -1174,6 +903,7 @@ class SseqTrack {
                     {
                         this.pan = this.readPcInc();
                         this.debugLog("Pan: " + this.pan);
+                        this.sendMessage(false, MessageType.PanChange, this.pan);
                         break;
                     }
                 case 0xC6: // Track Priority
@@ -1204,14 +934,15 @@ class SseqTrack {
                     {
                         this.lfoType = this.readPcInc();
                         this.debugLog("LFO Type: " + this.lfoType);
-                        console.warn("Unimplemented LFO");
+                        if (this.lfoType != LfoType.Volume) {
+                            console.warn("Unimplemented LFO type: " + this.lfoType);
+                        }
                         break;
                     }
                 case 0xCD: // LFO Range
                     {
                         this.lfoRange = this.readPcInc();
                         this.debugLog("LFO Range: " + this.lfoRange);
-                        console.warn("Unimplemented LFO");
                         break;
                     }
                 case 0xC4: // Pitch Bend
@@ -1256,8 +987,8 @@ class SseqTrack {
                     }
                 case 0xE0: // LFO Delay
                     {
-                        this.LFODelay = this.readPcInc(2);
-                        this.debugLog("LFO Delay: " + this.LFODelay);
+                        this.lfoDelay = this.readPcInc(2);
+                        this.debugLog("LFO Delay: " + this.lfoDelay);
                         break;
                     }
                 case 0xD5: // Expression
@@ -1315,6 +1046,7 @@ class Synthesizer {
         this.valR = 0;
 
         this.volume = 1;
+        this.pan = 0.5;
 
         this.playingIndex = 0;
 
@@ -1327,17 +1059,17 @@ class Synthesizer {
 
     /**
      * @param {Sample} sample
-     * @param {number} frequency
+     * @param {number} midiNote
      * @param {number} volume
-     * @param {number} pan
      * @param {number} meta
      */
-    play(sample, frequency, volume, pan, meta) {
-        this.instrs[this.playingIndex].pan = pan;
+    play(sample, midiNote, volume, meta) {
         this.instrs[this.playingIndex].sample = sample;
-        this.instrs[this.playingIndex].frequency = frequency;
+        this.instrs[this.playingIndex].setNote(midiNote);
+        this.instrs[this.playingIndex].setFinetune(0);
         this.instrs[this.playingIndex].volume = volume;
         this.instrs[this.playingIndex].startTime = meta;
+        this.instrs[this.playingIndex].sampleT = 0;
         this.instrs[this.playingIndex].playing = true;
         this.instrsStartSample[this.playingIndex] = this.sampleNum;
 
@@ -1359,9 +1091,10 @@ class Synthesizer {
 
         for (let i = 0; i < this.instrsAvailable; i++) {
             if (this.instrs[i].playing) {
-                this.instrs[i].sampleAt(this.sampleNum - this.instrsStartSample[i]);
-                this.valL += this.instrs[i].valL;
-                this.valR += this.instrs[i].valR;
+                this.instrs[i].advance();
+                let val = this.instrs[i].val;
+                this.valL += val * (1 - this.pan);
+                this.valR += val * this.pan;
             }
         }
 
@@ -1680,6 +1413,68 @@ class FsVisControllerBridge {
     }
 }
 
+const LfoType = {
+    Pitch: 0,
+    Volume: 1,
+    Pan: 2
+};
+
+// pret/pokediamond
+const sLfoSinTable = [
+    0,
+    6,
+    12,
+    19,
+    25,
+    31,
+    37,
+    43,
+    49,
+    54,
+    60,
+    65,
+    71,
+    76,
+    81,
+    85,
+    90,
+    94,
+    98,
+    102,
+    106,
+    109,
+    112,
+    115,
+    117,
+    120,
+    122,
+    123,
+    125,
+    126,
+    126,
+    127,
+    127,
+    0,
+    0,
+    0
+];
+
+// pret/pokediamond
+function SND_SinIdx(x) {
+    if (x < 0x20) {
+        return sLfoSinTable[x];
+    }
+    else if (x < 0x40) {
+        return sLfoSinTable[0x40 - x];
+    }
+    else if (x < 0x60) {
+        return (-sLfoSinTable[x - 0x40]) << 24 >> 24;
+    }
+    else {
+        return (-sLfoSinTable[0x20 - (x - 0x60)]) << 24 >> 24;
+    }
+}
+
 class ControllerBridge {
     /** @param {number} sampleRate */
     /** @param {Sdat} sdat */
@@ -1749,7 +1544,7 @@ class ControllerBridge {
         this.loop = 0;
 
         // /** @type {MinHeap<}
-        this.noteCutTimes = new MinHeap(1024);
+        this.activeNoteData = new MinHeap(1024);
 
         this.bpmTimer = 0;
 
@@ -1757,8 +1552,8 @@ class ControllerBridge {
     }
 
     tick() {
-        for (let i = 0; i < this.noteCutTimes.heapEntries; i++) {
-            let entry = this.noteCutTimes.heap[i];
+        for (let i = 0; i < this.activeNoteData.heapEntries; i++) {
+            let entry = this.activeNoteData.heap[i];
             let data = entry.data;
             /** @type {InstrumentRecord} */
             let instrument = data.instrument;
@@ -1772,6 +1567,57 @@ class ControllerBridge {
                         // console.log("to release: " + instrument.release[data.instrumentEntryIndex]);
                         this.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
                         data.adsrState = AdsrState.Release;
+                    }
+                }
+
+                // LFO code based off pret/pokediamond
+                let track = this.controller.tracks[data.trackNum];
+                let lfoValue;
+                if (track.lfoDepth == 0) {
+                    lfoValue = BigInt(0);
+                } else if (data.lfoDelayCounter < track.lfoDelay) {
+                    lfoValue = BigInt(0);
+                } else {
+                    lfoValue = BigInt(SND_SinIdx(data.lfoCounter >>> 8) * track.lfoDepth * track.lfoRange);
+                }
+
+                if (lfoValue != 0n) {
+                    switch (track.lfoType) {
+                        case LfoType.Volume:
+                            lfoValue *= 60n;
+                            break;
+                        case LfoType.Pitch:
+                            lfoValue <<= 6n;
+                            break;
+                        case LfoType.Pan:
+                            lfoValue <<= 6n;
+                            break;
+                    }
+                    lfoValue >>= 14n;
+                }
+
+                if (data.delayCounter < track.lfoDelay) {
+                    data.delayCounter++;
+                } else {
+                    let tmp = data.lfoCounter;
+                    tmp += track.lfoSpeed << 6;
+                    tmp >>>= 8;
+                    while (tmp >= 0x80) {
+                        tmp -= 0x80;
+                    }
+                    data.lfoCounter += track.lfoSpeed << 6;
+                    data.lfoCounter &= 0xFF;
+                    data.lfoCounter |= tmp << 8;
+
+                    if (lfoValue != 0n) {
+                        switch (track.lfoType) {
+                            case LfoType.Pitch:
+                                // LFO value is in 1/64ths of a semitone
+                                instr.setFinetune(Number(lfoValue) / 64);
+                                break;
+                            default:
+                                break;
+                        }
                     }
                 }
 
@@ -1823,14 +1669,14 @@ class ControllerBridge {
             this.controller.tick();
 
             // remove stale entries from heap
-            if (this.noteCutTimes.heapEntries > 0) {
-                let entry = this.noteCutTimes.getFirstEntry();
+            if (this.activeNoteData.heapEntries > 0) {
+                let entry = this.activeNoteData.getFirstEntry();
                 let instr = this.synthesizers[entry.data.trackNum].instrs[entry.data.synthInstrIndex];
 
                 // check instr.startTime != entry.data.startTime to remove entries for 
                 // SampleInstruments that were reused early because of Synthesizer polyphony limits
                 if (entry.data.scheduledForDeletion || instr.startTime != entry.data.startTime) {
-                    this.noteCutTimes.popFirstEntry();
+                    this.activeNoteData.popFirstEntry();
                 }
             }
 
@@ -1846,8 +1692,6 @@ class ControllerBridge {
                             let duration = msg.param2;
 
                             if (midiNote < 21 || midiNote > 108) console.log("MIDI note out of piano range: " + midiNote);
-
-                            let hz = 440 * 2 ** ((midiNote - 69) / 12);
 
                             // The archive ID inside each instrument record inside each SBNK file
                             // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
@@ -1892,14 +1736,13 @@ class ControllerBridge {
                                 // }
 
                                 // TODO: implement per-instrument pan
-                                let pan = this.controller.tracks[msg.trackNum].pan / 128;
 
                                 let track = this.controller.tracks[msg.trackNum];
                                 let initialVolume = instrument.attackCoefficient[index] == 0 ? calcChannelVolume(velocity, 0) : 0;
-                                let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, hz, initialVolume, pan, this.controller.ticksElapsed);
+                                let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, midiNote, initialVolume, this.controller.ticksElapsed);
 
                                 this.notesOn[msg.trackNum][midiNote] = 1;
-                                this.noteCutTimes.addEntry(
+                                this.activeNoteData.addEntry(
                                     {
                                         trackNum: msg.trackNum,
                                         midiNote: midiNote,
@@ -1910,7 +1753,9 @@ class ControllerBridge {
                                         instrumentEntryIndex: index,
                                         adsrState: AdsrState.Attack,
                                         adsrTimer: -92544, // idk why this number, ask gbatek
-                                        fromKeyboard: msg.fromKeyboard
+                                        fromKeyboard: msg.fromKeyboard,
+                                        lfoCounter: 0,
+                                        lfoDelayCounter: 0
                                     },
                                     this.controller.ticksElapsed + duration
                                 );
@@ -1936,6 +1781,10 @@ class ControllerBridge {
                     }
                     case MessageType.VolumeChange: {
                         this.synthesizers[msg.trackNum].volume = msg.param0 / 127;
+                        break;
+                    }
+                    case MessageType.PanChange: {
+                        this.synthesizers[msg.trackNum].pan = msg.param0 / 128;
                         break;
                     }
                 }
@@ -1983,7 +1832,7 @@ async function playSeq(sdat, name) {
     let bufferL = new Float32Array(BUFFER_SIZE);
     let bufferR = new Float32Array(BUFFER_SIZE);
 
-    let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 3);
+    let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 5);
     let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
     let inBufferPos = 0;
 
@@ -2075,19 +1924,17 @@ async function downloadSample(sample) {
 * @param {string} name
 */
 async function renderAndDownloadSeq(sdat, name) {
-    const SAMPLE_RATE = 65536;
+    const OVERSAMPLE = 4;
+    const SAMPLE_RATE = 32768;
 
     let id = sdat.sseqNameIdDict[name];
 
-    let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
+    let bridge = new ControllerBridge(SAMPLE_RATE * OVERSAMPLE, sdat, id);
 
     console.log("Rendering SSEQ Id:" + id);
     // console.log("FAT ID:" + info.fileId);
 
-    let bufferL = [];
-    let bufferR = [];
-
-    let inBufferPos = 0;
+    let encoder = new WavEncoder(SAMPLE_RATE, 16);
 
     let sample = 0;
     let fadingOut = false;
@@ -2098,9 +1945,8 @@ async function renderAndDownloadSeq(sdat, name) {
     let playing = true;
     let fadeoutLength = 10; // in seconds 
 
-
     // keep it under 480 seconds
-    while (playing && bufferL.length < SAMPLE_RATE * 480) {
+    while (playing && sample < SAMPLE_RATE * 480) {
         // nintendo DS clock speed
         timer += 33513982;
         while (timer >= 64 * 2728 * SAMPLE_RATE) {
@@ -2145,22 +1991,23 @@ async function renderAndDownloadSeq(sdat, name) {
         let valL = 0;
         let valR = 0;
         for (let i = 0; i < 16; i++) {
-            bridge.synthesizers[i].nextSample();
             if (trackEnables[i]) {
-                valL += bridge.synthesizers[i].valL;
-                valR += bridge.synthesizers[i].valR;
+                let synth = bridge.synthesizers[i];
+                for (let j = 0; j < 4; j++) {
+                    synth.nextSample();
+                    valL += synth.valL;
+                    valR += synth.valR;
+                }
             }
         }
+        valL /= OVERSAMPLE;
+        valR /= OVERSAMPLE;
 
-        bufferL.push(valL * 0.5 * fadeoutVolMul);
-        bufferR.push(valR * 0.5 * fadeoutVolMul);
+        encoder.addSample(valL * 0.5 * fadeoutVolMul, valR * 0.5 * fadeoutVolMul);
 
         sample++;
     }
 
-    // console.log(bufferL)
-    let encoder = new WavEncoder(SAMPLE_RATE, 16);
-    encoder.addSamples(bufferL, bufferR, sample);
     downloadUint8Array(name + ".wav", encoder.encode());
 }
 
@@ -2923,9 +2770,10 @@ const fsVisPalette = [
 let activeNoteTrackNums = new Int8Array(128).fill(-1);
 let lastTickTime = 0;
 let lastTicks = 0;
-/** @param {CanvasRenderingContext2D} ctx */
-/** @param {number} time */
-/** @param {number} noteAlpha */
+/**
+@param {CanvasRenderingContext2D} ctx 
+@param {number} time 
+@param {number} noteAlpha */
 function drawFsVis(ctx, time, noteAlpha) {
     ctx.imageSmoothingEnabled = false;
 
@@ -3074,11 +2922,22 @@ function drawFsVis(ctx, time, noteAlpha) {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
 
         ctx.globalAlpha = 1;
-
         ctx.textBaseline = "top";
         ctx.fillStyle = "#ffffff";
-        ctx.font = 'bold 24px monospace';
-        ctx.fillText(`${currentlyPlayingSdat.sseqIdNameDict[currentlyPlayingId]} (ID: ${currentlyPlayingId})`, 24, 24);
+        if (typeof process !== 'undefined' && process?.env?.songName) {
+            // Running under node
+            ctx.font = 'bold 48px Arial';
+            ctx.fillText(`${process.env.songName}`, 24, 24);
+            if (process.env.nextSongName) {
+                ctx.fillStyle = "#00ff00";
+                ctx.font = '48x Arial';
+                ctx.fillText(`Next Up: ${process.env.nextSongName}`, 24, 72);
+            }
+        } else {
+            // Running under a browser
+            ctx.font = 'bold 24px monospace';
+            ctx.fillText(`${currentlyPlayingSdat.sseqIdNameDict[currentlyPlayingId]} (ID: ${currentlyPlayingId})`, 24, 24);
+        }
     }
 
 
