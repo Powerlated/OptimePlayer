@@ -1367,7 +1367,7 @@ class Synthesizer {
     setPan(pan) {
         const SPEED_OF_SOUND = 343; // meters per second
         // let's pretend panning moves the sound source in a semicircle around and in front of the listener
-        let r = 3; // semicircle radius
+        let r = 2; // semicircle radius
         let earX = 0.20; // absolute position of ears on the X axis
         let x = pan * 2 - 1; // [0, 1] -> [-1, -1]
         let y = Math.sqrt((r ** 2) - x ** 2);
