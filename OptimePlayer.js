@@ -4,8 +4,8 @@
 let debug = false;
 
 let enableStereoSeparation = false;
+let enableForceStereoSeparation = false;
 let enableAntiAliasing = true;
-const toggleAntiAliasing = () => { enableAntiAliasing = !enableAntiAliasing; };
 
 /** @type {ControllerBridge | null} */
 let currentBridge = null;
@@ -1257,6 +1257,7 @@ class DelayLine {
         this.buffer = new Float64Array(maxLength);
         this.posOut = 0;
         this.delay = 0;
+        this.gain = 1;
     }
 
     /** @param {number} val */
@@ -1265,7 +1266,7 @@ class DelayLine {
         let outVal = this.buffer[this.posOut];
         this.posOut++;
         this.posOut %= this.buffer.length;
-        return outVal;
+        return outVal * this.gain;
     }
 
     /** @param {number} length */
@@ -1283,7 +1284,8 @@ class Synthesizer {
 
         /** @type {SampleInstrument[]} */
         this.instrs = new Array(this.instrsAvailable);
-        this.instrsStartSample = new Float64Array(this.instrsAvailable);
+        /** @type {SampleInstrument[]} */
+        this.activeInstrs = new Array();
         this.sampleNum = 0;
         this.sampleRate = sampleRate;
 
@@ -1313,39 +1315,47 @@ class Synthesizer {
      * @param {number} meta
      */
     play(sample, midiNote, volume, meta) {
-        this.instrs[this.playingIndex].sample = sample;
-        this.instrs[this.playingIndex].setNote(midiNote);
-        this.instrs[this.playingIndex].setFinetune(0);
-        this.instrs[this.playingIndex].volume = volume;
-        this.instrs[this.playingIndex].startTime = meta;
-        this.instrs[this.playingIndex].sampleT = 0;
-        this.instrs[this.playingIndex].playing = true;
-        this.instrsStartSample[this.playingIndex] = this.sampleNum;
+        let instr = this.instrs[this.playingIndex];
+        if (instr.playing) {
+            this.cutInstrument(this.playingIndex);
+        }
+        instr.sample = sample;
+        instr.setNote(midiNote);
+        instr.setFinetune(0);
+        instr.volume = volume;
+        instr.startTime = meta;
+        instr.sampleT = 0;
+        instr.playing = true;
 
         let currentIndex = this.playingIndex;
 
         this.playingIndex++;
         this.playingIndex %= this.instrsAvailable;
 
+        this.activeInstrs.push(instr);
+
         return currentIndex;
     }
 
-    cutInstrument(index) {
-        this.instrs[index].playing = false;
+    cutInstrument(instrIndex) {
+        const activeInstrIndex = this.activeInstrs.indexOf(this.instrs[instrIndex]);
+        if (activeInstrIndex == -1) {
+            console.warn("Tried to cut instrument that wasn't playing");
+            return;
+        }
+        this.activeInstrs[activeInstrIndex].playing = false;
+        this.activeInstrs.splice(activeInstrIndex, 1);
     }
 
     nextSample() {
         let valL = 0;
         let valR = 0;
 
-        for (let i = 0; i < this.instrsAvailable; i++) {
-            let instr = this.instrs[i];
-            if (instr.playing) {
-                instr.advance();
-                let val = instr.val;
-                valL += val * (1 - this.pan);
-                valR += val * this.pan;
-            }
+        for (const instr of this.activeInstrs) {
+            instr.advance();
+            let val = instr.val;
+            valL += val * (1 - this.pan);
+            valR += val * this.pan;
         }
 
         if (enableStereoSeparation) {
@@ -1367,9 +1377,21 @@ class Synthesizer {
     setPan(pan) {
         const SPEED_OF_SOUND = 343; // meters per second
         // let's pretend panning moves the sound source in a semicircle around and in front of the listener
-        let r = 2; // semicircle radius
+        let r = 3; // semicircle radius
         let earX = 0.20; // absolute position of ears on the X axis
         let x = pan * 2 - 1; // [0, 1] -> [-1, -1]
+        // force stereo separation on barely panned channels
+        let gainR = 1;
+        if (enableForceStereoSeparation) {
+            if (x > 0) {
+                x = Math.abs(x / 2) + 0.5;
+            } else if (x < 0) {
+                x = Math.abs(x / 2) - 0.5;
+            } else {
+                gainR = -1;
+                x = -0.5;
+            }
+        }
         let y = Math.sqrt((r ** 2) - x ** 2);
         let distL = Math.sqrt((earX + x) ** 2 + y ** 2);
         let distR = Math.sqrt((-earX + x) ** 2 + y ** 2);
@@ -1380,9 +1402,10 @@ class Synthesizer {
         let delaySR = distR / SPEED_OF_SOUND * 100;
         let delayL = Math.round(delaySL * this.sampleRate);
         let delayR = Math.round(delaySR * this.sampleRate);
-        // console.log(`L:${delaySL * 1000}ms R:${delaySR * 1000}ms X:${x}`);
+        console.log(`L:${delaySL * 1000}ms R:${delaySR * 1000}ms X:${x}`);
         this.delayLineL.setDelay(delayL);
         this.delayLineR.setDelay(delayR);
+        this.delayLineR.gain = gainR;
         this.pan = pan;
     }
 }
@@ -1847,7 +1870,7 @@ class ControllerBridge {
             let instr = this.synthesizers[entry.data.trackNum].instrs[entry.data.synthInstrIndex];
             // sometimes a SampleInstrument will be reused before the note it is playing is over due to Synthesizer polyphony limits
             // check here to make sure the note entry stored in the heap is referring to the same note it originally did 
-            if (instr.startTime == entry.data.startTime) {
+            if (instr.startTime == entry.data.startTime && instr.playing) {
                 if (this.controller.ticksElapsed >= entry.priority && !entry.data.fromKeyboard) {
                     if (data.adsrState != AdsrState.Release) {
                         // console.log("to release: " + instrument.release[data.instrumentEntryIndex]);
@@ -1948,23 +1971,23 @@ class ControllerBridge {
             }
         }
 
+        // remove stale entries from heap
+        if (this.activeNoteData.heapEntries > 0) {
+            let entry = this.activeNoteData.getFirstEntry();
+            let instr = this.synthesizers[entry.data.trackNum].instrs[entry.data.synthInstrIndex];
+
+            // check instr.startTime != entry.data.startTime to remove entries for 
+            // SampleInstruments that were reused early because of Synthesizer polyphony limits
+            if (entry.data.scheduledForDeletion || instr.startTime != entry.data.startTime) {
+                this.activeNoteData.popFirstEntry();
+            }
+        }
+
         this.bpmTimer += this.controller.tracks[0].bpm;
         while (this.bpmTimer >= 240) {
             this.bpmTimer -= 240;
 
             this.controller.tick();
-
-            // remove stale entries from heap
-            if (this.activeNoteData.heapEntries > 0) {
-                let entry = this.activeNoteData.getFirstEntry();
-                let instr = this.synthesizers[entry.data.trackNum].instrs[entry.data.synthInstrIndex];
-
-                // check instr.startTime != entry.data.startTime to remove entries for 
-                // SampleInstruments that were reused early because of Synthesizer polyphony limits
-                if (entry.data.scheduledForDeletion || instr.startTime != entry.data.startTime) {
-                    this.activeNoteData.popFirstEntry();
-                }
-            }
 
             while (this.messageBuffer.entries > 0) {
                 /** @type {Message} */
@@ -2109,7 +2132,7 @@ async function playSeq(sdat, name) {
     }
 
     const BUFFER_SIZE = 2048;
-    const SAMPLE_RATE = 65536;
+    const SAMPLE_RATE = 32768;
 
     let id = sdat.sseqNameIdDict[name];
 
@@ -2120,7 +2143,6 @@ async function playSeq(sdat, name) {
 
     let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 5);
     let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
-    let inBufferPos = 0;
 
     // // debugging hexdump
     // let offs = 0;

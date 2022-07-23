@@ -186,7 +186,7 @@
             /** @type {HTMLElement} */
             let visualizerPane = document.querySelector("#visualizer-pane");
             visualizerPane.style.display = 'block';
-            (/** @type {HTMLElement} */ (document.querySelector('#soundgoodizer-container'))).style.display = 'block';
+            // (/** @type {HTMLElement} */ (document.querySelector('#soundgoodizer-container'))).style.display = 'block';
 
         }
 
@@ -523,16 +523,16 @@
 
                 function keyboardPress(key, down) {
                     if (down) {
-                        let currentSseqListIndex = currentlyPlayingSdat.sseqList.indexOf(currentlyPlayingId);
                         switch (key) {
                             case "ArrowLeft":
-                                let prevSseqListIndex = currentlyPlayingSdat.sseqList[currentSseqListIndex - 1];
-                                if (prevSseqListIndex != undefined) {
-                                    playSeqById(currentlyPlayingSdat, prevSseqListIndex);
-                                }
-                                break;
                             case "ArrowRight":
-                                let nextSseqListIndex = currentlyPlayingSdat.sseqList[currentSseqListIndex + 1];
+                                let currentSseqListIndex = currentlyPlayingSdat.sseqList.indexOf(currentlyPlayingId);
+                                let prevSseqListIndex;
+                                if (key == "ArrowLeft") {
+                                    nextSseqListIndex = currentlyPlayingSdat.sseqList[currentSseqListIndex - 1];
+                                } else if (key == "ArrowRight") {
+                                    nextSseqListIndex = currentlyPlayingSdat.sseqList[currentSseqListIndex + 1];
+                                }
                                 if (nextSseqListIndex != undefined) {
                                     playSeqById(currentlyPlayingSdat, nextSseqListIndex);
                                 }
@@ -681,7 +681,8 @@
             };
 
             registerCheckbox("#stereo-separation", true, checked => { enableStereoSeparation = checked; });
-
+            registerCheckbox("#force-stereo-separation", true, checked => { enableForceStereoSeparation = checked; });
+            registerCheckbox("#antialiasing", true, checked => { enableAntiAliasing = checked; });
         };
 
         /** @param {string} name */
@@ -733,6 +734,10 @@
                 <h3>Settings</h3>
                 <input type="checkbox" id="stereo-separation">
                 <label for="stereo-separation">Stereo Separation</label><br>
+                <input type="checkbox" id="force-stereo-separation">
+                <label for="force-stereo-separation">"Force" Stereo Separation (restart song to apply)</label><br>
+                <input type="checkbox" id="antialiasing">
+                <label for="antialiasing">Audio Anti-Aliasing</label><br>
             </div>
         </div>
 
