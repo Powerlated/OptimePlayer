@@ -1389,7 +1389,7 @@ class Synthesizer {
                 x = Math.abs(x / 2) - 0.5;
             } else {
                 gainR = -1;
-                x = -0.5;
+                x = 0.2;
             }
         }
         let y = Math.sqrt((r ** 2) - x ** 2);
