@@ -1332,8 +1332,16 @@ const getvoltbl = [
     0x7C, 0x7D, 0x7E, 0x7F
 ];
 
-// TODO: Write a square synthesizer
-const square50 = new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0);
+const squares = [
+    new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float32Array([-0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float32Array([-0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float32Array([-0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5]), 1, 8, true, 0)
+];
 
 // based off SND_CalcChannelVolume from pret/pokediamond
 function calcChannelVolume(velocity, adsrTimer) {
@@ -1379,7 +1387,7 @@ class FsVisControllerBridge {
         this.messageBuffer = new CircularBuffer(512);
         this.controller = new SseqController(file, dataOffset, this.messageBuffer);
         /** @type {CircularBuffer<Message>} */
-        this.activeNotes = new CircularBuffer(512);
+        this.activeNotes = new CircularBuffer(2048);
 
         this.bpmTimer = 0;
 
@@ -1708,7 +1716,7 @@ class ControllerBridge {
                                 let sample = archive[sampleId];
 
                                 if (instrument.fRecord == InstrumentType.PsgPulse) {
-                                    sample = square50;
+                                    sample = squares[sampleId];
                                 } else {
                                     sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
                                 }
