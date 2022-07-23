@@ -411,21 +411,25 @@
 
                 let backdropCanvas1 = createBackdropCanvas(24, 2, false);
                 let backdropCanvas2 = createBackdropCanvas(24, 2, true);
-                function animationFrameHandler() {
-                    requestAnimationFrame(animationFrameHandler);
+                let lastVisualizerTime = 0;
+                const VISUALIZER_FPS = 30;
+                function animationFrameHandler(time) {
+                    if (time >= lastVisualizerTime + 1 / VISUALIZER_FPS) {
+                        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
-                    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-
-                    if (!currentBridge) {
-                        ctx.globalAlpha = 0.25;
-                    } else {
-                        ctx.globalAlpha = 1;
+                        if (!currentBridge) {
+                            ctx.globalAlpha = 0.25;
+                        } else {
+                            ctx.globalAlpha = 1;
+                        }
+                        drawToggleButtons(2, 2);
+                        drawVisualizerBackdrop(backdropCanvas1);
+                        drawVisualizer(24, 2, false);
+                        drawVisualizerBackdrop(backdropCanvas2);
+                        drawVisualizer(24, 2, true);
+                        lastVisualizerTime = time;
                     }
-                    drawToggleButtons(2, 2);
-                    drawVisualizerBackdrop(backdropCanvas1);
-                    drawVisualizer(24, 2, false);
-                    drawVisualizerBackdrop(backdropCanvas2);
-                    drawVisualizer(24, 2, true);
+                    requestAnimationFrame(animationFrameHandler);
                 }
 
                 requestAnimationFrame(animationFrameHandler);
@@ -676,6 +680,7 @@
                 renderAndDownloadSeq(currentlyPlayingSdat, currentlyPlayingName);
             };
 
+            registerCheckbox("#stereo-separation", true, checked => { enableStereoSeparation = checked; });
 
         };
 
@@ -685,6 +690,14 @@
                 loadNdsRom(data);
             });
         }
+
+        function registerCheckbox(selector, checked, callback) {
+            let element = document.querySelector(selector);
+            element.checked = checked;
+            callback(checked);
+            element.onchange = () => callback(element.checked);
+        }
+
     </script>
 </head>
 
@@ -713,6 +726,13 @@
                 <button onclick="loadDemo('pokemon-heartgold')">Pokémon HeartGold</button>
                 <button onclick="loadDemo('pokemon-black-2')">Pokémon Black 2</button>
                 <button onclick="loadDemo('ace-attorney')">Phoenix Wright: Ace Attorney</button>
+
+            </div>
+
+            <div>
+                <h3>Settings</h3>
+                <input type="checkbox" id="stereo-separation">
+                <label for="stereo-separation">Stereo Separation</label><br>
             </div>
         </div>
 

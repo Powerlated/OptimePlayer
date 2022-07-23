@@ -3,6 +3,7 @@
 /** GLOBALS GO HERE **/
 let debug = false;
 
+let enableStereoSeparation = false;
 let enableAntiAliasing = true;
 const toggleAntiAliasing = () => { enableAntiAliasing = !enableAntiAliasing; };
 
@@ -59,6 +60,223 @@ function polyBlepTest(t, dt) {
     // 0 otherwise
     else {
         return 0.0;
+    }
+}
+
+
+class LowPass96DbPerOct {
+    constructor(sampleRate, cutoffFrequency) {
+        const Q = Math.SQRT1_2;
+        this.f0 = BiQuadFilter.lowPassFilter(sampleRate, cutoffFrequency, Q);
+        this.f1 = BiQuadFilter.lowPassFilter(sampleRate, cutoffFrequency, Q);
+        this.f2 = BiQuadFilter.lowPassFilter(sampleRate, cutoffFrequency, Q);
+        this.f3 = BiQuadFilter.lowPassFilter(sampleRate, cutoffFrequency, Q);
+    }
+
+    transform(inSample) {
+        inSample = this.f0.transform(inSample);
+        inSample = this.f1.transform(inSample);
+        inSample = this.f2.transform(inSample);
+        return this.f3.transform(inSample);
+    }
+}
+
+// Based off NAudio's BiQuadFilter, look there for comments
+class BiQuadFilter {
+    // coefficients
+    a0 = 0;
+    a1 = 0;
+    a2 = 0;
+    a3 = 0;
+    a4 = 0;
+
+    // state
+    x1 = 0;
+    x2 = 0;
+    y1 = 0;
+    y2 = 0;
+
+    transform(inSample) {
+        // compute result
+        var result = this.a0 * inSample + this.a1 * this.x1 + this.a2 * this.x2 - this.a3 * this.y1 - this.a4 * this.y2;
+
+        // shift x1 to x2, sample to x1 
+        this.x2 = this.x1;
+        this.x1 = inSample;
+
+        // shift y1 to y2, result to y1 
+        this.y2 = this.y1;
+        this.y1 = result;
+
+        return this.y1;
+    }
+
+    setCoefficients(aa0, aa1, aa2, b0, b1, b2) {
+        this.a0 = b0 / aa0;
+        this.a1 = b1 / aa0;
+        this.a2 = b2 / aa0;
+        this.a3 = aa1 / aa0;
+        this.a4 = aa2 / aa0;
+    }
+
+    setLowPassFilter(sampleRate, cutoffFrequency, q) {
+        var w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
+        var cosw0 = Math.cos(w0);
+        var alpha = Math.sin(w0) / (2 * q);
+
+        var b0 = (1 - cosw0) / 2;
+        var b1 = 1 - cosw0;
+        var b2 = (1 - cosw0) / 2;
+        var aa0 = 1 + alpha;
+        var aa1 = -2 * cosw0;
+        var aa2 = 1 - alpha;
+        this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
+    }
+
+    setPeakingEq(sampleRate, centreFrequency, q, dbGain) {
+        var w0 = 2 * Math.PI * centreFrequency / sampleRate;
+        var cosw0 = Math.cos(w0);
+        var sinw0 = Math.sin(w0);
+        var alpha = sinw0 / (2 * q);
+        var a = Math.pow(10, dbGain / 40);
+
+        var b0 = 1 + alpha * a;
+        var b1 = -2 * cosw0;
+        var b2 = 1 - alpha * a;
+        var aa0 = 1 + alpha / a;
+        var aa1 = -2 * cosw0;
+        var aa2 = 1 - alpha / a;
+        this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
+    }
+
+    setHighPassFilter(sampleRate, cutoffFrequency, q) {
+        var w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
+        var cosw0 = Math.cos(w0);
+        var alpha = Math.sin(w0) / (2 * q);
+
+        var b0 = (1 + cosw0) / 2;
+        var b1 = -(1 + cosw0);
+        var b2 = (1 + cosw0) / 2;
+        var aa0 = 1 + alpha;
+        var aa1 = -2 * cosw0;
+        var aa2 = 1 - alpha;
+        this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
+    }
+
+    static lowPassFilter(sampleRate, cutoffFrequency, q) {
+        var filter = new BiQuadFilter();
+        filter.setLowPassFilter(sampleRate, cutoffFrequency, q);
+        return filter;
+    }
+
+    static highPassFilter(sampleRate, cutoffFrequency, q) {
+        var filter = new BiQuadFilter();
+        filter.setHighPassFilter(sampleRate, cutoffFrequency, q);
+        return filter;
+    }
+
+    static bandPassFilterConstantSkirtGain(sampleRate, centreFrequency, q) {
+        var w0 = 2 * Math.PI * centreFrequency / sampleRate;
+        var cosw0 = Math.cos(w0);
+        var sinw0 = Math.sin(w0);
+        var alpha = sinw0 / (2 * q);
+
+        var b0 = sinw0 / 2;
+        var b1 = 0;
+        var b2 = -sinw0 / 2;
+        var a0 = 1 + alpha;
+        var a1 = -2 * cosw0;
+        var a2 = 1 - alpha;
+        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+    }
+
+    static bandPassFilterConstantPeakGain(sampleRate, centreFrequency, q) {
+        var w0 = 2 * Math.PI * centreFrequency / sampleRate;
+        var cosw0 = Math.cos(w0);
+        var sinw0 = Math.sin(w0);
+        var alpha = sinw0 / (2 * q);
+
+        var b0 = alpha;
+        var b1 = 0;
+        var b2 = -alpha;
+        var a0 = 1 + alpha;
+        var a1 = -2 * cosw0;
+        var a2 = 1 - alpha;
+        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+    }
+
+    static notchFilter(sampleRate, centreFrequency, q) {
+        var w0 = 2 * Math.PI * centreFrequency / sampleRate;
+        var cosw0 = Math.cos(w0);
+        var sinw0 = Math.sin(w0);
+        var alpha = sinw0 / (2 * q);
+
+        var b0 = 1;
+        var b1 = -2 * cosw0;
+        var b2 = 1;
+        var a0 = 1 + alpha;
+        var a1 = -2 * cosw0;
+        var a2 = 1 - alpha;
+        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+    }
+
+    static allPassFilter(sampleRate, centreFrequency, q) {
+        var w0 = 2 * Math.PI * centreFrequency / sampleRate;
+        var cosw0 = Math.cos(w0);
+        var sinw0 = Math.sin(w0);
+        var alpha = sinw0 / (2 * q);
+
+        var b0 = 1 - alpha;
+        var b1 = -2 * cosw0;
+        var b2 = 1 + alpha;
+        var a0 = 1 + alpha;
+        var a1 = -2 * cosw0;
+        var a2 = 1 - alpha;
+        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+    }
+
+    static peakingEQ(sampleRate, centreFrequency, q, dbGain) {
+        var filter = new BiQuadFilter();
+        filter.setPeakingEq(sampleRate, centreFrequency, q, dbGain);
+        return filter;
+    }
+
+    static lowShelf(sampleRate, cutoffFrequency, shelfSlope, dbGain) {
+        var w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
+        var cosw0 = Math.cos(w0);
+        var sinw0 = Math.sin(w0);
+        var a = Math.pow(10, dbGain / 40);
+        var alpha = sinw0 / 2 * Math.sqrt((a + 1 / a) * (1 / shelfSlope - 1) + 2);
+        var temp = 2 * Math.sqrt(a) * alpha;
+
+        var b0 = a * ((a + 1) - (a - 1) * cosw0 + temp);
+        var b1 = 2 * a * ((a - 1) - (a + 1) * cosw0);
+        var b2 = a * ((a + 1) - (a - 1) * cosw0 - temp);
+        var a0 = (a + 1) + (a - 1) * cosw0 + temp;
+        var a1 = -2 * ((a - 1) + (a + 1) * cosw0);
+        var a2 = (a + 1) + (a - 1) * cosw0 - temp;
+        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+    }
+
+    static highShelf(sampleRate, cutoffFrequency, shelfSlope, dbGain) {
+        var w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
+        var cosw0 = Math.cos(w0);
+        var sinw0 = Math.sin(w0);
+        var a = Math.pow(10, dbGain / 40);
+        var alpha = sinw0 / 2 * Math.sqrt((a + 1 / a) * (1 / shelfSlope - 1) + 2);
+        var temp = 2 * Math.sqrt(a) * alpha;
+
+        var b0 = a * ((a + 1) + (a - 1) * cosw0 + temp);
+        var b1 = -2 * a * ((a - 1) + (a + 1) * cosw0);
+        var b2 = a * ((a + 1) + (a - 1) * cosw0 - temp);
+        var a0 = (a + 1) - (a - 1) * cosw0 + temp;
+        var a1 = 2 * ((a - 1) - (a + 1) * cosw0);
+        var a2 = (a + 1) - (a - 1) * cosw0 - temp;
+        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+    }
+
+    constructor(a0 = 0, a1 = 0, a2 = 0, b0 = 0, b1 = 0, b2 = 0) {
+        this.setCoefficients(a0, a1, a2, b0, b1, b2);
     }
 }
 
@@ -902,6 +1120,7 @@ class SseqTrack {
                 case 0xC0: // Pan
                     {
                         this.pan = this.readPcInc();
+                        if (this.pan == 127) this.pan = 128;
                         this.debugLog("Pan: " + this.pan);
                         this.sendMessage(false, MessageType.PanChange, this.pan);
                         break;
@@ -1032,6 +1251,32 @@ class SseqTrack {
     }
 }
 
+class DelayLine {
+    /** @param {number} maxLength */
+    constructor(maxLength) {
+        this.buffer = new Float64Array(maxLength);
+        this.posOut = 0;
+        this.delay = 0;
+    }
+
+    /** @param {number} val */
+    process(val) {
+        this.buffer[(this.posOut + this.delay) % this.buffer.length] = val;
+        let outVal = this.buffer[this.posOut];
+        this.posOut++;
+        this.posOut %= this.buffer.length;
+        return outVal;
+    }
+
+    /** @param {number} length */
+    setDelay(length) {
+        if (length > this.buffer.length) {
+            throw "delay length > buffer length";
+        }
+        this.delay = length;
+    }
+}
+
 class Synthesizer {
     constructor(sampleRate, instrsAvailable) {
         this.instrsAvailable = instrsAvailable;
@@ -1046,7 +1291,11 @@ class Synthesizer {
         this.valR = 0;
 
         this.volume = 1;
+        /** @private */
         this.pan = 0.5;
+
+        this.delayLineL = new DelayLine(Math.round(this.sampleRate * 0.1));
+        this.delayLineR = new DelayLine(Math.round(this.sampleRate * 0.1));
 
         this.playingIndex = 0;
 
@@ -1086,26 +1335,55 @@ class Synthesizer {
     }
 
     nextSample() {
-        this.valL = 0;
-        this.valR = 0;
+        let valL = 0;
+        let valR = 0;
 
         for (let i = 0; i < this.instrsAvailable; i++) {
-            if (this.instrs[i].playing) {
-                this.instrs[i].advance();
-                let val = this.instrs[i].val;
-                this.valL += val * (1 - this.pan);
-                this.valR += val * this.pan;
+            let instr = this.instrs[i];
+            if (instr.playing) {
+                instr.advance();
+                let val = instr.val;
+                valL += val * (1 - this.pan);
+                valR += val * this.pan;
             }
         }
 
-        this.valL *= this.volume;
-        this.valR *= this.volume;
+        if (enableStereoSeparation) {
+            this.valL = this.delayLineL.process(valL) * this.volume;
+            this.valR = this.delayLineR.process(valR) * this.volume;
+        } else {
+            this.valL = valL * this.volume;
+            this.valR = valR * this.volume;
+        }
 
         this.sampleNum++;
     }
 
     getTime() {
         return this.sampleNum / this.sampleRate;
+    }
+
+    /** @param {number} pan */
+    setPan(pan) {
+        const SPEED_OF_SOUND = 343; // meters per second
+        // let's pretend panning moves the sound source in a semicircle around and in front of the listener
+        let r = 3; // semicircle radius
+        let earX = 0.20; // absolute position of ears on the X axis
+        let x = pan * 2 - 1; // [0, 1] -> [-1, -1]
+        let y = Math.sqrt((r ** 2) - x ** 2);
+        let distL = Math.sqrt((earX + x) ** 2 + y ** 2);
+        let distR = Math.sqrt((-earX + x) ** 2 + y ** 2);
+        let minDist = Math.min(distL, distR);
+        distL -= minDist;
+        distR -= minDist;
+        let delaySL = distL / SPEED_OF_SOUND * 100;
+        let delaySR = distR / SPEED_OF_SOUND * 100;
+        let delayL = Math.round(delaySL * this.sampleRate);
+        let delayR = Math.round(delaySR * this.sampleRate);
+        // console.log(`L:${delaySL * 1000}ms R:${delaySR * 1000}ms X:${x}`);
+        this.delayLineL.setDelay(delayL);
+        this.delayLineR.setDelay(delayR);
+        this.pan = pan;
     }
 }
 
@@ -1792,7 +2070,7 @@ class ControllerBridge {
                         break;
                     }
                     case MessageType.PanChange: {
-                        this.synthesizers[msg.trackNum].pan = msg.param0 / 128;
+                        this.synthesizers[msg.trackNum].setPan(msg.param0 / 128);
                         break;
                     }
                 }
@@ -2932,14 +3210,16 @@ function drawFsVis(ctx, time, noteAlpha) {
         ctx.globalAlpha = 1;
         ctx.textBaseline = "top";
         ctx.fillStyle = "#ffffff";
-        if (typeof process !== 'undefined' && process?.env?.songName) {
+        if (typeof process !== 'undefined') {
             // Running under node
-            ctx.font = 'bold 48px Arial';
-            ctx.fillText(`${process.env.songName}`, 24, 24);
-            if (process.env.nextSongName) {
-                ctx.fillStyle = "#00ff00";
-                ctx.font = '48x Arial';
-                ctx.fillText(`Next Up: ${process.env.nextSongName}`, 24, 72);
+            if (process?.env?.songName) {
+                ctx.font = 'bold 48px Arial';
+                ctx.fillText(`${process.env.songName}`, 24, 24);
+                if (process.env.nextSongName) {
+                    ctx.fillStyle = "#00ff00";
+                    ctx.font = '48x Arial';
+                    ctx.fillText(`Next Up: ${process.env.nextSongName}`, 24, 72);
+                }
             }
         } else {
             // Running under a browser
