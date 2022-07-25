@@ -1265,7 +1265,9 @@ class DelayLine {
         this.buffer[(this.posOut + this.delay) % this.buffer.length] = val;
         let outVal = this.buffer[this.posOut];
         this.posOut++;
-        this.posOut %= this.buffer.length;
+        if (this.posOut >= this.buffer.length) {
+            this.posOut = 0;
+        }
         return outVal * this.gain;
     }
 
