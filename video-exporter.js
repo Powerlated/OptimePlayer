@@ -49,8 +49,8 @@ function loadSdatsFromRom(data) {
 }
 
 async function renderVideoSeq(sdat, id, outFile) {
-    const OVERSAMPLE = 4;
-    const SAMPLE_RATE = 32768;
+    const OVERSAMPLE = 1;
+    const SAMPLE_RATE = 262144;
 
     let bridge = new ControllerBridge(SAMPLE_RATE * OVERSAMPLE, sdat, id);
     let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 3);
@@ -138,15 +138,17 @@ async function renderVideoSeq(sdat, id, outFile) {
         if (frameTimer >= 1 / FPS) {
             frameTimer -= 1 / FPS;
 
-            drawFsVis(ctx, frameTimer * 1000, fadeoutVolMul);
-            let imageData = ctx.getImageData(0, 0, WIDTH, HEIGHT);
+            if (false) {
+                drawFsVis(ctx, frameTimer * 1000, fadeoutVolMul);
+                let imageData = ctx.getImageData(0, 0, WIDTH, HEIGHT);
 
-            if (!videoStream.write(new Uint8Array(imageData.data.buffer))) {
-                await /** @type {Promise<void>} */(new Promise((resolve, reject) => {
-                    videoStream.once("drain", () => {
-                        resolve();
-                    });
-                }));
+                if (!videoStream.write(new Uint8Array(imageData.data.buffer))) {
+                    await /** @type {Promise<void>} */(new Promise((resolve, reject) => {
+                        videoStream.once("drain", () => {
+                            resolve();
+                        });
+                    }));
+                }
             }
 
             if (++frames % FPS == 0) {
@@ -172,7 +174,7 @@ async function renderVideoSeq(sdat, id, outFile) {
         valL *= 0.4 * fadeoutVolMul;
         valR *= 0.4 * fadeoutVolMul;
         if (Math.abs(valL) > 1.0 || Math.abs(valR) > 1.0) {
-            console.error("CLIPPING!");
+            console.log("CLIPPING!");
         }
         encoder.addSample(valL, valR);
 
