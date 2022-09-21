@@ -1204,7 +1204,7 @@ class SampleInstrument {
         if (convertedSampleRate > this.nyquist) {
             convertedSampleRate = this.nyquist;
         }
-        console.log("cutoff: " + convertedSampleRate);
+        // console.log("cutoff: " + convertedSampleRate);
         this.filter.set(this.sampleRate, convertedSampleRate);
     }
 
