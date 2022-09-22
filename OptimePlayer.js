@@ -7,7 +7,7 @@ let enableStereoSeparation = false;
 let enableForceStereoSeparation = false;
 let enableAntiAliasing = true;
 let enableSoundgoodizer = true;
-let elementarySchoolBandMode = false;
+let filterSamples = false;
 
 /** @type {ControllerBridge | null} */
 let currentBridge = null;
@@ -142,78 +142,226 @@ class SoundgoodizerFilterChannel {
         }
     }
 }
-
 // The entire point of using a filter to downsample is to antialias with subsample resolution in the output signal
 // We need to decide how precise our filter is
-const KERNEL_RESOLUTION = 1024;
 class BlipBuf {
-    // Lanzcos kernel
-    /** @type {Float64Array} */ kernel;
-    kernelSize = 0;
-
-    /** @type {Float64Array} */ channelVals;
-    /** @type {Float64Array} */ channelSample;
-    /** @type {Float64Array} */ channelRealSample;
-
-    // This is a buffer of differences we are going to write bandlimited impulses to
-     /** @type {Float64Array} */ buf;
-    bufPos = 0;
-    bufSize = 0;
-
-    currentVal = 0;
-
-    currentSampleInPos = 0;
-    currentSampleOutPos = 0;
-
-    /**
-     * @param {number} kernelSize 
-     * @param {boolean} normalize 
-     * @param {number} channels 
-     * @param {number} filterRatio 
-     */
-    constructor(kernelSize, normalize, channels, filterRatio) {
-        this.channelVals = new Float64Array(channels);
+    static KERNEL_RESOLUTION = 64;
+    static MAX_KERNEL_SIZE = 256;
+    /** @type {Object.<object, Float64Array>} */
+    static kernels = {};
+    constructor(kernelSize, normalize, channels, filterRatio, minimumPhase) {
+        if (kernelSize > BlipBuf.MAX_KERNEL_SIZE) {
+            throw 'kernelSize > BlipBuf.MAX_KERNEL_SIZE';
+        }
+        // Lanzcos kernel
+        let key = kernelSize + normalize + filterRatio + minimumPhase;
+        this.kernel = BlipBuf.kernels[key];
+        if (this.kernel == undefined) {
+            this.kernel = BlipBuf.genKernel(kernelSize, normalize, filterRatio, minimumPhase);
+            console.log(this.kernel)
+            BlipBuf.kernels[key] = this.kernel;
+        }
+        this.kernelSize = kernelSize;
+        // This is a buffer of differences we are going to write bandlimited impulses to
+        this.bufL = null;
+        this.bufR = null;
+        this.bufPos = 0;
+        this.bufSize = 0;
+        this.currentValL = 0;
+        this.currentValR = 0;
+        this.currentSampleInPos = 0;
+        this.currentSampleOutPos = 0;
+        this.channelValsL = new Float64Array(channels);
+        this.channelValsR = new Float64Array(channels);
         this.channelSample = new Float64Array(channels);
         this.channelRealSample = new Float64Array(channels);
-
         this.bufSize = 32768;
-        this.buf = new Float64Array(this.bufSize);
+        this.bufL = new Float64Array(this.bufSize);
+        this.bufR = new Float64Array(this.bufSize);
+    }
 
-        this.setKernelSize(kernelSize, normalize, filterRatio);
+    // Discrete Fourier Transform
+    /**
+     * @param {number} n
+     * @param {Float64Array} realTime
+     * @param {Float64Array} imagTime
+     * @param {Float64Array} realFreq
+     * @param {Float64Array} imagFreq
+     */
+    static dft(n, realTime, imagTime, realFreq, imagFreq) {
+        for (let k = 0; k < n; k++) {
+            realFreq[k] = 0;
+            imagFreq[k] = 0;
+        }
+
+        for (let k = 0; k < n; k++)
+            for (let i = 0; i < n; i++) {
+                let p = (2.0 * Math.PI * (k * i)) / n;
+                let sr = Math.cos(p);
+                let si = -Math.sin(p);
+                realFreq[k] += (realTime[i] * sr) - (imagTime[i] * si);
+                imagFreq[k] += (realTime[i] * si) + (imagTime[i] * sr);
+            }
+    }
+
+    // Inverse Discrete Fourier Transform
+    /**
+     * @param {number} n
+     * @param {Float64Array} realTime
+     * @param {Float64Array} imagTime
+     * @param {Float64Array} realFreq
+     * @param {Float64Array} imagFreq
+     */
+    static inverseDft(n, realTime, imagTime, realFreq, imagFreq) {
+
+        for (let k = 0; k < n; k++) {
+            realTime[k] = 0;
+            imagTime[k] = 0;
+        }
+
+        for (let k = 0; k < n; k++) {
+            for (let i = 0; i < n; i++) {
+                let p = (2.0 * Math.PI * (k * i)) / n;
+                let sr = Math.cos(p);
+                let si = -Math.sin(p);
+                realTime[k] += (realFreq[i] * sr) + (imagFreq[i] * si);
+                imagTime[k] += (realFreq[i] * si) - (imagFreq[i] * sr);
+            }
+            realTime[k] /= n;
+            imagTime[k] /= n;
+        }
+    }
+
+    // Complex Absolute Value
+    static cabs(x, y) {
+        return Math.sqrt((x * x) + (y * y));
+    }
+
+    // Complex Exponential
+    static cexp(x, y) {
+        let expx = Math.E ** x;
+        return [expx * Math.cos(y), expx * Math.sin(y)];
+    }
+
+
+    // Compute Real Cepstrum Of Signal
+    /**
+     * @param {number} n
+     * @param {Float64Array} signal
+     * @param {Float64Array} realCepstrum
+     */
+    static realCepstrum(n, signal, realCepstrum) {
+        // Compose Complex FFT Input
+
+        let realTime = new Float64Array(n);
+        let imagTime = new Float64Array(n);
+        let realFreq = new Float64Array(n);
+        let imagFreq = new Float64Array(n);
+
+        for (let i = 0; i < n; i++) {
+            realTime[i] = signal[i];
+            imagTime[i] = 0;
+        }
+
+        // Perform DFT
+
+        BlipBuf.dft(n, realTime, imagTime, realFreq, imagFreq);
+
+        // Calculate Log Of Absolute Value
+
+        for (let i = 0; i < n; i++) {
+            realFreq[i] = Math.log(BlipBuf.cabs(realFreq[i], imagFreq[i]));
+            imagFreq[i] = 0.0;
+        }
+
+        // Perform Inverse FFT
+
+        BlipBuf.inverseDft(n, realTime, imagTime, realFreq, imagFreq);
+
+        // Output Real Part Of FFT
+        for (let i = 0; i < n; i++)
+            realCepstrum[i] = realTime[i];
+    }
+
+    // Compute Minimum Phase Reconstruction Of Signal
+    /**
+    * @param {number} n
+    * @param {Float64Array} realCepstrum
+    * @param {Float64Array} minimumPhase
+    */
+    static minimumPhase(n, realCepstrum, minimumPhase) {
+        let nd2 = n / 2;
+
+        let realTime = new Float64Array(n);
+        let imagTime = new Float64Array(n);
+        let realFreq = new Float64Array(n);
+        let imagFreq = new Float64Array(n);
+
+        if ((n % 2) == 1) {
+            realTime[0] = realCepstrum[0];
+            for (let i = 1; i < nd2; i++)
+                realTime[i] = 2.0 * realCepstrum[i];
+            for (let i = nd2; i < n; i++)
+                realTime[i] = 0.0;
+        }
+        else {
+            realTime[0] = realCepstrum[0];
+            for (let i = 1; i < nd2; i++)
+                realTime[i] = 2.0 * realCepstrum[i];
+            realTime[nd2] = realCepstrum[nd2];
+            for (let i = nd2 + 1; i < n; i++)
+                realTime[i] = 0.0;
+        }
+
+        for (let i = 0; i < n; i++)
+            imagTime[i] = 0.0;
+
+        BlipBuf.dft(n, realTime, imagTime, realFreq, imagFreq);
+
+        for (let i = 0; i < n; i++) {
+            let res = BlipBuf.cexp(realFreq[i], imagFreq[i]);
+            realFreq[i] = res[0];
+            imagFreq[i] = res[1];
+        }
+
+        BlipBuf.inverseDft(n, realTime, imagTime, realFreq, imagFreq);
+
+        for (let i = 0; i < n; i++)
+            minimumPhase[i] = realTime[i];
     }
 
     /**
-     * @param {number} kernelSize 
-     * @param {boolean} normalize 
-     * @param {number} filterRatio 
-     */
-    setKernelSize(kernelSize, normalize, filterRatio) {
-        this.kernel = new Float64Array(kernelSize * KERNEL_RESOLUTION);
-        this.kernelSize = kernelSize;
-
+    * @param {number} kernelSize
+    * @param {number} normalize
+    * @param {number} filterRatio
+    * @param {boolean} minimumPhase
+    * @returns {Float64Array}
+    */
+    static genKernel(kernelSize, normalize, filterRatio, minimumPhase) {
+        let kernel = new Float64Array(kernelSize * BlipBuf.KERNEL_RESOLUTION);
+        kernelSize = kernelSize;
         if ((kernelSize & (kernelSize - 1)) != 0) {
             throw "kernelSize not power of 2:" + kernelSize;
         }
-
         if (filterRatio <= 0 || filterRatio > Math.PI) {
             throw "invalid filterRatio, outside of (0, pi]";
         }
 
         // Generate the normalized Lanzcos kernel
         // Derived from Wikipedia https://en.wikipedia.org/wiki/Lanczos_resampling
-        for (let i = 0; i < KERNEL_RESOLUTION; i++) {
+
+        for (let i = 0; i < BlipBuf.KERNEL_RESOLUTION; i++) {
             let sum = 0;
             for (let j = 0; j < kernelSize; j++) {
                 let x = j - kernelSize / 2;
                 // Shift X coordinate right for subsample accuracy
                 // We now have the X coordinates for an impulse bandlimited at the sample rate
-                x += (KERNEL_RESOLUTION - i - 1) / KERNEL_RESOLUTION;
+                x += i / BlipBuf.KERNEL_RESOLUTION;
                 // filterRatio determines the highest frequency that will be generated,
                 // as a portion of the Nyquist frequency. e.g. at a sample rate of 48000 hz, the Nyquist frequency
                 // will be at 24000 hz, so a filterRatio of 0.5 would set the highest frequency
                 // generated at 12000 hz.
                 x *= filterRatio * Math.PI;
-
                 // Get the sinc, which represents a bandlimited impulse
                 let sinc = Math.sin(x) / x;
                 // A sinc function's domain is infinte, meaning 
@@ -222,75 +370,127 @@ class BlipBuf {
                 // our sinc function. We can window (i.e. multiply) our true sinc function with a
                 // horizontally stretched sinc function to create a windowed sinc function of our desired width. 
                 let lanzcosWindow = Math.sin(x / kernelSize) / (x / kernelSize);
-
                 // A hole exists in the sinc function at zero, special case it
                 if (x == 0) {
-                    this.kernel[i * kernelSize + j] = 1;
+                    kernel[i * kernelSize + j] = 1;
                 }
                 else {
                     // Apply our window here
-                    this.kernel[i * kernelSize + j] = sinc * lanzcosWindow;
+                    kernel[i * kernelSize + j] = sinc * lanzcosWindow;
                 }
+                sum += kernel[i * kernelSize + j];
 
-                sum += this.kernel[i * kernelSize + j];
+            }
+            if (normalize && !minimumPhase) {
+                for (let j = 0; j < kernelSize; j++) {
+                    kernel[i * kernelSize + j] /= sum;
+                }
+            }
+        }
+        if (minimumPhase) {
+            let fullSize = kernelSize * BlipBuf.KERNEL_RESOLUTION;
+
+            let index = 0;
+            let kMinPhase = new Float64Array(fullSize);
+            for (let u = 0; u < kernelSize; u++) {
+                for (let v = 0; v < BlipBuf.KERNEL_RESOLUTION; v++) {
+                    let val = kernel[u + v * kernelSize];
+                    kMinPhase[index++] = val;
+                }
+            }
+
+            // let csv = "";
+            // for (let j = 0; j < fullSize; j++) {
+            //     csv += `${kMinPhase[j]},`;
+            // }
+            // csv += `0`;
+            // console.log(csv);
+
+            let tmp = new Float64Array(fullSize);
+            BlipBuf.realCepstrum(fullSize, kMinPhase, tmp);
+            BlipBuf.minimumPhase(fullSize, tmp, kMinPhase);
+
+            // let csv2 = "";
+            // for (let j = 0; j < fullSize; j++) {
+            //     csv2 += `${kMinPhase[j]},`;
+            // }
+            // csv2 += `0`;
+            // console.log(csv2);
+
+            index = 0;
+            for (let u = 0; u < kernelSize; u++) {
+                for (let v = 0; v < BlipBuf.KERNEL_RESOLUTION; v++) {
+                    kernel[u + v * kernelSize] = kMinPhase[index++];
+                }
             }
 
             if (normalize) {
-                for (let j = 0; j < kernelSize; j++) {
-                    this.kernel[i * kernelSize + j] /= sum;
+                for (let i = 0; i < BlipBuf.KERNEL_RESOLUTION; i++) {
+                    let sum = 0;
+                    for (let j = 0; j < kernelSize; j++) {
+                        sum += kernel[i * kernelSize + j];
+                    }
+                    for (let j = 0; j < kernelSize; j++) {
+                        kernel[i * kernelSize + j] /= sum;
+                    }
                 }
+                console.log("normalizing");
             }
         }
-
-        // this.reset();
+        return kernel;
     }
-
     reset() {
         // Flush out the difference buffer
         this.bufPos = 0;
-        this.currentVal = 0;
+        this.currentValL = 0;
+        this.currentValR = 0;
         for (let i = 0; i < this.bufSize; i++) {
-            this.buf[i] = 0;
+            this.bufL[i] = 0;
+            this.bufR[i] = 0;
         }
     }
-
     // Sample is in terms of out samples
-    setValue(channel, sample, val, useSinc) {
+    setValue(channel, sample, valL, valR, useSinc) {
         if (sample > this.channelSample[channel]) {
             this.channelSample[channel] = sample;
-        } else {
+        }
+        else {
             // TODO: too lazy to fix anything regarding this so I'll just sweep it under the rug for now
             // console.warn(`Channel ${channel}: Tried to set amplitude backward in time from ${this.channelSample[channel]} to ${sample}`);
         }
-
-        if (val != this.channelVals[channel]) {
-            let diff = val - this.channelVals[channel];
-
+        if (valL != this.channelValsL[channel] || valR != this.channelValsR[channel]) {
+            let diffL = valL - this.channelValsL[channel];
+            let diffR = valR - this.channelValsR[channel];
             if (useSinc) {
-                let subsamplePos = Math.floor((sample % 1) * KERNEL_RESOLUTION);
-
+                let subsamplePos = Math.floor((1 - (sample % 1)) * (BlipBuf.KERNEL_RESOLUTION - 1));
                 // Add our bandlimited impulse to the difference buffer
                 let kBufPos = (this.bufPos + Math.floor(sample) - this.currentSampleOutPos) % this.bufSize;
                 for (let i = 0; i < this.kernelSize; i++) {
-                    this.buf[kBufPos] += this.kernel[this.kernelSize * subsamplePos + i] * diff;
-                    if (++kBufPos >= this.bufSize) kBufPos = 0;
+                    let kVal = this.kernel[this.kernelSize * subsamplePos + i];
+                    this.bufL[kBufPos] += kVal * diffL;
+                    this.bufR[kBufPos] += kVal * diffR;
+                    if (++kBufPos >= this.bufSize)
+                        kBufPos = 0;
                 }
-            } else {
+            }
+            else {
                 let kBufPos = (this.bufPos + Math.floor(sample + this.kernelSize) - this.currentSampleOutPos) % this.bufSize;
-                this.buf[kBufPos] += diff;
+                this.bufL[kBufPos] += diffL;
+                this.bufR[kBufPos] += diffR;
             }
         }
-
-        this.channelVals[channel] = val;
+        this.channelValsL[channel] = valL;
+        this.channelValsR[channel] = valR;
     }
-
     readOutSample() {
         // Integrate the difference buffer
-        this.currentVal += this.buf[this.bufPos];
-        this.buf[this.bufPos] = 0;
-        if (++this.bufPos >= this.bufSize) this.bufPos = 0;
+        this.currentValL += this.bufL[this.bufPos];
+        this.currentValR += this.bufR[this.bufPos];
+        this.bufL[this.bufPos] = 0;
+        this.bufR[this.bufPos] = 0;
+        if (++this.bufPos >= this.bufSize)
+            this.bufPos = 0;
         this.currentSampleOutPos++;
-        return this.currentVal;
     }
 }
 
@@ -317,10 +517,10 @@ class LowPass96DbPerOct {
     }
 
     set(sampleRate, cutoffFrequency) {
-        this.f0.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2)
-        this.f1.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2)
-        this.f2.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2)
-        this.f3.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2)
+        this.f0.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
+        this.f1.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
+        this.f2.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
+        this.f3.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
     }
 }
 
@@ -350,7 +550,7 @@ class BiQuadFilter {
         // compute result
         let result = this.a0 * inSample + this.a1 * this.x1 + this.a2 * this.x2 - this.a3 * this.y1 - this.a4 * this.y2;
         if (isNaN(result)) throw "sdf ";
-        if (result == Infinity) throw "infinity??"; 
+        if (result == Infinity) throw "infinity??";
 
         // shift x1 to x2, sample to x1 
         this.x2 = this.x1;
@@ -1048,18 +1248,20 @@ class Bank {
     }
 }
 
-let filterSamples = true;
-
 class SampleInstrument {
     /**
+    * @param {SampleSynthesizer} synth
+    * @param {number} channelNum
     * @param {number} sampleRate 
     * @param {Sample} sample
     */
-    constructor(sampleRate, sample) {
+    constructor(synth, channelNum, sampleRate, sample) {
+        this.channelNum = channelNum;
+        this.synth = synth;
         this.sampleRate = sampleRate;
         this.nyquist = sampleRate / 2;
 
-        this.secondsPerSample = 1 / sampleRate;
+        this.invSampleRate = 1 / sampleRate;
         /** @type {Sample} */
         this.sample = sample;
 
@@ -1086,76 +1288,9 @@ class SampleInstrument {
         // We use a sloping filter rather than a brick wall to allow some of the image harmonics through
         this.filter = new LowPass96DbPerOct(this.sampleRate, 16384);
 
-        // trackEnables.fill(false);
-        // trackEnables[7] = true;
+        this.resampleT = 0;
 
         Object.seal(this);
-    }
-
-    static {
-        this.kernelSize = 4;
-        this.setKernelSize(this.kernelSize, true, 1);
-    }
-
-    /**
-     * @param {number} kernelSize 
-     * @param {boolean} normalize 
-     * @param {number} filterRatio 
-     */
-    static setKernelSize(kernelSize, normalize, filterRatio) {
-        this.kernel = new Float64Array(kernelSize * KERNEL_RESOLUTION);
-        this.kernelSize = kernelSize;
-
-        if ((kernelSize & (kernelSize - 1)) != 0) {
-            throw "kernelSize not power of 2:" + kernelSize;
-        }
-
-        if (filterRatio <= 0 || filterRatio > Math.PI) {
-            throw "invalid filterRatio, outside of (0, pi]";
-        }
-
-        // Generate the normalized Lanzcos kernel
-        // Derived from Wikipedia https://en.wikipedia.org/wiki/Lanczos_resampling
-        for (let i = 0; i < KERNEL_RESOLUTION; i++) {
-            let sum = 0;
-            for (let j = 0; j < kernelSize; j++) {
-                let x = j - kernelSize / 2;
-                // Shift X coordinate right for subsample accuracy
-                // We now have the X coordinates for an impulse bandlimited at the sample rate
-                x += (KERNEL_RESOLUTION - i - 1) / KERNEL_RESOLUTION;
-                // filterRatio determines the highest frequency that will be generated,
-                // as a portion of the Nyquist frequency. e.g. at a sample rate of 48000 hz, the Nyquist frequency
-                // will be at 24000 hz, so a filterRatio of 0.5 would set the highest frequency
-                // generated at 12000 hz.
-                x *= filterRatio * Math.PI;
-
-                // Get the sinc, which represents a bandlimited impulse
-                let sinc = Math.sin(x) / x;
-                // A sinc function's domain is infinte, meaning 
-                // convolving a signal with a true sinc function would take an infinite amount of time
-                // To avoid creating a filter with infinite latency, we have to decide when to cut off
-                // our sinc function. We can window (i.e. multiply) our true sinc function with a
-                // horizontally stretched sinc function to create a windowed sinc function of our desired width. 
-                let lanzcosWindow = Math.sin(x / kernelSize) / (x / kernelSize);
-
-                // A hole exists in the sinc function at zero, special case it
-                if (x == 0) {
-                    this.kernel[i * kernelSize + j] = 1;
-                }
-                else {
-                    // Apply our window here
-                    this.kernel[i * kernelSize + j] = sinc * lanzcosWindow;
-                }
-
-                sum += this.kernel[i * kernelSize + j];
-            }
-
-            if (normalize) {
-                for (let j = 0; j < kernelSize; j++) {
-                    this.kernel[i * kernelSize + j] /= sum;
-                }
-            }
-        }
     }
 
     changeSample(sample) {
@@ -1164,36 +1299,33 @@ class SampleInstrument {
 
     advance() {
         let convertedSampleRate = this.freqRatio * this.sample.sampleRate;
-        this.sampleT += this.secondsPerSample * convertedSampleRate;
+        this.sampleT += this.invSampleRate * convertedSampleRate;
 
-        let val0 = this.getSampleDataAt(Math.floor(this.sampleT + 0));
-        let val1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
-
-        let finalVal = val0;
-        if (enableAntiAliasing && convertedSampleRate < this.nyquist) {
-            let subsampleT = this.sampleT % 1;
-            let deltaVal = val1 - val0;
-            finalVal = subsampleT < 0.5 ? val0 : val1;
-            finalVal += polyBlep((subsampleT + 0.5) % 1, this.secondsPerSample * convertedSampleRate) * deltaVal;
+        while (this.resampleT < this.sampleT) {
+            let val = this.getSampleDataAt(this.resampleT) * this.volume;
+            let subT = (((this.resampleT / convertedSampleRate) * this.sampleRate)) % 1;
+            this.synth.blipBuf.setValue(this.channelNum, this.synth.t + subT, val, 0, enableAntiAliasing);
+            this.resampleT++;
         }
 
-        if (this.sample.enableFilter && filterSamples) {
-            this.val = this.filter.transform(finalVal * this.volume);
-        } else {
-            this.val = finalVal * this.volume;
-        }
+        // TODO: reconstruction filter
+        // if (this.sample.enableFilter && filterSamples) {
+        // this.val = this.filter.transform(finalVal * this.volume);
+        // } else {
+        // this.val = finalVal * this.volume;
+        // }
     }
 
-    getSampleDataAt(sample) {
-        if (sample >= this.sample.data.length && this.sample.looping) {
-            let sampleNoIntro = sample - this.sample.loopPoint;
+    getSampleDataAt(sampleT) {
+        if (sampleT >= this.sample.data.length && this.sample.looping) {
+            let sampleNoIntro = sampleT - this.sample.loopPoint;
             let loopLength = this.sample.data.length - this.sample.loopPoint;
             sampleNoIntro %= loopLength;
-            sample = sampleNoIntro + this.sample.loopPoint;
+            sampleT = sampleNoIntro + this.sample.loopPoint;
         }
 
-        if (sample < this.sample.data.length) {
-            return this.sample.data[sample];
+        if (sampleT < this.sample.data.length) {
+            return this.sample.data[sampleT];
         } else {
             return 0;
         }
@@ -1210,10 +1342,6 @@ class SampleInstrument {
 
     /** @param {number} midiNote */
     setNote(midiNote) {
-        if (elementarySchoolBandMode) {
-            midiNote += 0.3 * ((Math.random() - 0.5) * 2);
-            // -/+ 30 cents random detune
-        }
         this.midiNote = midiNote;
         this.frequency = midiNoteToHz(midiNote);
         this.freqRatio = this.frequency / this.sample.frequency;
@@ -1239,7 +1367,7 @@ class SampleInstrument {
 class SseqController {
     /** @param {Array | Uint8Array} sseqFile
      *  @param {number} dataOffset
-     *  @param {MinHeap<Message>} messageBuffer
+     *  @param {CircularBuffer<Message>} messageBuffer
      **/
     constructor(sseqFile, dataOffset, messageBuffer) {
         this.sseqFile = sseqFile;
@@ -1383,12 +1511,7 @@ class SseqTrack {
      * @param {number} param2
      */
     sendMessage(fromKeyboard, type, param0 = 0, param1 = 0, param2 = 0) {
-        let jitter = 0;
-        if (elementarySchoolBandMode) {
-            jitter = Math.round((0.005 * Math.random() * 12) * this.controller.tracks[0].bpm);
-            console.log(jitter);
-        }
-        this.controller.messageBuffer.addEntry(new Message(fromKeyboard, this.id, type, param0, param1, param2), this.controller.ticksElapsed + jitter);
+        this.controller.messageBuffer.insert(new Message(fromKeyboard, this.id, type, param0, param1, param2));
     }
 
     execute() {
@@ -1643,7 +1766,7 @@ class DelayLine {
     }
 }
 
-class Synthesizer {
+class SampleSynthesizer {
     constructor(sampleRate, instrsAvailable) {
         this.instrsAvailable = instrsAvailable;
 
@@ -1651,7 +1774,7 @@ class Synthesizer {
         this.instrs = new Array(this.instrsAvailable);
         /** @type {SampleInstrument[]} */
         this.activeInstrs = new Array();
-        this.sampleNum = 0;
+        this.t = 0;
         this.sampleRate = sampleRate;
 
         this.valL = 0;
@@ -1668,9 +1791,11 @@ class Synthesizer {
 
         let emptySample = new Sample(new Float32Array(1), 440, sampleRate, false, 0);
 
+        this.blipBuf = new BlipBuf(16, true, this.instrsAvailable, 1, true);
         for (let i = 0; i < this.instrs.length; i++) {
-            this.instrs[i] = new SampleInstrument(this.sampleRate, emptySample);
+            this.instrs[i] = new SampleInstrument(this, i, this.sampleRate, emptySample);
         }
+
 
         this.finetune = 0;
     }
@@ -1693,6 +1818,7 @@ class Synthesizer {
         instr.volume = volume;
         instr.startTime = meta;
         instr.sampleT = 0;
+        instr.resampleT = 0;
         instr.playing = true;
 
         let currentIndex = this.playingIndex;
@@ -1720,11 +1846,13 @@ class Synthesizer {
         let valR = 0;
 
         for (const instr of this.activeInstrs) {
-            instr.advance();
-            let val = instr.val;
-            valL += val * (1 - this.pan);
-            valR += val * this.pan;
+            instr.advance(); // instrs are responsible for submitting amplitude changes to BlipBuf
         }
+
+        this.blipBuf.readOutSample();
+        let val = this.blipBuf.currentValL;
+        valL += val * (1 - this.pan);
+        valR += val * this.pan;
 
         if (enableStereoSeparation) {
             this.valL = this.delayLineL.process(valL) * this.volume;
@@ -1734,7 +1862,7 @@ class Synthesizer {
             this.valR = valR * this.volume;
         }
 
-        this.sampleNum++;
+        this.t++;
     }
 
     setFinetune(semitones) {
@@ -2051,8 +2179,8 @@ class FsVisControllerBridge {
         let file = sdat.fat[info.fileId];
         let dataOffset = read32LE(file, 0x18);
 
-        /** @type {MinHeap<Message>} */
-        this.messageBuffer = new MinHeap(512);
+        /** @type {CircularBuffer<Message>} */
+        this.messageBuffer = new CircularBuffer(512);
         this.controller = new SseqController(file, dataOffset, this.messageBuffer);
         /** @type {CircularBuffer<Message>} */
         this.activeNotes = new CircularBuffer(2048);
@@ -2071,10 +2199,9 @@ class FsVisControllerBridge {
 
             this.controller.tick();
 
-            while (this.messageBuffer.entries > 0 &&
-                this.messageBuffer.getFirstEntry().priority <= this.controller.ticksElapsed) {
+            while (this.messageBuffer.entries > 0) {
                 /** @type {Message} */
-                let msg = this.messageBuffer.popFirstEntry().data;
+                let msg = this.messageBuffer.pop();
 
                 switch (msg.type) {
                     case MessageType.PlayNote:
@@ -2199,8 +2326,8 @@ class ControllerBridge {
         if (dataOffset != 0x1C) alert("SSEQ offset is not 0x1C? it is: " + hex(dataOffset, 8));
 
         this.sdat = sdat;
-        /** @type {MinHeap<Message>} */
-        this.messageBuffer = new MinHeap(1024);
+        /** @type {CircularBuffer<Message>} */
+        this.messageBuffer = new CircularBuffer(1024);
         this.controller = new SseqController(file, dataOffset, this.messageBuffer);
 
         /** @type {Uint8Array[]} */
@@ -2209,10 +2336,10 @@ class ControllerBridge {
             this.notesOn[i] = new Uint8Array(128);
         }
 
-        /** @type {Synthesizer[]} */
+        /** @type {SampleSynthesizer[]} */
         this.synthesizers = new Array(16);
         for (let i = 0; i < 16; i++) {
-            this.synthesizers[i] = new Synthesizer(sampleRate, 16);
+            this.synthesizers[i] = new SampleSynthesizer(sampleRate, 16);
         }
         this.destroyed = false;
 
@@ -2358,11 +2485,10 @@ class ControllerBridge {
 
             this.controller.tick();
 
-            while (this.messageBuffer.entries > 0 &&
-                this.messageBuffer.getFirstEntry().priority <= this.controller.ticksElapsed) {
+            while (this.messageBuffer.entries > 0) {
 
                 /** @type {Message} */
-                let msg = this.messageBuffer.popFirstEntry().data;
+                let msg = this.messageBuffer.pop();
 
                 switch (msg.type) {
                     case MessageType.PlayNote:
@@ -2613,12 +2739,11 @@ async function downloadSample(sample) {
 * @param {string} name
 */
 async function renderAndDownloadSeq(sdat, name) {
-    const OVERSAMPLE = 4;
     const SAMPLE_RATE = 32768;
 
     let id = sdat.sseqNameIdDict[name];
 
-    let bridge = new ControllerBridge(SAMPLE_RATE * OVERSAMPLE, sdat, id);
+    let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
 
     console.log("Rendering SSEQ Id:" + id);
     // console.log("FAT ID:" + info.fileId);
@@ -2682,15 +2807,11 @@ async function renderAndDownloadSeq(sdat, name) {
         for (let i = 0; i < 16; i++) {
             if (trackEnables[i]) {
                 let synth = bridge.synthesizers[i];
-                for (let j = 0; j < 4; j++) {
-                    synth.nextSample();
-                    valL += synth.valL;
-                    valR += synth.valR;
-                }
+                synth.nextSample();
+                valL += synth.valL;
+                valR += synth.valR;
             }
         }
-        valL /= OVERSAMPLE;
-        valR /= OVERSAMPLE;
 
         encoder.addSample(valL * 0.5 * fadeoutVolMul, valR * 0.5 * fadeoutVolMul);
 
