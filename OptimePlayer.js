@@ -1256,7 +1256,7 @@ class SampleInstrument {
     * @param {Sample} sample
     */
     constructor(synth, channelNum, sampleRate, sample) {
-        this.channelNum = channelNum;
+        this.instrNum = channelNum;
         this.synth = synth;
         this.sampleRate = sampleRate;
         this.nyquist = sampleRate / 2;
@@ -1304,7 +1304,7 @@ class SampleInstrument {
         while (this.resampleT < this.sampleT) {
             let val = this.getSampleDataAt(this.resampleT) * this.volume;
             let subT = (((this.resampleT / convertedSampleRate) * this.sampleRate)) % 1;
-            this.synth.blipBuf.setValue(this.channelNum, this.synth.t + subT, val, 0, enableAntiAliasing);
+            this.synth.blipBuf.setValue(this.instrNum, this.synth.t + subT, val, 0, enableAntiAliasing);
             this.resampleT++;
         }
 
@@ -1838,6 +1838,7 @@ class SampleSynthesizer {
             return;
         }
         this.activeInstrs[activeInstrIndex].playing = false;
+        this.blipBuf.setValue(this.activeInstrs[activeInstrIndex].instrNum, this.t, 0, 0, enableAntiAliasing);
         this.activeInstrs.splice(activeInstrIndex, 1);
     }
 
