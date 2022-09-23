@@ -1,3 +1,4 @@
+<!DOCTYPE html>
 <html>
 
 <head>
@@ -692,6 +693,7 @@
                     pureTuningRootNote = parseInt(changed.split('-')[1]);
                 }
             });
+            registerCheckbox("#soundgoodizer", true, c => { enableSoundgoodizer = c; });
         };
 
         /** @param {string} name */

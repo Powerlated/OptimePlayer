@@ -49,10 +49,10 @@ function loadSdatsFromRom(data) {
 }
 
 async function renderVideoSeq(sdat, id, outFile) {
-    const OVERSAMPLE = 4;
     const SAMPLE_RATE = 32768;
 
-    let bridge = new ControllerBridge(SAMPLE_RATE * OVERSAMPLE, sdat, id);
+    let blipBuf = new BlipBuf(16, true, 16, 1);
+    let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
     let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 3);
 
     console.log("Rendering SSEQ Id:" + id);
@@ -88,6 +88,8 @@ async function renderVideoSeq(sdat, id, outFile) {
         .output(outFile + "temp.mp4")
         .on('start', (cmdline) => console.log(cmdline))
         .run();
+
+    let clipping = 0;
 
     // keep it under 480 seconds
     while (playing && sample < SAMPLE_RATE * 480) {
@@ -138,15 +140,17 @@ async function renderVideoSeq(sdat, id, outFile) {
         if (frameTimer >= 1 / FPS) {
             frameTimer -= 1 / FPS;
 
-            drawFsVis(ctx, frameTimer * 1000, fadeoutVolMul);
-            let imageData = ctx.getImageData(0, 0, WIDTH, HEIGHT);
+            if (false) {
+                drawFsVis(ctx, frameTimer * 1000, fadeoutVolMul);
+                let imageData = ctx.getImageData(0, 0, WIDTH, HEIGHT);
 
-            if (!videoStream.write(new Uint8Array(imageData.data.buffer))) {
-                await /** @type {Promise<void>} */(new Promise((resolve, reject) => {
-                    videoStream.once("drain", () => {
-                        resolve();
-                    });
-                }));
+                if (!videoStream.write(new Uint8Array(imageData.data.buffer))) {
+                    await /** @type {Promise<void>} */(new Promise((resolve, reject) => {
+                        videoStream.once("drain", () => {
+                            resolve();
+                        });
+                    }));
+                }
             }
 
             if (++frames % FPS == 0) {
@@ -155,28 +159,27 @@ async function renderVideoSeq(sdat, id, outFile) {
 
         }
 
-        let valL = 0;
-        let valR = 0;
         for (let i = 0; i < 16; i++) {
             if (trackEnables[i]) {
-                for (let j = 0; j < OVERSAMPLE; j++) {
-                    bridge.synthesizers[i].nextSample();
-                    valL += bridge.synthesizers[i].valL;
-                    valR += bridge.synthesizers[i].valR;
-                }
+                bridge.synthesizers[i].nextSample();
             }
         }
-        valL /= OVERSAMPLE;
-        valR /= OVERSAMPLE;
+        blipBuf.readOutSample();
+        let valL = blipBuf.currentValL;
+        let valR = blipBuf.currentValR;
 
         valL *= 0.4 * fadeoutVolMul;
         valR *= 0.4 * fadeoutVolMul;
         if (Math.abs(valL) > 1.0 || Math.abs(valR) > 1.0) {
-            console.error("CLIPPING!");
+            clipping++;
         }
         encoder.addSample(valL, valR);
 
         sample++;
+    }
+
+    if (clipping > 0) {
+        console.log(clipping + " samples hard clipped");
     }
 
     fs.writeFileSync(outFile + ".wav", encoder.encode());
@@ -203,6 +206,9 @@ if (process.argv.length < 4) {
 const dsRomPath = process.argv[2];
 const sseqName = process.argv[3];
 let outFile = process.argv[4];
+if (outFile == undefined) {
+    outFile = sseqName;
+};
 let sdats = loadSdatsFromRom(fs.readFileSync(dsRomPath));
 // console.log(sdats)
 let sseqId = null;
