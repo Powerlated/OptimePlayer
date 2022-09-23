@@ -682,8 +682,8 @@
                 renderAndDownloadSeq(currentlyPlayingSdat, currentlyPlayingName);
             };
 
-            registerCheckbox("#stereo-separation", false, checked => { enableStereoSeparation = checked; });
-            registerCheckbox("#force-stereo-separation", false, checked => { enableForceStereoSeparation = checked; });
+            registerCheckbox("#stereo-separation", true, checked => { enableStereoSeparation = checked; });
+            registerCheckbox("#force-stereo-separation", true, checked => { enableForceStereoSeparation = checked; });
             registerCheckbox("#antialiasing", true, checked => { enableAntiAliasing = checked; });
             registerDropdown("#tuning-system", changed => {
                 if (changed == "equal") {
