@@ -590,15 +590,16 @@
                             if (note < 0) note = 0;
                             if (note > 127) note = 127;
 
+                            console.log(note)
                             if (down) {
                                 currentBridge.controller.sendMessage(new Message(true, currentBridge.activeKeyboardTrackNum, MessageType.PlayNote, note, 127, 2000));
                             } else {
+                                currentBridge.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
                                 for (let i = 0; i < currentBridge.activeNoteData.heapEntries; i++) {
                                     let entry = currentBridge.activeNoteData.heap[i];
 
                                     if (entry.data.trackNum == currentBridge.activeKeyboardTrackNum && entry.data.midiNote == note) {
-                                        currentBridge.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
-                                        entry.data.adsrState = AdsrState.Release;
+                                        currentBridge.activeNoteData.deleteEvent(entry);
                                     }
                                 }
                             }
@@ -680,9 +681,17 @@
                 renderAndDownloadSeq(currentlyPlayingSdat, currentlyPlayingName);
             };
 
-            registerCheckbox("#stereo-separation", true, checked => { enableStereoSeparation = checked; });
-            registerCheckbox("#force-stereo-separation", true, checked => { enableForceStereoSeparation = checked; });
+            registerCheckbox("#stereo-separation", false, checked => { enableStereoSeparation = checked; });
+            registerCheckbox("#force-stereo-separation", false, checked => { enableForceStereoSeparation = checked; });
             registerCheckbox("#antialiasing", true, checked => { enableAntiAliasing = checked; });
+            registerDropdown("#tuning-system", changed => {
+                if (changed == "equal") {
+                    pureTuning = false;
+                } else {
+                    pureTuning = true;
+                    pureTuningRootNote = parseInt(changed.split('-')[1]);
+                }
+            });
         };
 
         /** @param {string} name */
@@ -697,6 +706,11 @@
             element.checked = checked;
             callback(checked);
             element.onchange = () => callback(element.checked);
+        }
+
+        function registerDropdown(selector, callback) {
+            let element = document.querySelector(selector);
+            element.onchange = () => callback(element.value);
         }
 
     </script>
@@ -738,6 +752,22 @@
                 <label for="force-stereo-separation">"Force" Stereo Separation (restart song to apply)</label><br>
                 <input type="checkbox" id="antialiasing">
                 <label for="antialiasing">Audio Anti-Aliasing</label><br>
+                <label for="tuning-system">Tuning System</label>
+                <select name="tuning-systems" id="tuning-system">
+                    <option value="equal">Equal Temperament</option>
+                    <option value="pure-0">Pure A</option>
+                    <option value="pure-1">Pure A#</option>
+                    <option value="pure-2">Pure B</option>
+                    <option value="pure-3">Pure C</option>
+                    <option value="pure-4">Pure C#</option>
+                    <option value="pure-5">Pure D</option>
+                    <option value="pure-6">Pure D#</option>
+                    <option value="pure-7">Pure E</option>
+                    <option value="pure-8">Pure F</option>
+                    <option value="pure-9">Pure F#</option>
+                    <option value="pure-10">Pure G</option>
+                    <option value="pure-11">Pure G#</option>
+                </select>
             </div>
         </div>
 
