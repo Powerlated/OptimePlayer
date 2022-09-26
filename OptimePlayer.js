@@ -1278,7 +1278,9 @@ class SampleInstrument {
 
         this.midiNote = 0;
 
+        this.t = 0;
         this.sampleT = 0;
+        this.resampleT = 0;
 
         this.finetune = 0;
         this.finetuneLfo = 0;
@@ -1288,7 +1290,6 @@ class SampleInstrument {
         // We use a sloping filter rather than a brick wall to allow some of the image harmonics through
         this.filter = new LowPass96DbPerOct(this.sampleRate, 16384);
 
-        this.resampleT = 0;
 
         Object.seal(this);
     }
@@ -1303,8 +1304,8 @@ class SampleInstrument {
 
         while (this.resampleT < this.sampleT) {
             let val = this.getSampleDataAt(this.resampleT) * this.volume;
-            let subT = (((this.resampleT / convertedSampleRate) * this.sampleRate)) % 1;
-            this.synth.blipBuf.setValue(this.instrNum, this.synth.t + subT, val, 0, enableAntiAliasing);
+            this.synth.blipBuf.setValue(this.instrNum, this.synth.t + (this.t % 1), val, 0, enableAntiAliasing);
+            this.t += this.sampleRate / convertedSampleRate;
             this.resampleT++;
         }
 
@@ -1817,6 +1818,7 @@ class SampleSynthesizer {
         instr.setFinetune(this.finetune);
         instr.volume = volume;
         instr.startTime = meta;
+        instr.t = 0;
         instr.sampleT = 0;
         instr.resampleT = 0;
         instr.playing = true;
