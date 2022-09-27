@@ -476,7 +476,9 @@ class BlipBuf {
                 // Add our bandlimited impulse to the difference buffer
                 let bufPos = this.bufPos + (t | 0) - this.currentSampleOutPos;
                 if (bufPos > this.bufSize) {
-                    throw `Overflowed buffer (${bufPos} > ${this.bufSize}) `;
+                    bufPos -= this.bufSize;
+                    if (bufPos > this.bufSize)
+                        throw `Overflowed buffer (${bufPos} > ${this.bufSize}) `;
                 }
                 for (let i = 0; i < this.kernelSize; i++) {
                     let kVal = this.kernel[this.kernelSize * subsamplePos + i];
