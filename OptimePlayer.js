@@ -7,7 +7,12 @@ let enableStereoSeparation = false;
 let enableForceStereoSeparation = false;
 let enableAntiAliasing = true;
 let enableSoundgoodizer = true;
-let filterSamples = false;
+let enableFilter = true;
+let useCubicResampler = false;
+
+// Global metrics
+let instrumentsAdvanced = 0;
+let instrumentsAdvancedZeroVolume = 0;
 
 /** @type {ControllerBridge | null} */
 let currentBridge = null;
@@ -66,9 +71,9 @@ function polyBlepTest(t, dt) {
 
 class SoundgoodizerFilterChannel {
             // Each biquad filter has a slope of 12db/oct so 2 biquads chained gets us 24db/oct
-            /** @type {BiQuadFilter[]} */ lowFilters = new Array(2);
-            /** @type {BiQuadFilter[]} */ midFilters = new Array(4);
-            /** @type {BiQuadFilter[]} */ highFilters = new Array(2);
+            /** @type {BiquadFilter[]} */ lowFilters = new Array(2);
+            /** @type {BiquadFilter[]} */ midFilters = new Array(4);
+            /** @type {BiquadFilter[]} */ highFilters = new Array(2);
 
     outLow = 0;
     outMid = 0;
@@ -87,16 +92,16 @@ class SoundgoodizerFilterChannel {
 
         // q = 1/sqrt(2) maximally flat "butterworth" filter
         let q = 1 / Math.SQRT2;
-        this.lowFilters[0] = BiQuadFilter.lowPassFilter(sampleRate, lowHz, q);
-        this.lowFilters[1] = BiQuadFilter.lowPassFilter(sampleRate, lowHz, q);
+        this.lowFilters[0] = BiquadFilter.lowPassFilter(1, sampleRate, lowHz, q);
+        this.lowFilters[1] = BiquadFilter.lowPassFilter(1, sampleRate, lowHz, q);
 
-        this.midFilters[0] = BiQuadFilter.highPassFilter(sampleRate, lowHz, q);
-        this.midFilters[1] = BiQuadFilter.lowPassFilter(sampleRate, highHz, q);
-        this.midFilters[2] = BiQuadFilter.highPassFilter(sampleRate, lowHz, q);
-        this.midFilters[3] = BiQuadFilter.lowPassFilter(sampleRate, highHz, q);
+        this.midFilters[0] = BiquadFilter.highPassFilter(1, sampleRate, lowHz, q);
+        this.midFilters[1] = BiquadFilter.lowPassFilter(1, sampleRate, highHz, q);
+        this.midFilters[2] = BiquadFilter.highPassFilter(1, sampleRate, lowHz, q);
+        this.midFilters[3] = BiquadFilter.lowPassFilter(1, sampleRate, highHz, q);
 
-        this.highFilters[0] = BiQuadFilter.highPassFilter(sampleRate, highHz, q);
-        this.highFilters[1] = BiQuadFilter.highPassFilter(sampleRate, highHz, q);
+        this.highFilters[0] = BiquadFilter.highPassFilter(1, sampleRate, highHz, q);
+        this.highFilters[1] = BiquadFilter.highPassFilter(1, sampleRate, highHz, q);
     }
 
     /**
@@ -149,33 +154,40 @@ class BlipBuf {
     static MAX_KERNEL_SIZE = 256;
     /** @type {Object.<object, Float64Array>} */
     static kernels = {};
-    constructor(kernelSize, normalize, channels, filterRatio, minimumPhase) {
+    /**
+     * @param {number} kernelSize
+     * @param {number} bufSize
+     * @param {boolean} normalize
+     * @param {number} channels
+     * @param {number} filterRatio
+     * @param {boolean} minimumPhase
+     */
+    constructor(kernelSize, bufSize, normalize, channels, filterRatio, minimumPhase) {
         if (kernelSize > BlipBuf.MAX_KERNEL_SIZE) {
             throw 'kernelSize > BlipBuf.MAX_KERNEL_SIZE';
         }
         // Lanzcos kernel
-        let key = kernelSize + normalize + filterRatio + minimumPhase;
+        let key = kernelSize.toString() + normalize + filterRatio + minimumPhase;
         this.kernel = BlipBuf.kernels[key];
         if (this.kernel == undefined) {
             this.kernel = BlipBuf.genKernel(kernelSize, normalize, filterRatio, minimumPhase);
-            console.log(this.kernel)
+            console.log(this.kernel);
             BlipBuf.kernels[key] = this.kernel;
         }
         this.kernelSize = kernelSize;
-        // This is a buffer of differences we are going to write bandlimited impulses to
-        this.bufL = null;
-        this.bufR = null;
+        this.channels = channels;
+        this.bufSize = bufSize;
+
         this.bufPos = 0;
-        this.bufSize = 0;
-        this.currentValL = 0;
-        this.currentValR = 0;
+        this.outputL = 0;
+        this.outputR = 0;
         this.currentSampleInPos = 0;
         this.currentSampleOutPos = 0;
         this.channelValsL = new Float64Array(channels);
         this.channelValsR = new Float64Array(channels);
-        this.channelSample = new Float64Array(channels);
+        this.channelT = new Float64Array(channels);
         this.channelRealSample = new Float64Array(channels);
-        this.bufSize = 32768;
+        // This is a buffer of differences we are going to write bandlimited impulses to
         this.bufL = new Float64Array(this.bufSize);
         this.bufR = new Float64Array(this.bufSize);
     }
@@ -213,7 +225,6 @@ class BlipBuf {
      * @param {Float64Array} imagFreq
      */
     static inverseDft(n, realTime, imagTime, realFreq, imagFreq) {
-
         for (let k = 0; k < n; k++) {
             realTime[k] = 0;
             imagTime[k] = 0;
@@ -243,7 +254,6 @@ class BlipBuf {
         return [expx * Math.cos(y), expx * Math.sin(y)];
     }
 
-
     // Compute Real Cepstrum Of Signal
     /**
      * @param {number} n
@@ -252,7 +262,6 @@ class BlipBuf {
      */
     static realCepstrum(n, signal, realCepstrum) {
         // Compose Complex FFT Input
-
         let realTime = new Float64Array(n);
         let imagTime = new Float64Array(n);
         let realFreq = new Float64Array(n);
@@ -264,18 +273,15 @@ class BlipBuf {
         }
 
         // Perform DFT
-
         BlipBuf.dft(n, realTime, imagTime, realFreq, imagFreq);
 
         // Calculate Log Of Absolute Value
-
         for (let i = 0; i < n; i++) {
             realFreq[i] = Math.log(BlipBuf.cabs(realFreq[i], imagFreq[i]));
             imagFreq[i] = 0.0;
         }
 
         // Perform Inverse FFT
-
         BlipBuf.inverseDft(n, realTime, imagTime, realFreq, imagFreq);
 
         // Output Real Part Of FFT
@@ -332,7 +338,7 @@ class BlipBuf {
 
     /**
     * @param {number} kernelSize
-    * @param {number} normalize
+    * @param {boolean} normalize
     * @param {number} filterRatio
     * @param {boolean} minimumPhase
     * @returns {Float64Array}
@@ -399,23 +405,9 @@ class BlipBuf {
                 }
             }
 
-            // let csv = "";
-            // for (let j = 0; j < fullSize; j++) {
-            //     csv += `${kMinPhase[j]},`;
-            // }
-            // csv += `0`;
-            // console.log(csv);
-
             let tmp = new Float64Array(fullSize);
             BlipBuf.realCepstrum(fullSize, kMinPhase, tmp);
             BlipBuf.minimumPhase(fullSize, tmp, kMinPhase);
-
-            // let csv2 = "";
-            // for (let j = 0; j < fullSize; j++) {
-            //     csv2 += `${kMinPhase[j]},`;
-            // }
-            // csv2 += `0`;
-            // console.log(csv2);
 
             index = 0;
             for (let u = 0; u < kernelSize; u++) {
@@ -442,39 +434,56 @@ class BlipBuf {
     reset() {
         // Flush out the difference buffer
         this.bufPos = 0;
-        this.currentValL = 0;
-        this.currentValR = 0;
+        this.outputL = 0;
+        this.outputR = 0;
+        this.currentSampleInPos = 0;
+        this.currentSampleOutPos = 0;
         for (let i = 0; i < this.bufSize; i++) {
             this.bufL[i] = 0;
             this.bufR[i] = 0;
         }
+        for (let i = 0; i < this.channels; i++) {
+            this.channelValsL[i] = 0;
+            this.channelValsR[i] = 0;
+            this.channelT[i] = 0;
+            this.channelRealSample[i] = 0;
+        }
     }
     // Sample is in terms of out samples
-    setValue(channel, sample, valL, valR, useSinc) {
-        if (sample > this.channelSample[channel]) {
-            this.channelSample[channel] = sample;
+    /**
+     * @param {number} channel
+     * @param {number} t
+     * @param {number} valL
+     * @param {number} valR
+     * @param {boolean} useSinc
+     */
+    setValue(channel, t, valL, valR, useSinc) {
+        if (t >= this.channelT[channel]) {
+            this.channelT[channel] = t;
         }
         else {
-            // TODO: too lazy to fix anything regarding this so I'll just sweep it under the rug for now
-            // console.warn(`Channel ${channel}: Tried to set amplitude backward in time from ${this.channelSample[channel]} to ${sample}`);
+            console.warn(`Channel ${channel}: Tried to set amplitude backward in time from ${this.channelT[channel]} to ${t}`);
         }
         if (valL != this.channelValsL[channel] || valR != this.channelValsR[channel]) {
             let diffL = valL - this.channelValsL[channel];
             let diffR = valR - this.channelValsR[channel];
             if (useSinc) {
-                let subsamplePos = Math.floor((1 - (sample % 1)) * (BlipBuf.KERNEL_RESOLUTION - 1));
+                let subsamplePos = (1 - (t % 1)) * (BlipBuf.KERNEL_RESOLUTION - 1) | 0;
                 // Add our bandlimited impulse to the difference buffer
-                let kBufPos = (this.bufPos + Math.floor(sample) - this.currentSampleOutPos) % this.bufSize;
+                let bufPos = this.bufPos + (t | 0) - this.currentSampleOutPos;
+                if (bufPos > this.bufSize) {
+                    throw `Overflowed buffer (${bufPos} > ${this.bufSize}) `;
+                }
                 for (let i = 0; i < this.kernelSize; i++) {
                     let kVal = this.kernel[this.kernelSize * subsamplePos + i];
-                    this.bufL[kBufPos] += kVal * diffL;
-                    this.bufR[kBufPos] += kVal * diffR;
-                    if (++kBufPos >= this.bufSize)
-                        kBufPos = 0;
+                    this.bufL[bufPos] += kVal * diffL;
+                    this.bufR[bufPos] += kVal * diffR;
+                    if (++bufPos >= this.bufSize)
+                        bufPos = 0;
                 }
             }
             else {
-                let kBufPos = (this.bufPos + Math.floor(sample + this.kernelSize) - this.currentSampleOutPos) % this.bufSize;
+                let kBufPos = (this.bufPos + (0 | (t + this.kernelSize)) - this.currentSampleOutPos) % this.bufSize;
                 this.bufL[kBufPos] += diffL;
                 this.bufR[kBufPos] += diffR;
             }
@@ -484,8 +493,8 @@ class BlipBuf {
     }
     readOutSample() {
         // Integrate the difference buffer
-        this.currentValL += this.bufL[this.bufPos];
-        this.currentValR += this.bufR[this.bufPos];
+        this.outputL += this.bufL[this.bufPos];
+        this.outputR += this.bufR[this.bufPos];
         this.bufL[this.bufPos] = 0;
         this.bufR[this.bufPos] = 0;
         if (++this.bufPos >= this.bufSize)
@@ -494,38 +503,8 @@ class BlipBuf {
     }
 }
 
-class LowPass96DbPerOct {
-    constructor(sampleRate, cutoffFrequency) {
-        this.f0 = BiQuadFilter.lowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
-        this.f1 = BiQuadFilter.lowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
-        this.f2 = BiQuadFilter.lowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
-        this.f3 = BiQuadFilter.lowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
-    }
-
-    transform(inSample) {
-        inSample = this.f0.transform(inSample);
-        inSample = this.f1.transform(inSample);
-        inSample = this.f2.transform(inSample);
-        return this.f3.transform(inSample);
-    }
-
-    resetState() {
-        this.f0.resetState();
-        this.f1.resetState();
-        this.f2.resetState();
-        this.f3.resetState();
-    }
-
-    set(sampleRate, cutoffFrequency) {
-        this.f0.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
-        this.f1.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
-        this.f2.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
-        this.f3.setLowPassFilter(sampleRate, cutoffFrequency, Math.SQRT1_2);
-    }
-}
-
 // Based off NAudio's BiQuadFilter, look there for comments
-class BiQuadFilter {
+class BiquadFilter {
     // coefficients
     a0 = 0;
     a1 = 0;
@@ -534,35 +513,68 @@ class BiQuadFilter {
     a4 = 0;
 
     // state
-    x1 = 0;
-    x2 = 0;
-    y1 = 0;
-    y2 = 0;
+    x1; /** @type {Float64Array} */
+    x2; /** @type {Float64Array} */
+    y1; /** @type {Float64Array} */
+    y2; /** @type {Float64Array} */
+
+    numCascade;
+
+    /**
+     * @param {number} order
+     */
+    constructor(order, aa0 = 0, aa1 = 0, aa2 = 0, b0 = 0, b1 = 0, b2 = 0) {
+        this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
+
+        if ((order % 2) != 0) {
+            throw 'Order not divisible by 2';
+        }
+
+        this.numCascade = order / 2;
+
+        this.x1 = new Float64Array(this.numCascade);
+        this.x2 = new Float64Array(this.numCascade);
+        this.y1 = new Float64Array(this.numCascade);
+        this.y2 = new Float64Array(this.numCascade);
+    }
 
     resetState() {
-        this.x1 = 0;
-        this.x2 = 0;
-        this.y1 = 0;
-        this.y2 = 0;
+        for (let i = 0; i < this.numCascade; i++) {
+            this.x1[i] = 0;
+            this.x2[i] = 0;
+            this.y1[i] = 0;
+            this.y2[i] = 0;
+        }
     }
 
     transform(inSample) {
-        // compute result
-        let result = this.a0 * inSample + this.a1 * this.x1 + this.a2 * this.x2 - this.a3 * this.y1 - this.a4 * this.y2;
-        if (isNaN(result)) throw "sdf ";
-        if (result == Infinity) throw "infinity??";
+        for (let i = 0; i < this.numCascade; i++) {
+            // compute result
+            let result = this.a0 * inSample + this.a1 * this.x1[i] + this.a2 * this.x2[i] - this.a3 * this.y1[i] - this.a4 * this.y2[i];
+            if (isNaN(result)) throw "NaN in filter";
+            if (result == Infinity) throw "Infinity in filter";
 
-        // shift x1 to x2, sample to x1 
-        this.x2 = this.x1;
-        this.x1 = inSample;
+            // shift x1 to x2, sample to x1 
+            this.x2[i] = this.x1[i];
+            this.x1[i] = inSample;
 
-        // shift y1 to y2, result to y1 
-        this.y2 = this.y1;
-        this.y1 = result;
+            // shift y1 to y2, result to y1 
+            this.y2[i] = this.y1[i];
+            this.y1[i] = result;
 
-        return result;
+            inSample = result;
+        }
+        return inSample;
     }
+
     setCoefficients(aa0, aa1, aa2, b0, b1, b2) {
+        if (isNaN(aa0)) throw "aa0 is NaN";
+        if (isNaN(aa1)) throw "aa1 is NaN";
+        if (isNaN(aa2)) throw "aa2 is NaN";
+        if (isNaN(b0)) throw "b0 is NaN";
+        if (isNaN(b1)) throw "b1 is NaN";
+        if (isNaN(b2)) throw "b2 is NaN";
+
         this.a0 = b0 / aa0;
         this.a1 = b1 / aa0;
         this.a2 = b2 / aa0;
@@ -570,6 +582,11 @@ class BiQuadFilter {
         this.a4 = aa2 / aa0;
     }
 
+    /**
+     * @param {number} sampleRate
+     * @param {number} cutoffFrequency
+     * @param {number} q
+     */
     setLowPassFilter(sampleRate, cutoffFrequency, q) {
         let w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
@@ -614,19 +631,31 @@ class BiQuadFilter {
         this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
     }
 
-    static lowPassFilter(sampleRate, cutoffFrequency, q) {
-        let filter = new BiQuadFilter();
+    /**
+     * @param {number} order
+     * @param {number} sampleRate
+     * @param {number} cutoffFrequency
+     * @param {number} q
+     */
+    static lowPassFilter(order, sampleRate, cutoffFrequency, q) {
+        let filter = new BiquadFilter(order);
         filter.setLowPassFilter(sampleRate, cutoffFrequency, q);
         return filter;
     }
 
-    static highPassFilter(sampleRate, cutoffFrequency, q) {
-        let filter = new BiQuadFilter();
+    /**
+     * @param {number} order
+     * @param {number} sampleRate
+     * @param {number} cutoffFrequency
+     * @param {number} q
+     */
+    static highPassFilter(order, sampleRate, cutoffFrequency, q) {
+        let filter = new BiquadFilter(order);
         filter.setHighPassFilter(sampleRate, cutoffFrequency, q);
         return filter;
     }
 
-    static bandPassFilterConstantSkirtGain(sampleRate, centreFrequency, q) {
+    static bandPassFilterConstantSkirtGain(order, sampleRate, centreFrequency, q) {
         let w0 = 2 * Math.PI * centreFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
         let sinw0 = Math.sin(w0);
@@ -638,10 +667,10 @@ class BiQuadFilter {
         let a0 = 1 + alpha;
         let a1 = -2 * cosw0;
         let a2 = 1 - alpha;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+        return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 
-    static bandPassFilterConstantPeakGain(sampleRate, centreFrequency, q) {
+    static bandPassFilterConstantPeakGain(order, sampleRate, centreFrequency, q) {
         let w0 = 2 * Math.PI * centreFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
         let sinw0 = Math.sin(w0);
@@ -653,10 +682,10 @@ class BiQuadFilter {
         let a0 = 1 + alpha;
         let a1 = -2 * cosw0;
         let a2 = 1 - alpha;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+        return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 
-    static notchFilter(sampleRate, centreFrequency, q) {
+    static notchFilter(order, sampleRate, centreFrequency, q) {
         let w0 = 2 * Math.PI * centreFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
         let sinw0 = Math.sin(w0);
@@ -668,10 +697,10 @@ class BiQuadFilter {
         let a0 = 1 + alpha;
         let a1 = -2 * cosw0;
         let a2 = 1 - alpha;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+        return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 
-    static allPassFilter(sampleRate, centreFrequency, q) {
+    static allPassFilter(order, sampleRate, centreFrequency, q) {
         let w0 = 2 * Math.PI * centreFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
         let sinw0 = Math.sin(w0);
@@ -683,16 +712,16 @@ class BiQuadFilter {
         let a0 = 1 + alpha;
         let a1 = -2 * cosw0;
         let a2 = 1 - alpha;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+        return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 
-    static peakingEQ(sampleRate, centreFrequency, q, dbGain) {
-        let filter = new BiQuadFilter();
+    static peakingEQ(order, sampleRate, centreFrequency, q, dbGain) {
+        let filter = new BiquadFilter(order,);
         filter.setPeakingEq(sampleRate, centreFrequency, q, dbGain);
         return filter;
     }
 
-    static lowShelf(sampleRate, cutoffFrequency, shelfSlope, dbGain) {
+    static lowShelf(order, sampleRate, cutoffFrequency, shelfSlope, dbGain) {
         let w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
         let sinw0 = Math.sin(w0);
@@ -706,10 +735,10 @@ class BiQuadFilter {
         let a0 = (a + 1) + (a - 1) * cosw0 + temp;
         let a1 = -2 * ((a - 1) + (a + 1) * cosw0);
         let a2 = (a + 1) + (a - 1) * cosw0 - temp;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
+        return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 
-    static highShelf(sampleRate, cutoffFrequency, shelfSlope, dbGain) {
+    static highShelf(order, sampleRate, cutoffFrequency, shelfSlope, dbGain) {
         let w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
         let sinw0 = Math.sin(w0);
@@ -723,11 +752,7 @@ class BiQuadFilter {
         let a0 = (a + 1) - (a - 1) * cosw0 + temp;
         let a1 = 2 * ((a - 1) - (a + 1) * cosw0);
         let a2 = (a + 1) - (a - 1) * cosw0 - temp;
-        return new BiQuadFilter(a0, a1, a2, b0, b1, b2);
-    }
-
-    constructor(a0 = 0, a1 = 0, a2 = 0, b0 = 0, b1 = 0, b2 = 0) {
-        this.setCoefficients(a0, a1, a2, b0, b1, b2);
+        return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 }
 
@@ -948,10 +973,10 @@ class AudioPlayer {
 
         bufferSource.onended = () => {
             this.sourcesPlaying--;
-            if (this.sourcesPlaying < 3) {
+            if (this.sourcesPlaying < 6) {
                 this.needMoreSamples();
             }
-            if (this.sourcesPlaying < 2) {
+            if (this.sourcesPlaying < 4) {
                 this.needMoreSamples();
             }
         };
@@ -1266,7 +1291,6 @@ class SampleInstrument {
         this.sample = sample;
 
         // sampleFrequency is the sample's tone frequency when played at sampleSampleRate
-        this.val = 0;
         this.frequency = 440;
         this.volume = 1;
 
@@ -1287,9 +1311,13 @@ class SampleInstrument {
 
         this.freqRatio = 0;
 
-        // We use a sloping filter rather than a brick wall to allow some of the image harmonics through
-        this.filter = new LowPass96DbPerOct(this.sampleRate, 16384);
+        this.output = 0;
 
+        // We use a sloping filter rather than a brick wall to allow some of the image harmonics through
+        // SQRT1_2 = 1/SQRT(2) maximally flat (Butterworth) filter
+        this.filter = BiquadFilter.lowPassFilter(8, this.sampleRate, 16384, Math.SQRT1_2);
+
+        this.blipBuf = new BlipBuf(16, 16, true, 1, 1, true);
 
         Object.seal(this);
     }
@@ -1299,34 +1327,66 @@ class SampleInstrument {
     }
 
     advance() {
+        instrumentsAdvanced++;
+
+        if (this.volume == 0.01) {
+            instrumentsAdvancedZeroVolume++;
+        }
+
         let convertedSampleRate = this.freqRatio * this.sample.sampleRate;
         this.sampleT += this.invSampleRate * convertedSampleRate;
 
-        while (this.resampleT < this.sampleT) {
-            let val = this.getSampleDataAt(this.resampleT) * this.volume;
-            this.synth.blipBuf.setValue(this.instrNum, this.synth.t + (this.t % 1), val, 0, enableAntiAliasing);
-            this.t += this.sampleRate / convertedSampleRate;
-            this.resampleT++;
-        }
+        if (useCubicResampler && this.sample.enableFilter) {
+            let subT = this.sampleT % 1;
 
-        // TODO: reconstruction filter
-        // if (this.sample.enableFilter && filterSamples) {
-        // this.val = this.filter.transform(finalVal * this.volume);
-        // } else {
-        // this.val = finalVal * this.volume;
-        // }
+            /*
+            // Linear interpolation
+                let val0 = this.getSampleDataAt(Math.floor(this.sampleT));
+                let val1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
+
+                let valLerp = (val0 + subT * (val1 - val0));
+                this.output = valLerp * this.volume;
+            */
+
+            let p0 = this.getSampleDataAt(Math.floor(this.sampleT));
+            let p1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
+            let p2 = this.getSampleDataAt(Math.floor(this.sampleT + 2));
+            let p3 = this.getSampleDataAt(Math.floor(this.sampleT + 3));
+
+            let valCubic = p1 + 0.5 * subT * (p2 - p0 + subT * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + subT * (3.0 * (p1 - p2) + p3 - p0)));
+
+            this.blipBuf.readOutSample();
+            this.output = valCubic * this.volume;
+        } else if (enableAntiAliasing) {
+            while (this.resampleT < this.sampleT) {
+                let val = this.getSampleDataAt(this.resampleT);
+                this.blipBuf.setValue(0, this.t, val, 0, enableAntiAliasing);
+                this.t += this.sampleRate / convertedSampleRate;
+                this.resampleT++;
+            }
+
+            this.blipBuf.readOutSample();
+            this.output = this.blipBuf.outputL * this.volume;
+
+            if (this.sample.enableFilter && enableFilter) {
+                this.output = this.filter.transform(this.output);
+            }
+        } else {
+            this.blipBuf.readOutSample();
+            this.output = this.getSampleDataAt(Math.floor(this.sampleT)) * this.volume;
+        }
     }
 
-    getSampleDataAt(sampleT) {
-        if (sampleT >= this.sample.data.length && this.sample.looping) {
-            let sampleNoIntro = sampleT - this.sample.loopPoint;
+    getSampleDataAt(t) {
+        if (t >= this.sample.data.length && this.sample.looping) {
+            let tNoIntro = t - this.sample.loopPoint;
             let loopLength = this.sample.data.length - this.sample.loopPoint;
-            sampleNoIntro %= loopLength;
-            sampleT = sampleNoIntro + this.sample.loopPoint;
+            tNoIntro %= loopLength;
+            t = tNoIntro + this.sample.loopPoint;
         }
 
-        if (sampleT < this.sample.data.length) {
-            return this.sample.data[sampleT];
+        if (t < this.sample.data.length) {
+            return this.sample.data[t];
         } else {
             return 0;
         }
@@ -1337,8 +1397,8 @@ class SampleInstrument {
         if (convertedSampleRate > this.nyquist) {
             convertedSampleRate = this.nyquist;
         }
-        // console.log("cutoff: " + convertedSampleRate);
-        this.filter.set(this.sampleRate, convertedSampleRate);
+        // console.log(`[${this.synth.id}] cutoff: ` + convertedSampleRate);
+        this.filter.setLowPassFilter(this.sampleRate, convertedSampleRate, Math.SQRT1_2);
     }
 
     /** @param {number} midiNote */
@@ -1347,6 +1407,7 @@ class SampleInstrument {
         this.frequency = midiNoteToHz(midiNote);
         this.freqRatio = this.frequency / this.sample.frequency;
         this.updateFilter();
+        this.filter.resetState();
     }
 
     /** @param {number} semitones */
@@ -1355,6 +1416,7 @@ class SampleInstrument {
         this.frequency = midiNoteToHz(this.midiNote + this.finetuneLfo + this.finetune);
         this.freqRatio = this.frequency / this.sample.frequency;
         this.updateFilter();
+        this.filter.resetState();
     }
 
     setFinetune(semitones) {
@@ -1362,6 +1424,7 @@ class SampleInstrument {
         this.frequency = midiNoteToHz(this.midiNote + this.finetuneLfo + this.finetune);
         this.freqRatio = this.frequency / this.sample.frequency;
         this.updateFilter();
+        this.filter.resetState();
     }
 }
 
@@ -1768,7 +1831,13 @@ class DelayLine {
 }
 
 class SampleSynthesizer {
-    constructor(sampleRate, instrsAvailable) {
+    /**
+     * @param {number} id
+     * @param {number} sampleRate
+     * @param {number} instrsAvailable
+     */
+    constructor(id, sampleRate, instrsAvailable) {
+        this.id = id;
         this.instrsAvailable = instrsAvailable;
 
         /** @type {SampleInstrument[]} */
@@ -1792,7 +1861,6 @@ class SampleSynthesizer {
 
         let emptySample = new Sample(new Float32Array(1), 440, sampleRate, false, 0);
 
-        this.blipBuf = new BlipBuf(16, true, this.instrsAvailable, 1, true);
         for (let i = 0; i < this.instrs.length; i++) {
             this.instrs[i] = new SampleInstrument(this, i, this.sampleRate, emptySample);
         }
@@ -1822,6 +1890,8 @@ class SampleSynthesizer {
         instr.sampleT = 0;
         instr.resampleT = 0;
         instr.playing = true;
+        instr.blipBuf.reset();
+        instr.filter.resetState();
 
         let currentIndex = this.playingIndex;
 
@@ -1839,8 +1909,8 @@ class SampleSynthesizer {
             console.warn("Tried to cut instrument that wasn't playing");
             return;
         }
-        this.activeInstrs[activeInstrIndex].playing = false;
-        this.blipBuf.setValue(this.activeInstrs[activeInstrIndex].instrNum, this.t, 0, 0, enableAntiAliasing);
+        let instr = this.activeInstrs[activeInstrIndex];
+        instr.playing = false;
         this.activeInstrs.splice(activeInstrIndex, 1);
     }
 
@@ -1849,13 +1919,10 @@ class SampleSynthesizer {
         let valR = 0;
 
         for (const instr of this.activeInstrs) {
-            instr.advance(); // instrs are responsible for submitting amplitude changes to BlipBuf
+            instr.advance();
+            valL += instr.output * (1 - this.pan);
+            valR += instr.output * this.pan;
         }
-
-        this.blipBuf.readOutSample();
-        let val = this.blipBuf.currentValL;
-        valL += val * (1 - this.pan);
-        valR += val * this.pan;
 
         if (enableStereoSeparation) {
             this.valL = this.delayLineL.process(valL) * this.volume;
@@ -2335,24 +2402,26 @@ class ControllerBridge {
 
         /** @type {Uint8Array[]} */
         this.notesOn = [];
+        this.notesOnKeyboard = [];
         for (let i = 0; i < 16; i++) {
             this.notesOn[i] = new Uint8Array(128);
+            this.notesOnKeyboard[i] = new Uint8Array(128);
         }
 
         /** @type {SampleSynthesizer[]} */
         this.synthesizers = new Array(16);
         for (let i = 0; i < 16; i++) {
-            this.synthesizers[i] = new SampleSynthesizer(sampleRate, 16);
+            this.synthesizers[i] = new SampleSynthesizer(i, sampleRate, 16);
         }
-        this.destroyed = false;
 
+        this.destroyed = false;
         this.jumps = 0;
         this.fadingStart = false;
 
         this.loop = 0;
 
         // /** @type {MinHeap<}
-        this.activeNoteData = new MinHeap(1024);
+        this.activeNoteData = [];
 
         this.bpmTimer = 0;
 
@@ -2360,33 +2429,34 @@ class ControllerBridge {
     }
 
     tick() {
-        for (let i = 0; i < this.activeNoteData.entries; i++) {
-            let entry = this.activeNoteData.heap[i];
-            let data = entry.data;
-            /** @type {InstrumentRecord} */
-            let instrument = data.instrument;
+        let indexToDelete = -1;
 
-            let instr = this.synthesizers[entry.data.trackNum].instrs[entry.data.synthInstrIndex];
+        for (let index in this.activeNoteData) {
+            let entry = this.activeNoteData[index];
+            /** @type {InstrumentRecord} */
+            let instrument = entry.instrument;
+
+            let instr = this.synthesizers[entry.trackNum].instrs[entry.synthInstrIndex];
             // sometimes a SampleInstrument will be reused before the note it is playing is over due to Synthesizer polyphony limits
             // check here to make sure the note entry stored in the heap is referring to the same note it originally did 
-            if (instr.startTime == entry.data.startTime && instr.playing) {
-                if (this.controller.ticksElapsed >= entry.priority && !entry.data.fromKeyboard) {
-                    if (data.adsrState != AdsrState.Release) {
+            if (instr.startTime == entry.startTime && instr.playing) {
+                if (this.controller.ticksElapsed >= entry.endTime && !entry.fromKeyboard) {
+                    if (entry.adsrState != AdsrState.Release) {
                         // console.log("to release: " + instrument.release[data.instrumentEntryIndex]);
-                        this.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
-                        data.adsrState = AdsrState.Release;
+                        this.notesOn[entry.trackNum][entry.midiNote] = 0;
+                        entry.adsrState = AdsrState.Release;
                     }
                 }
 
                 // LFO code based off pret/pokediamond
-                let track = this.controller.tracks[data.trackNum];
+                let track = this.controller.tracks[entry.trackNum];
                 let lfoValue;
                 if (track.lfoDepth == 0) {
                     lfoValue = BigInt(0);
-                } else if (data.lfoDelayCounter < track.lfoDelay) {
+                } else if (entry.lfoDelayCounter < track.lfoDelay) {
                     lfoValue = BigInt(0);
                 } else {
-                    lfoValue = BigInt(SND_SinIdx(data.lfoCounter >>> 8) * track.lfoDepth * track.lfoRange);
+                    lfoValue = BigInt(SND_SinIdx(entry.lfoCounter >>> 8) * track.lfoDepth * track.lfoRange);
                 }
 
                 if (lfoValue != 0n) {
@@ -2404,18 +2474,18 @@ class ControllerBridge {
                     lfoValue >>= 14n;
                 }
 
-                if (data.delayCounter < track.lfoDelay) {
-                    data.delayCounter++;
+                if (entry.delayCounter < track.lfoDelay) {
+                    entry.delayCounter++;
                 } else {
-                    let tmp = data.lfoCounter;
+                    let tmp = entry.lfoCounter;
                     tmp += track.lfoSpeed << 6;
                     tmp >>>= 8;
                     while (tmp >= 0x80) {
                         tmp -= 0x80;
                     }
-                    data.lfoCounter += track.lfoSpeed << 6;
-                    data.lfoCounter &= 0xFF;
-                    data.lfoCounter |= tmp << 8;
+                    entry.lfoCounter += track.lfoSpeed << 6;
+                    entry.lfoCounter &= 0xFF;
+                    entry.lfoCounter |= tmp << 8;
 
                     if (lfoValue != 0n) {
                         switch (track.lfoType) {
@@ -2429,57 +2499,55 @@ class ControllerBridge {
                     }
                 }
 
-                // all thanks to ipatix at pret/pokediamond
-                switch (data.adsrState) {
+                // all thanks to @ipatix at pret/pokediamond
+                switch (entry.adsrState) {
                     case AdsrState.Attack:
-                        data.adsrTimer = -((-instrument.attackCoefficient[data.instrumentEntryIndex] * data.adsrTimer) >> 8);
+                        entry.adsrTimer = -((-instrument.attackCoefficient[entry.instrumentEntryIndex] * entry.adsrTimer) >> 8);
                         // console.log(data.adsrTimer);
-                        instr.volume = calcChannelVolume(data.velocity, data.adsrTimer);
+                        instr.volume = calcChannelVolume(entry.velocity, entry.adsrTimer);
                         // one instrument hits full volume, start decay
-                        if (data.adsrTimer == 0) {
+                        if (entry.adsrTimer == 0) {
                             // console.log("to decay: " + instrument.decay[data.instrumentEntryIndex])
-                            data.adsrState = AdsrState.Decay;
+                            entry.adsrState = AdsrState.Decay;
                         }
                         break;
                     case AdsrState.Decay:
-                        data.adsrTimer -= instrument.decayCoefficient[data.instrumentEntryIndex];
+                        entry.adsrTimer -= instrument.decayCoefficient[entry.instrumentEntryIndex];
                         // console.log(data.adsrTimer);
                         // when instrument decays to sustain volume, go into sustain state
 
-                        if (data.adsrTimer <= instrument.sustainLevel[data.instrumentEntryIndex]) {
+                        if (entry.adsrTimer <= instrument.sustainLevel[entry.instrumentEntryIndex]) {
                             // console.log("to sustain:  " + instrument.sustain[data.instrumentEntryIndex]);
                             // console.log("vol: " + (12 8 + data.adsrTimer / 723));
-                            data.adsrTimer = instrument.sustainLevel[data.instrumentEntryIndex];
-                            data.adsrState = AdsrState.Sustain;
+                            entry.adsrTimer = instrument.sustainLevel[entry.instrumentEntryIndex];
+                            entry.adsrState = AdsrState.Sustain;
                         }
 
-                        instr.volume = calcChannelVolume(data.velocity, data.adsrTimer);
+                        instr.volume = calcChannelVolume(entry.velocity, entry.adsrTimer);
                         break;
                     case AdsrState.Sustain:
                         break;
                     case AdsrState.Release:
-                        if (data.adsrTimer <= -92544 || instrument.fRecord == InstrumentType.PsgPulse) {
-                            this.synthesizers[data.trackNum].cutInstrument(entry.data.synthInstrIndex);
-                            data.scheduledForDeletion = true;
+                        if (entry.adsrTimer <= -92544 || instrument.fRecord == InstrumentType.PsgPulse) {
+                            // ADSR curve hit zero, cut the instrument
+                            this.synthesizers[entry.trackNum].cutInstrument(entry.synthInstrIndex);
+                            indexToDelete = Number(index);
+                            this.notesOn[entry.trackNum][entry.midiNote] = 0;
                         } else {
-                            data.adsrTimer -= instrument.releaseCoefficient[data.instrumentEntryIndex];
-                            instr.volume = calcChannelVolume(data.velocity, data.adsrTimer);
+                            entry.adsrTimer -= instrument.releaseCoefficient[entry.instrumentEntryIndex];
+                            instr.volume = calcChannelVolume(entry.velocity, entry.adsrTimer);
                         }
                         break;
                 }
             }
+            else {
+                indexToDelete = Number(index);
+                this.notesOn[entry.trackNum][entry.midiNote] = 0;
+            }
         }
 
-        // remove stale entries from heap
-        if (this.activeNoteData.entries > 0) {
-            let entry = this.activeNoteData.getFirstEntry();
-            let instr = this.synthesizers[entry.data.trackNum].instrs[entry.data.synthInstrIndex];
-
-            // check instr.startTime != entry.data.startTime to remove entries for 
-            // SampleInstruments that were reused early because of Synthesizer polyphony limits
-            if (entry.data.scheduledForDeletion || instr.startTime != entry.data.startTime) {
-                this.activeNoteData.popFirstEntry();
-            }
+        if (indexToDelete != -1) {
+            this.activeNoteData.splice(indexToDelete, 1);
         }
 
         this.bpmTimer += this.controller.tracks[0].bpm;
@@ -2553,13 +2621,14 @@ class ControllerBridge {
                                 let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, midiNote, initialVolume, this.controller.ticksElapsed);
 
                                 this.notesOn[msg.trackNum][midiNote] = 1;
-                                this.activeNoteData.addEntry(
+                                this.activeNoteData.push(
                                     {
                                         trackNum: msg.trackNum,
                                         midiNote: midiNote,
                                         velocity: velocity,
                                         synthInstrIndex: synthInstrIndex,
                                         startTime: this.controller.ticksElapsed,
+                                        endTime: this.controller.ticksElapsed + duration,
                                         instrument: instrument,
                                         instrumentEntryIndex: index,
                                         adsrState: AdsrState.Attack,
@@ -2567,8 +2636,7 @@ class ControllerBridge {
                                         fromKeyboard: msg.fromKeyboard,
                                         lfoCounter: 0,
                                         lfoDelayCounter: 0
-                                    },
-                                    this.controller.ticksElapsed + duration
+                                    }
                                 );
                             }
                         }
@@ -2641,7 +2709,7 @@ async function playSeq(sdat, name) {
         currentPlayer?.ctx.close();
     }
 
-    const BUFFER_SIZE = 1024;
+    const BUFFER_SIZE = 512;
     const SAMPLE_RATE = 32768;
 
     let id = sdat.sseqNameIdDict[name];
@@ -2760,7 +2828,12 @@ async function renderAndDownloadSeq(sdat, name) {
 
     let timer = 0;
     let playing = true;
-    let fadeoutLength = 10; // in seconds 
+    const fadeoutLength = 10; // in seconds 
+
+    let startTimestamp = performance.now();
+
+    instrumentsAdvanced = 0;
+    instrumentsAdvancedZeroVolume = 0;
 
     // keep it under 480 seconds
     while (playing && sample < SAMPLE_RATE * 480) {
@@ -2820,6 +2893,19 @@ async function renderAndDownloadSeq(sdat, name) {
 
         sample++;
     }
+
+    let elapsed = (performance.now() - startTimestamp) / 1000;
+
+    console.log(
+        `Rendered ${sample} samples in ${Math.round(elapsed * 10) / 10} seconds (${Math.round(sample / elapsed)} samples/s) (${Math.round(sample / elapsed / SAMPLE_RATE * 10) / 10}x realtime speed)
+        Average instruments advanced per sample: ${Math.round((instrumentsAdvanced / sample) * 10) / 10}
+        Average zero volume instruments advanced per sample: ${Math.round((instrumentsAdvancedZeroVolume / sample) * 10) / 10}
+        Stereo separation: ${enableStereoSeparation}
+        Audio anti-aliasing ${enableAntiAliasing}
+        Enable filter: ${enableFilter}
+        Use cubic resampling (check) / Sinc resampling (uncheck): ${useCubicResampler}
+        `
+    );
 
     downloadUint8Array(name + ".wav", encoder.encode());
 }

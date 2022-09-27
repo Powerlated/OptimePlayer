@@ -51,7 +51,6 @@ function loadSdatsFromRom(data) {
 async function renderVideoSeq(sdat, id, outFile) {
     const SAMPLE_RATE = 32768;
 
-    let blipBuf = new BlipBuf(16, true, 16, 1);
     let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
     let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 3);
 
@@ -140,17 +139,15 @@ async function renderVideoSeq(sdat, id, outFile) {
         if (frameTimer >= 1 / FPS) {
             frameTimer -= 1 / FPS;
 
-            if (false) {
-                drawFsVis(ctx, frameTimer * 1000, fadeoutVolMul);
-                let imageData = ctx.getImageData(0, 0, WIDTH, HEIGHT);
+            drawFsVis(ctx, frameTimer * 1000, fadeoutVolMul);
+            let imageData = ctx.getImageData(0, 0, WIDTH, HEIGHT);
 
-                if (!videoStream.write(new Uint8Array(imageData.data.buffer))) {
-                    await /** @type {Promise<void>} */(new Promise((resolve, reject) => {
-                        videoStream.once("drain", () => {
-                            resolve();
-                        });
-                    }));
-                }
+            if (!videoStream.write(new Uint8Array(imageData.data.buffer))) {
+                await /** @type {Promise<void>} */(new Promise((resolve, reject) => {
+                    videoStream.once("drain", () => {
+                        resolve();
+                    });
+                }));
             }
 
             if (++frames % FPS == 0) {
@@ -159,14 +156,16 @@ async function renderVideoSeq(sdat, id, outFile) {
 
         }
 
+        let valL = 0;
+        let valR = 0;
         for (let i = 0; i < 16; i++) {
             if (trackEnables[i]) {
-                bridge.synthesizers[i].nextSample();
+                let synth = bridge.synthesizers[i];
+                synth.nextSample();
+                valL += synth.valL;
+                valR += synth.valR;
             }
         }
-        blipBuf.readOutSample();
-        let valL = blipBuf.currentValL;
-        let valR = blipBuf.currentValR;
 
         valL *= 0.4 * fadeoutVolMul;
         valR *= 0.4 * fadeoutVolMul;

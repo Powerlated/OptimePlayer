@@ -357,14 +357,22 @@
                                     let whiteKeyNum = octave * 7 + keyNum;
 
                                     let fillStyle;
+                                    let noteOn = currentBridge?.notesOn[trackNum][midiNote];
+                                    let noteOnKeyboard = currentBridge?.notesOnKeyboard[trackNum][midiNote];
                                     if (!blackKey) {
-                                        if (currentBridge?.notesOn[trackNum][midiNote]) {
+                                        if (noteOn) {
                                             ctx.fillStyle = "#000000";
+                                            if (noteOnKeyboard) {
+                                                ctx.fillStyle = "#FF0000";
+                                            }
                                             ctx.fillRect(ofsX + 3 + whiteKeyNum * whiteKeyWidth, ofsY + 3 + trackNum * sectionHeight, whiteKeyWidth, whiteKeyHeight);
                                         }
                                     } else {
-                                        if (currentBridge?.notesOn[trackNum][midiNote]) {
+                                        if (noteOn) {
                                             ctx.fillStyle = "#000000";
+                                            if (noteOnKeyboard) {
+                                                ctx.fillStyle = "#FF0000";
+                                            }
                                             ctx.fillRect(ofsX + 8 + whiteKeyNum * whiteKeyWidth, ofsY + 4 + trackNum * sectionHeight, blackKeyWidth, blackKeyHeight);
                                         }
                                     }
@@ -592,14 +600,14 @@
                             if (note > 127) note = 127;
 
                             if (down) {
-                                currentBridge.controller.sendMessage(new Message(true, currentBridge.activeKeyboardTrackNum, MessageType.PlayNote, note, 127, 2000));
+                                currentBridge.controller.tracks[currentBridge.activeKeyboardTrackNum].sendMessage(true, MessageType.PlayNote, note, 127, 2000);
+                                currentBridge.notesOnKeyboard[currentBridge.activeKeyboardTrackNum][note] = 1;
                             } else {
-                                for (let i = 0; i < currentBridge.activeNoteData.heapEntries; i++) {
-                                    let entry = currentBridge.activeNoteData.heap[i];
-
-                                    if (entry.data.trackNum == currentBridge.activeKeyboardTrackNum && entry.data.midiNote == note) {
-                                        currentBridge.notesOn[entry.data.trackNum][entry.data.midiNote] = 0;
-                                        entry.data.adsrState = AdsrState.Release;
+                                console.log("up");
+                                for (let entry of currentBridge.activeNoteData) {
+                                    if (entry.trackNum == currentBridge.activeKeyboardTrackNum && entry.midiNote == note) {
+                                        entry.adsrState = AdsrState.Release;
+                                        currentBridge.notesOnKeyboard[currentBridge.activeKeyboardTrackNum][note] = 0;
                                     }
                                 }
                             }
@@ -685,6 +693,8 @@
             registerCheckbox("#force-stereo-separation", true, c => { enableForceStereoSeparation = c; });
             registerCheckbox("#antialiasing", true, c => { enableAntiAliasing = c; });
             registerCheckbox("#soundgoodizer", true, c => { enableSoundgoodizer = c; });
+            registerCheckbox("#enable-filter", true, c => { enableFilter = c; });
+            registerCheckbox("#use-cubic-resampler", false, c => { useCubicResampler = c; });
         };
 
         /** @param {string} name */
@@ -729,7 +739,6 @@
                 <button onclick="loadDemo('pokemon-heartgold')">Pokémon HeartGold</button>
                 <button onclick="loadDemo('pokemon-black-2')">Pokémon Black 2</button>
                 <button onclick="loadDemo('ace-attorney')">Phoenix Wright: Ace Attorney</button>
-
             </div>
 
             <div>
@@ -740,6 +749,10 @@
                 <label for="force-stereo-separation">"Force" Stereo Separation (restart song to apply)</label><br>
                 <input type="checkbox" id="antialiasing">
                 <label for="antialiasing">Audio Anti-Aliasing</label><br>
+                <input type="checkbox" id="enable-filter">
+                <label for="enable-filter">Enable Filter</label><br>
+                <input type="checkbox" id="use-cubic-resampler">
+                <label for="use-cubic-resampler">Use Cubic Resampling (check) / Sinc Resampling (uncheck)</label><br>
                 <input type="checkbox" id="soundgoodizer">
                 <label for="soundgoodizer">Enable Soundgoodizer</label><br>
             </div>
