@@ -599,11 +599,11 @@
                             if (note < 0) note = 0;
                             if (note > 127) note = 127;
 
+                            console.log(note)
                             if (down) {
                                 currentBridge.controller.tracks[currentBridge.activeKeyboardTrackNum].sendMessage(true, MessageType.PlayNote, note, 127, 2000);
                                 currentBridge.notesOnKeyboard[currentBridge.activeKeyboardTrackNum][note] = 1;
                             } else {
-                                console.log("up");
                                 for (let entry of currentBridge.activeNoteData) {
                                     if (entry.trackNum == currentBridge.activeKeyboardTrackNum && entry.midiNote == note) {
                                         entry.adsrState = AdsrState.Release;
@@ -689,9 +689,17 @@
                 renderAndDownloadSeq(currentlyPlayingSdat, currentlyPlayingName);
             };
 
-            registerCheckbox("#stereo-separation", true, c => { enableStereoSeparation = c; });
-            registerCheckbox("#force-stereo-separation", true, c => { enableForceStereoSeparation = c; });
-            registerCheckbox("#antialiasing", true, c => { enableAntiAliasing = c; });
+            registerCheckbox("#stereo-separation", true, checked => { enableStereoSeparation = checked; });
+            registerCheckbox("#force-stereo-separation", true, checked => { enableForceStereoSeparation = checked; });
+            registerCheckbox("#antialiasing", true, checked => { enableAntiAliasing = checked; });
+            registerDropdown("#tuning-system", changed => {
+                if (changed == "equal") {
+                    pureTuning = false;
+                } else {
+                    pureTuning = true;
+                    pureTuningRootNote = parseInt(changed.split('-')[1]);
+                }
+            });
             registerCheckbox("#soundgoodizer", true, c => { enableSoundgoodizer = c; });
             registerCheckbox("#enable-filter", true, c => { enableFilter = c; });
             registerCheckbox("#use-cubic-resampler", false, c => { useCubicResampler = c; });
@@ -709,6 +717,11 @@
             element.checked = checked;
             callback(checked);
             element.onchange = () => callback(element.checked);
+        }
+
+        function registerDropdown(selector, callback) {
+            let element = document.querySelector(selector);
+            element.onchange = () => callback(element.value);
         }
 
     </script>
@@ -753,8 +766,25 @@
                 <label for="enable-filter">Enable Filter</label><br>
                 <input type="checkbox" id="use-cubic-resampler">
                 <label for="use-cubic-resampler">Use Cubic Resampling (check) / Sinc Resampling (uncheck)</label><br>
-                <input type="checkbox" id="soundgoodizer">
-                <label for="soundgoodizer">Enable Soundgoodizer</label><br>
+                <!-- <input type="checkbox" id="soundgoodizer"> -->
+                <!-- <label for="soundgoodizer">Enable Soundgoodizer</label><br> -->
+                <label for="tuning-system">Tuning System</label>
+
+                <select name="tuning-systems" id="tuning-system">
+                    <option value="equal">Equal Temperament</option>
+                    <option value="pure-0">Pure A</option>
+                    <option value="pure-1">Pure A#</option>
+                    <option value="pure-2">Pure B</option>
+                    <option value="pure-3">Pure C</option>
+                    <option value="pure-4">Pure C#</option>
+                    <option value="pure-5">Pure D</option>
+                    <option value="pure-6">Pure D#</option>
+                    <option value="pure-7">Pure E</option>
+                    <option value="pure-8">Pure F</option>
+                    <option value="pure-9">Pure F#</option>
+                    <option value="pure-10">Pure G</option>
+                    <option value="pure-11">Pure G#</option>
+                </select>
             </div>
         </div>
 

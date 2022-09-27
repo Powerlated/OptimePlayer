@@ -6,6 +6,8 @@ let debug = false;
 let enableStereoSeparation = false;
 let enableForceStereoSeparation = false;
 let enableAntiAliasing = true;
+let pureTuning = false;
+let pureTuningRootNote = 0;
 let enableSoundgoodizer = true;
 let enableFilter = true;
 let useCubicResampler = false;
@@ -3157,8 +3159,49 @@ function playSample(sample) {
     }));
 }
 
+// pureRootNote is an offset from A in 
+/** @returns {number} */
 function midiNoteToHz(note) {
-    return 440 * 2 ** ((note - 69) / 12);
+    if (pureTuning) {
+        let roundError = note - Math.round(note);
+        note = Math.round(note);
+
+        let noteRelRoot = note - 69 - pureTuningRootNote;
+        let octave = Math.floor(noteRelRoot / 12);
+        let noteInOctave = ((noteRelRoot % 12) + 12) % 12;
+
+        let rootNoteHz = 440 * 2 ** (((pureTuningRootNote + roundError) / 12) + octave);
+
+        switch (noteInOctave) {
+            default:
+            case 0: // Do
+                return rootNoteHz * (1 / 1);
+            case 1: // Di
+                return rootNoteHz * (256 / 243);
+            case 2: // Re
+                return rootNoteHz * (9 / 8);
+            case 3: // Ri
+                return rootNoteHz * (32 / 27);
+            case 4: // Mi
+                return rootNoteHz * (81 / 64);
+            case 5: // Fa
+                return rootNoteHz * (4 / 3);
+            case 6: // Fi
+                return rootNoteHz * (729 / 512);
+            case 7: // So
+                return rootNoteHz * (3 / 2);
+            case 8: // Si
+                return rootNoteHz * (128 / 81);
+            case 9: // La
+                return rootNoteHz * (27 / 16);
+            case 10: // Li
+                return rootNoteHz * (16 / 9);
+            case 11: // Ti
+                return rootNoteHz * (243 / 128);
+        }
+    } else {
+        return 440 * 2 ** ((note - 69) / 12);
+    }
 }
 
 function parseSdatFromRom(data, offset) {
