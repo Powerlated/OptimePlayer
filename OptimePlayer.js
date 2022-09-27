@@ -1417,16 +1417,12 @@ class SampleInstrument {
         this.finetuneLfo = semitones;
         this.frequency = midiNoteToHz(this.midiNote + this.finetuneLfo + this.finetune);
         this.freqRatio = this.frequency / this.sample.frequency;
-        this.updateFilter();
-        this.filter.resetState();
     }
 
     setFinetune(semitones) {
         this.finetune = semitones;
         this.frequency = midiNoteToHz(this.midiNote + this.finetuneLfo + this.finetune);
         this.freqRatio = this.frequency / this.sample.frequency;
-        this.updateFilter();
-        this.filter.resetState();
     }
 }
 
