@@ -1654,7 +1654,7 @@ class SseqTrack {
                         this.program = bankAndProgram & 0x7F;
                         this.bank = (bankAndProgram >> 7) & 0x7F;
 
-                        this.debugLogForce(`Bank: ${this.bank} Program: ${this.program}`);
+                        this.debugLog(`Bank: ${this.bank} Program: ${this.program}`);
 
                         this.sendMessage(false, MessageType.InstrumentChange, this.bank, this.program);
                         break;
@@ -1969,7 +1969,7 @@ class SampleSynthesizer {
         let delaySR = distR / SPEED_OF_SOUND * 50;
         let delayL = Math.round(delaySL * this.sampleRate);
         let delayR = Math.round(delaySR * this.sampleRate);
-        console.log(`L:${delaySL * 1000}ms R:${delaySR * 1000}ms X:${x}`);
+        // console.log(`L:${delaySL * 1000}ms R:${delaySR * 1000}ms X:${x}`);
         this.delayLineL.setDelay(delayL);
         this.delayLineR.setDelay(delayR);
         this.delayLineR.gain = gainR;
@@ -2772,7 +2772,7 @@ async function playSeq(sdat, name) {
 
         let elapsed = (performance.now() - startTimestamp) / 1000;
 
-        console.log(`${Math.round((elapsed / (BUFFER_SIZE / SAMPLE_RATE)) * 100)}% of allotted synthesis time used`);
+        // console.log(`${Math.round((elapsed / (BUFFER_SIZE / SAMPLE_RATE)) * 100)}% of allotted synthesis time used`);
 
         player.queueAudio(bufferL, bufferR);
     }
