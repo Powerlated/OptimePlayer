@@ -12,7 +12,6 @@ let useCubicResampler = false;
 
 // Global metrics
 let instrumentsAdvanced = 0;
-let instrumentsAdvancedZeroVolume = 0;
 
 /** @type {ControllerBridge | null} */
 let currentBridge = null;
@@ -165,6 +164,9 @@ class BlipBuf {
     constructor(kernelSize, bufSize, normalize, channels, filterRatio, minimumPhase) {
         if (kernelSize > BlipBuf.MAX_KERNEL_SIZE) {
             throw 'kernelSize > BlipBuf.MAX_KERNEL_SIZE';
+        }
+        if (bufSize < kernelSize * 2) {
+            throw 'bufSize needs to be greater than kernelSize * 2';
         }
         // Lanzcos kernel
         let key = kernelSize.toString() + normalize + filterRatio + minimumPhase;
@@ -1276,12 +1278,12 @@ class Bank {
 class SampleInstrument {
     /**
     * @param {SampleSynthesizer} synth
-    * @param {number} channelNum
+    * @param {number} instrNum
     * @param {number} sampleRate 
     * @param {Sample} sample
     */
-    constructor(synth, channelNum, sampleRate, sample) {
-        this.instrNum = channelNum;
+    constructor(synth, instrNum, sampleRate, sample) {
+        this.instrNum = instrNum;
         this.synth = synth;
         this.sampleRate = sampleRate;
         this.nyquist = sampleRate / 2;
@@ -1317,7 +1319,7 @@ class SampleInstrument {
         // SQRT1_2 = 1/SQRT(2) maximally flat (Butterworth) filter
         this.filter = BiquadFilter.lowPassFilter(8, this.sampleRate, 16384, Math.SQRT1_2);
 
-        this.blipBuf = new BlipBuf(16, 16, true, 1, 1, true);
+        this.blipBuf = new BlipBuf(16, 32, true, 1, 1, true);
 
         Object.seal(this);
     }
@@ -1328,10 +1330,6 @@ class SampleInstrument {
 
     advance() {
         instrumentsAdvanced++;
-
-        if (this.volume == 0.01) {
-            instrumentsAdvancedZeroVolume++;
-        }
 
         let convertedSampleRate = this.freqRatio * this.sample.sampleRate;
         this.sampleT += this.invSampleRate * convertedSampleRate;
@@ -1919,9 +1917,11 @@ class SampleSynthesizer {
         let valR = 0;
 
         for (const instr of this.activeInstrs) {
-            instr.advance();
-            valL += instr.output * (1 - this.pan);
-            valR += instr.output * this.pan;
+            if (instr.sample.looping || instr.sampleT < instr.sample.data.length) {
+                instr.advance();
+                valL += instr.output * (1 - this.pan);
+                valR += instr.output * this.pan;
+            }
         }
 
         if (enableStereoSeparation) {
@@ -2737,6 +2737,8 @@ async function playSeq(sdat, name) {
 
     let timer = 0;
     function synthesizeMore() {
+        let startTimestamp = performance.now();
+
         for (let i = 0; i < BUFFER_SIZE; i++) {
             // nintendo DS clock speed
             timer += 33513982;
@@ -2766,13 +2768,11 @@ async function playSeq(sdat, name) {
             }
         }
 
-        // synthesizer.play(Math.random() * 880);
+        let elapsed = (performance.now() - startTimestamp) / 1000;
 
-        // console.log(inBufferPos);
+        console.log(`${Math.round((elapsed / (BUFFER_SIZE / SAMPLE_RATE)) * 100)}% of allotted synthesis time used`);
 
         player.queueAudio(bufferL, bufferR);
-
-        // console.log("Syntheszing more audio");
     }
 
     let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
@@ -2833,7 +2833,6 @@ async function renderAndDownloadSeq(sdat, name) {
     let startTimestamp = performance.now();
 
     instrumentsAdvanced = 0;
-    instrumentsAdvancedZeroVolume = 0;
 
     // keep it under 480 seconds
     while (playing && sample < SAMPLE_RATE * 480) {
@@ -2899,7 +2898,6 @@ async function renderAndDownloadSeq(sdat, name) {
     console.log(
         `Rendered ${sample} samples in ${Math.round(elapsed * 10) / 10} seconds (${Math.round(sample / elapsed)} samples/s) (${Math.round(sample / elapsed / SAMPLE_RATE * 10) / 10}x realtime speed)
         Average instruments advanced per sample: ${Math.round((instrumentsAdvanced / sample) * 10) / 10}
-        Average zero volume instruments advanced per sample: ${Math.round((instrumentsAdvancedZeroVolume / sample) * 10) / 10}
         Stereo separation: ${enableStereoSeparation}
         Audio anti-aliasing ${enableAntiAliasing}
         Enable filter: ${enableFilter}
