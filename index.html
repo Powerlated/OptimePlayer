@@ -83,6 +83,39 @@
             margin-top: 4px;
             margin-bottom: 4px;
         }
+
+        /* The Modal (background) */
+        .modal {
+            display: none;
+            /* Hidden by default */
+            position: fixed;
+            /* Stay in place */
+            z-index: 1;
+            /* Sit on top */
+            left: 0;
+            top: 0;
+            width: 100%;
+            /* Full width */
+            height: 100%;
+            /* Full height */
+            overflow: auto;
+            /* Enable scroll if needed */
+            background-color: rgb(0, 0, 0);
+            /* Fallback color */
+            background-color: rgba(0, 0, 0, 0.4);
+            /* Black w/ opacity */
+        }
+
+        /* Modal Content/Box */
+        .modal-content {
+            background-color: #fefefe;
+            margin: 15% auto;
+            /* 15% from the top and centered */
+            padding: 20px;
+            border: 1px solid #888;
+            width: 80%;
+            /* Could be more or less, depending on screen size */
+        }
     </style>
 
     <script src="OptimePlayer.js"></script>
@@ -247,6 +280,174 @@
                 }
             });
 
+            let progressModal = document.getElementById("progress-modal");
+            let progressBar = document.getElementById("progress-bar");
+            let progressInfo = document.getElementById("progress-info");
+            const FADEOUT_LENGTH = 10; // in seconds 
+            const LOOP_COUNT = 2;
+            const SAMPLE_RATE = 32768;
+
+            function getSseqLength(sdat, name) {
+                let id = sdat.sseqNameIdDict[name];
+                let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
+                let loop = 0;
+                let playing = true;
+
+                let ticks = 0;
+
+                // nintendo DS clock speed
+                while (true) {
+                    bridge.tick();
+                    ticks++;
+
+                    if (bridge.jumps > 0) {
+                        bridge.jumps = 0;
+                        loop++;
+
+                        if (loop == LOOP_COUNT) {
+                            break;
+                        }
+                    }
+                }
+
+                let time = ticks * (64 * 2728) / 33513982;
+                time += FADEOUT_LENGTH;
+
+                return time;
+            }
+
+            /**
+            * @param {Sdat} sdat
+            * @param {string} name
+            */
+            async function renderAndDownloadSeq(sdat, name) {
+                progressModal.style.display = "block";
+
+                currentBridge?.destroy();
+                currentPlayer?.ctx.close();
+
+                let id = sdat.sseqNameIdDict[name];
+
+                let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
+
+                console.log("Rendering SSEQ Id:" + id);
+                // console.log("FAT ID:" + info.fileId);
+
+                let encoder = new WavEncoder(SAMPLE_RATE, 16);
+
+                let sample = 0;
+                let fadingOut = false;
+                let fadeoutStartSample = 0;
+                let loop = 0;
+
+                let timer = 0;
+                let playing = true;
+
+                let startTimestamp = performance.now();
+
+                instrumentsAdvanced = 0;
+
+                // keep it under 480 seconds
+
+                const lengthS = getSseqLength(sdat, name);
+                console.log(lengthS);
+                const CHUNK_SIZE = Math.floor(SAMPLE_RATE);
+
+                let intervalNum;
+
+                function renderChunk() {
+                    for (let i = 0; i < CHUNK_SIZE; i++) {
+                        if (!(playing && sample < SAMPLE_RATE * 480)) {
+                            done();
+                            return;
+                        }
+                        // nintendo DS clock speed
+                        timer += 33513982;
+                        while (timer >= 64 * 2728 * SAMPLE_RATE) {
+                            timer -= 64 * 2728 * SAMPLE_RATE;
+
+                            bridge.tick();
+                        }
+
+                        if (bridge.jumps > 0) {
+                            bridge.jumps = 0;
+                            loop++;
+
+                            if (loop == 2) {
+                                bridge.fadingStart = true;
+                            }
+                        }
+
+                        if (bridge.fadingStart) {
+                            bridge.fadingStart = false;
+                            fadingOut = true;
+                            fadeoutStartSample = sample + SAMPLE_RATE * 2;
+                            console.log("Starting fadeout at sample: " + fadeoutStartSample);
+                        }
+
+                        let fadeoutVolMul = 1;
+
+                        if (fadingOut) {
+                            let fadeoutSample = sample - fadeoutStartSample;
+                            if (fadeoutSample >= 0) {
+                                let fadeoutTime = fadeoutSample / SAMPLE_RATE;
+
+                                let ratio = fadeoutTime / FADEOUT_LENGTH;
+
+                                fadeoutVolMul = 1 - ratio;
+
+                                if (fadeoutVolMul <= 0) {
+                                    playing = false;
+                                }
+                            }
+                        }
+
+                        let valL = 0;
+                        let valR = 0;
+                        for (let i = 0; i < 16; i++) {
+                            if (trackEnables[i]) {
+                                let synth = bridge.synthesizers[i];
+                                synth.nextSample();
+                                valL += synth.valL;
+                                valR += synth.valR;
+                            }
+                        }
+
+                        encoder.addSample(valL * 0.5 * fadeoutVolMul, valR * 0.5 * fadeoutVolMul);
+
+                        sample++;
+                    }
+
+                    let finishedTime = sample / SAMPLE_RATE;
+                    let finishedPct = Math.round((finishedTime / lengthS) * 100);
+                    progressBar.value = finishedPct;
+                    progressInfo.innerText = `${Math.round(finishedTime)} / ${Math.round(lengthS)} seconds`;
+                }
+
+                intervalNum = setInterval(renderChunk, 0);
+
+                function done() {
+                    clearInterval(intervalNum);
+
+                    progressModal.style.display = "none";
+
+                    let elapsed = (performance.now() - startTimestamp) / 1000;
+
+                    console.log(
+                        `Rendered ${sample} samples in ${Math.round(elapsed * 10) / 10} seconds (${Math.round(sample / elapsed)} samples/s) (${Math.round(sample / elapsed / SAMPLE_RATE * 10) / 10}x realtime speed)
+                        Average instruments advanced per sample: ${Math.round((instrumentsAdvanced / sample) * 10) / 10}
+                        Stereo separation: ${g_enableStereoSeparation}
+                        Audio anti-aliasing ${g_enableAntiAliasing}
+                        Enable filter: ${g_enableFilter}
+                        Use cubic resampling (check) / Sinc resampling (uncheck): ${g_useCubicResampler}
+                        `
+                    );
+
+                    downloadUint8Array(name + ".wav", encoder.encode());
+                }
+            };
+
+            // Visualizer
             Promise.all(
                 [
                     loadHtmlImageElementFromUrl("assets/piano_section_1.png"),
@@ -327,9 +528,6 @@
 
                             drawKeys(true); // then draw black keys on top
                         }
-
-
-
                     }
 
                     return canvas;
@@ -599,7 +797,7 @@
                             if (note < 0) note = 0;
                             if (note > 127) note = 127;
 
-                            console.log(note)
+                            console.log(note);
                             if (down) {
                                 currentBridge.controller.tracks[currentBridge.activeKeyboardTrackNum].sendMessage(true, MessageType.PlayNote, note, 127, 2000);
                                 currentBridge.notesOnKeyboard[currentBridge.activeKeyboardTrackNum][note] = 1;
@@ -689,9 +887,9 @@
                 renderAndDownloadSeq(currentlyPlayingSdat, currentlyPlayingName);
             };
 
-            registerCheckbox("#stereo-separation", true, checked => { enableStereoSeparation = checked; });
-            registerCheckbox("#force-stereo-separation", true, checked => { enableForceStereoSeparation = checked; });
-            registerCheckbox("#antialiasing", true, checked => { enableAntiAliasing = checked; });
+            registerCheckbox("#stereo-separation", true, checked => { g_enableStereoSeparation = checked; });
+            registerCheckbox("#force-stereo-separation", true, checked => { g_enableForceStereoSeparation = checked; });
+            registerCheckbox("#antialiasing", true, checked => { g_enableAntiAliasing = checked; });
             registerDropdown("#tuning-system", changed => {
                 if (changed == "equal") {
                     pureTuning = false;
@@ -701,8 +899,8 @@
                 }
             });
             // registerCheckbox("#soundgoodizer", true, c => { enableSoundgoodizer = c; });
-            registerCheckbox("#enable-filter", true, c => { enableFilter = c; });
-            registerCheckbox("#use-cubic-resampler", false, c => { useCubicResampler = c; });
+            registerCheckbox("#enable-filter", true, c => { g_enableFilter = c; });
+            registerCheckbox("#use-cubic-resampler", false, c => { g_useCubicResampler = c; });
         };
 
         /** @param {string} name */
@@ -734,6 +932,15 @@
     <h1 style="margin-bottom: 0">Optime Player</h1>
     <a href="https://github.com/Powerlated/OptimePlayer">https://github.com/Powerlated/OptimePlayer</a>
 
+
+    <div id="progress-modal" class="modal">
+        <div class="modal-content">
+
+            <label for="progress-bar">Rendering progress:</label>
+            <progress id="progress-bar" value="0" max="100"></progress>
+            <p id="progress-info"></p>
+        </div>
+    </div>
 
     <div class="container">
         <div class="song-picker"></div>

@@ -3,14 +3,14 @@
 /** GLOBALS GO HERE **/
 let debug = false;
 
-let enableStereoSeparation = false;
-let enableForceStereoSeparation = false;
-let enableAntiAliasing = true;
-let pureTuning = false;
-let pureTuningRootNote = 0;
-let enableSoundgoodizer = true;
-let enableFilter = true;
-let useCubicResampler = false;
+let g_enableStereoSeparation = false;
+let g_enableForceStereoSeparation = false;
+let g_enableAntiAliasing = true;
+let g_pureTuning = false;
+let g_pureTuningRootNote = 0;
+let g_enableSoundgoodizer = true;
+let g_enableFilter = true;
+let g_useCubicResampler = false;
 
 // Global metrics
 let instrumentsAdvanced = 0;
@@ -459,43 +459,68 @@ class BlipBuf {
      * @param {number} t
      * @param {number} valL
      * @param {number} valR
-     * @param {boolean} useSinc
      */
-    setValue(channel, t, valL, valR, useSinc) {
+    setValue(channel, t, valL, valR) {
         if (t >= this.channelT[channel]) {
             this.channelT[channel] = t;
         }
         else {
             console.warn(`Channel ${channel}: Tried to set amplitude backward in time from ${this.channelT[channel]} to ${t}`);
         }
-        if (valL != this.channelValsL[channel] || valR != this.channelValsR[channel]) {
-            let diffL = valL - this.channelValsL[channel];
-            let diffR = valR - this.channelValsR[channel];
-            if (useSinc) {
-                let subsamplePos = (1 - (t % 1)) * (BlipBuf.KERNEL_RESOLUTION - 1) | 0;
-                // Add our bandlimited impulse to the difference buffer
-                let bufPos = this.bufPos + (t | 0) - this.currentSampleOutPos;
-                if (bufPos > this.bufSize) {
-                    bufPos -= this.bufSize;
-                    if (bufPos > this.bufSize)
-                        throw `Overflowed buffer (${bufPos} > ${this.bufSize}) `;
-                }
-                for (let i = 0; i < this.kernelSize; i++) {
-                    let kVal = this.kernel[this.kernelSize * subsamplePos + i];
-                    this.bufL[bufPos] += kVal * diffL;
-                    this.bufR[bufPos] += kVal * diffR;
-                    if (++bufPos >= this.bufSize)
-                        bufPos = 0;
-                }
-            }
-            else {
-                let kBufPos = (this.bufPos + (0 | (t + this.kernelSize)) - this.currentSampleOutPos) % this.bufSize;
-                this.bufL[kBufPos] += diffL;
-                this.bufR[kBufPos] += diffR;
-            }
+
+        let diffL = valL - this.channelValsL[channel];
+        let diffR = valR - this.channelValsR[channel];
+
+        let subsamplePos = (1 - (t % 1)) * (BlipBuf.KERNEL_RESOLUTION - 1) | 0;
+        // Add our bandlimited impulse to the difference buffer
+        let bufPos = this.bufPos + (t | 0) - this.currentSampleOutPos;
+        if (bufPos > this.bufSize) {
+            bufPos -= this.bufSize;
+            if (bufPos > this.bufSize)
+                throw `Overflowed buffer (${bufPos} > ${this.bufSize}) `;
         }
+        for (let i = 0; i < this.kernelSize; i++) {
+            let kVal = this.kernel[this.kernelSize * subsamplePos + i];
+            this.bufL[bufPos] += kVal * diffL;
+            this.bufR[bufPos] += kVal * diffR;
+            if (++bufPos >= this.bufSize)
+                bufPos = 0;
+        }
+
         this.channelValsL[channel] = valL;
         this.channelValsR[channel] = valR;
+    }
+    /**
+     * @param {number} channel
+     * @param {number} t
+     * @param {number} val
+     */
+    setValueL(channel, t, val) {
+        if (t >= this.channelT[channel]) {
+            this.channelT[channel] = t;
+        }
+        else {
+            console.warn(`Channel ${channel}: Tried to set amplitude backward in time from ${this.channelT[channel]} to ${t}`);
+        }
+
+        let diff = val - this.channelValsL[channel];
+
+        let subsamplePos = (1 - (t % 1)) * (BlipBuf.KERNEL_RESOLUTION - 1) | 0;
+        // Add our bandlimited impulse to the difference buffer
+        let bufPos = this.bufPos + (t | 0) - this.currentSampleOutPos;
+        if (bufPos > this.bufSize) {
+            bufPos -= this.bufSize;
+            if (bufPos > this.bufSize)
+                throw `Overflowed buffer (${bufPos} > ${this.bufSize}) `;
+        }
+        for (let i = 0; i < this.kernelSize; i++) {
+            let kVal = this.kernel[this.kernelSize * subsamplePos + i];
+            this.bufL[bufPos] += kVal * diff;
+            if (++bufPos >= this.bufSize)
+                bufPos = 0;
+        }
+
+        this.channelValsL[channel] = val;
     }
     readOutSample() {
         // Integrate the difference buffer
@@ -506,6 +531,15 @@ class BlipBuf {
         if (++this.bufPos >= this.bufSize)
             this.bufPos = 0;
         this.currentSampleOutPos++;
+    }
+    readOutSampleL() {
+        // Integrate the difference buffer
+        this.outputL += this.bufL[this.bufPos];
+        this.bufL[this.bufPos] = 0;
+        if (++this.bufPos >= this.bufSize)
+            this.bufPos = 0;
+        this.currentSampleOutPos++;
+        return this.outputL;
     }
 }
 
@@ -557,8 +591,8 @@ class BiquadFilter {
         for (let i = 0; i < this.numCascade; i++) {
             // compute result
             let result = this.a0 * inSample + this.a1 * this.x1[i] + this.a2 * this.x2[i] - this.a3 * this.y1[i] - this.a4 * this.y2[i];
-            if (isNaN(result)) throw "NaN in filter";
-            if (result == Infinity) throw "Infinity in filter";
+            // if (isNaN(result)) throw "NaN in filter";
+            // if (result == Infinity) throw "Infinity in filter";
 
             // shift x1 to x2, sample to x1 
             this.x2[i] = this.x1[i];
@@ -987,10 +1021,12 @@ class AudioPlayer {
             }
         };
 
-        // if (this.audioSec <= this.ctx.currentTime + 0.05) {
-        // Reset time if close to buffer underrun
-        // this.audioSec = this.ctx.currentTime + 0.06;
-        // }
+        if (this.audioSec <= this.ctx.currentTime + 0.05) {
+            // Reset time if close to buffer underrun
+
+            console.warn("AudioPlayer: fell behind, dropping time");
+            this.audioSec = this.ctx.currentTime + 0.06;
+        }
         bufferSource.buffer = buffer;
         bufferSource.connect(this.gain);
         bufferSource.start(this.audioSec);
@@ -1338,7 +1374,7 @@ class SampleInstrument {
         let convertedSampleRate = this.freqRatio * this.sample.sampleRate;
         this.sampleT += this.invSampleRate * convertedSampleRate;
 
-        if (useCubicResampler && this.sample.enableFilter) {
+        if (g_useCubicResampler && this.sample.enableFilter) {
             let subT = this.sampleT % 1;
 
             /*
@@ -1357,24 +1393,23 @@ class SampleInstrument {
 
             let valCubic = p1 + 0.5 * subT * (p2 - p0 + subT * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + subT * (3.0 * (p1 - p2) + p3 - p0)));
 
-            this.blipBuf.readOutSample();
+            this.blipBuf.readOutSampleL();
             this.output = valCubic * this.volume;
-        } else if (enableAntiAliasing) {
+        } else if (g_enableAntiAliasing) {
             while (this.resampleT < this.sampleT) {
                 let val = this.getSampleDataAt(this.resampleT);
-                this.blipBuf.setValue(0, this.t, val, 0, enableAntiAliasing);
+                this.blipBuf.setValueL(0, this.t, val);
                 this.t += this.sampleRate / convertedSampleRate;
                 this.resampleT++;
             }
 
-            this.blipBuf.readOutSample();
-            this.output = this.blipBuf.outputL * this.volume;
+            this.output = this.blipBuf.readOutSampleL() * this.volume;
 
-            if (this.sample.enableFilter && enableFilter) {
+            if (this.sample.enableFilter) {
                 this.output = this.filter.transform(this.output);
             }
         } else {
-            this.blipBuf.readOutSample();
+            this.blipBuf.readOutSampleL();
             this.output = this.getSampleDataAt(Math.floor(this.sampleT)) * this.volume;
         }
     }
@@ -1917,14 +1952,12 @@ class SampleSynthesizer {
         let valR = 0;
 
         for (const instr of this.activeInstrs) {
-            if (instr.sample.looping || instr.sampleT < instr.sample.data.length) {
-                instr.advance();
-                valL += instr.output * (1 - this.pan);
-                valR += instr.output * this.pan;
-            }
+            instr.advance();
+            valL += instr.output * (1 - this.pan);
+            valR += instr.output * this.pan;
         }
 
-        if (enableStereoSeparation) {
+        if (g_enableStereoSeparation) {
             this.valL = this.delayLineL.process(valL) * this.volume;
             this.valR = this.delayLineR.process(valR) * this.volume;
         } else {
@@ -1951,7 +1984,7 @@ class SampleSynthesizer {
         let x = pan * 2 - 1; // [0, 1] -> [-1, -1]
         // force stereo separation on barely panned channels
         let gainR = 1;
-        if (enableForceStereoSeparation) {
+        if (g_enableForceStereoSeparation) {
             if (x > -0.2 && x < 0.2) {
                 // gainR = -1;
                 x = 0.2 * Math.sign(x);
@@ -2429,8 +2462,6 @@ class ControllerBridge {
     }
 
     tick() {
-        let indexToDelete = -1;
-
         for (let index in this.activeNoteData) {
             let entry = this.activeNoteData[index];
             /** @type {InstrumentRecord} */
@@ -2440,6 +2471,13 @@ class ControllerBridge {
             // sometimes a SampleInstrument will be reused before the note it is playing is over due to Synthesizer polyphony limits
             // check here to make sure the note entry stored in the heap is referring to the same note it originally did 
             if (instr.startTime == entry.startTime && instr.playing) {
+                // Cut instruments that have ended samples
+                if (!instr.sample.looping && instr.sampleT > instr.sample.data.length) {
+                    // @ts-ignore
+                    this.activeNoteData.splice(index, 1);
+                    this.synthesizers[entry.trackNum].cutInstrument(entry.synthInstrIndex);
+                }
+
                 if (this.controller.ticksElapsed >= entry.endTime && !entry.fromKeyboard) {
                     if (entry.adsrState != AdsrState.Release) {
                         // console.log("to release: " + instrument.release[data.instrumentEntryIndex]);
@@ -2531,7 +2569,8 @@ class ControllerBridge {
                         if (entry.adsrTimer <= -92544 || instrument.fRecord == InstrumentType.PsgPulse) {
                             // ADSR curve hit zero, cut the instrument
                             this.synthesizers[entry.trackNum].cutInstrument(entry.synthInstrIndex);
-                            indexToDelete = Number(index);
+                            // @ts-ignore
+                            this.activeNoteData.splice(index, 1);
                             this.notesOn[entry.trackNum][entry.midiNote] = 0;
                         } else {
                             entry.adsrTimer -= instrument.releaseCoefficient[entry.instrumentEntryIndex];
@@ -2541,13 +2580,10 @@ class ControllerBridge {
                 }
             }
             else {
-                indexToDelete = Number(index);
+                // @ts-ignore
+                this.activeNoteData.splice(index, 1);
                 this.notesOn[entry.trackNum][entry.midiNote] = 0;
             }
-        }
-
-        if (indexToDelete != -1) {
-            this.activeNoteData.splice(indexToDelete, 1);
         }
 
         this.bpmTimer += this.controller.tracks[0].bpm;
@@ -2590,6 +2626,10 @@ class ControllerBridge {
                                 } else {
                                     sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
                                     sample.enableFilter = true;
+                                }
+
+                                if (!g_enableFilter) {
+                                    sample.enableFilter = false;
                                 }
 
                                 // if (msg.fromKeyboard) { 
@@ -2735,6 +2775,9 @@ async function playSeq(sdat, name) {
     currentBridge = bridge;
     currentFsVisBridge = fsVisBridge;
 
+    let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
+    currentPlayer = player;
+
     let timer = 0;
     function synthesizeMore() {
         let startTimestamp = performance.now();
@@ -2775,8 +2818,6 @@ async function playSeq(sdat, name) {
         player.queueAudio(bufferL, bufferR);
     }
 
-    let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
-    currentPlayer = player;
     synthesizeMore();
 }
 
@@ -2805,108 +2846,6 @@ async function downloadSample(sample) {
     downloadUint8Array("sample.wav", downloader.encode());
 }
 
-/**
-* @param {Sdat} sdat
-* @param {string} name
-*/
-async function renderAndDownloadSeq(sdat, name) {
-    const SAMPLE_RATE = 32768;
-
-    let id = sdat.sseqNameIdDict[name];
-
-    let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
-
-    console.log("Rendering SSEQ Id:" + id);
-    // console.log("FAT ID:" + info.fileId);
-
-    let encoder = new WavEncoder(SAMPLE_RATE, 16);
-
-    let sample = 0;
-    let fadingOut = false;
-    let fadeoutStartSample = 0;
-    let loop = 0;
-
-    let timer = 0;
-    let playing = true;
-    const fadeoutLength = 10; // in seconds 
-
-    let startTimestamp = performance.now();
-
-    instrumentsAdvanced = 0;
-
-    // keep it under 480 seconds
-    while (playing && sample < SAMPLE_RATE * 480) {
-        // nintendo DS clock speed
-        timer += 33513982;
-        while (timer >= 64 * 2728 * SAMPLE_RATE) {
-            timer -= 64 * 2728 * SAMPLE_RATE;
-
-            bridge.tick();
-        }
-
-        if (bridge.jumps > 0) {
-            bridge.jumps = 0;
-            loop++;
-
-            if (loop == 2) {
-                bridge.fadingStart = true;
-            }
-        }
-
-        if (bridge.fadingStart) {
-            bridge.fadingStart = false;
-            fadingOut = true;
-            fadeoutStartSample = sample + SAMPLE_RATE * 2;
-            console.log("Starting fadeout at sample: " + fadeoutStartSample);
-        }
-
-        let fadeoutVolMul = 1;
-
-        if (fadingOut) {
-            let fadeoutSample = sample - fadeoutStartSample;
-            if (fadeoutSample >= 0) {
-                let fadeoutTime = fadeoutSample / SAMPLE_RATE;
-
-                let ratio = fadeoutTime / fadeoutLength;
-
-                fadeoutVolMul = 1 - ratio;
-
-                if (fadeoutVolMul <= 0) {
-                    playing = false;
-                }
-            }
-        }
-
-        let valL = 0;
-        let valR = 0;
-        for (let i = 0; i < 16; i++) {
-            if (trackEnables[i]) {
-                let synth = bridge.synthesizers[i];
-                synth.nextSample();
-                valL += synth.valL;
-                valR += synth.valR;
-            }
-        }
-
-        encoder.addSample(valL * 0.5 * fadeoutVolMul, valR * 0.5 * fadeoutVolMul);
-
-        sample++;
-    }
-
-    let elapsed = (performance.now() - startTimestamp) / 1000;
-
-    console.log(
-        `Rendered ${sample} samples in ${Math.round(elapsed * 10) / 10} seconds (${Math.round(sample / elapsed)} samples/s) (${Math.round(sample / elapsed / SAMPLE_RATE * 10) / 10}x realtime speed)
-        Average instruments advanced per sample: ${Math.round((instrumentsAdvanced / sample) * 10) / 10}
-        Stereo separation: ${enableStereoSeparation}
-        Audio anti-aliasing ${enableAntiAliasing}
-        Enable filter: ${enableFilter}
-        Use cubic resampling (check) / Sinc resampling (uncheck): ${useCubicResampler}
-        `
-    );
-
-    downloadUint8Array(name + ".wav", encoder.encode());
-}
 
 function clamp(val, min, max) {
     return Math.min(Math.max(val, min), max);
@@ -3160,41 +3099,41 @@ function playSample(sample) {
 // pureRootNote is an offset from A in 
 /** @returns {number} */
 function midiNoteToHz(note) {
-    if (pureTuning) {
+    if (g_pureTuning) {
         let roundError = note - Math.round(note);
         note = Math.round(note);
 
-        let noteRelRoot = note - 69 - pureTuningRootNote;
+        let noteRelRoot = note - 69 - g_pureTuningRootNote;
         let octave = Math.floor(noteRelRoot / 12);
         let noteInOctave = ((noteRelRoot % 12) + 12) % 12;
 
-        let rootNoteHz = 440 * 2 ** (((pureTuningRootNote + roundError) / 12) + octave);
+        let rootNoteHz = 440 * 2 ** (((g_pureTuningRootNote + roundError) / 12) + octave);
 
         switch (noteInOctave) {
             default:
-            case 0: // Do
+            case 0: // Do / C
                 return rootNoteHz * (1 / 1);
-            case 1: // Di
+            case 1: // Di / C#
                 return rootNoteHz * (256 / 243);
-            case 2: // Re
+            case 2: // Re / D
                 return rootNoteHz * (9 / 8);
-            case 3: // Ri
+            case 3: // Ri / D#
                 return rootNoteHz * (32 / 27);
-            case 4: // Mi
+            case 4: // Mi / E
                 return rootNoteHz * (81 / 64);
-            case 5: // Fa
+            case 5: // Fa / F
                 return rootNoteHz * (4 / 3);
-            case 6: // Fi
+            case 6: // Fi / F#
                 return rootNoteHz * (729 / 512);
-            case 7: // So
+            case 7: // So / G
                 return rootNoteHz * (3 / 2);
-            case 8: // Si
+            case 8: // Si / G#
                 return rootNoteHz * (128 / 81);
-            case 9: // La
+            case 9: // La / A
                 return rootNoteHz * (27 / 16);
-            case 10: // Li
+            case 10: // Li / A#
                 return rootNoteHz * (16 / 9);
-            case 11: // Ti
+            case 11: // Ti / B
                 return rootNoteHz * (243 / 128);
         }
     } else {
