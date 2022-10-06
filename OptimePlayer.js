@@ -2462,6 +2462,8 @@ class ControllerBridge {
     }
 
     tick() {
+        let indexToDelete = -1;
+
         for (let index in this.activeNoteData) {
             let entry = this.activeNoteData[index];
             /** @type {InstrumentRecord} */
@@ -2474,7 +2476,7 @@ class ControllerBridge {
                 // Cut instruments that have ended samples
                 if (!instr.sample.looping && instr.sampleT > instr.sample.data.length) {
                     // @ts-ignore
-                    this.activeNoteData.splice(index, 1);
+                    indexToDelete = index;
                     this.synthesizers[entry.trackNum].cutInstrument(entry.synthInstrIndex);
                 }
 
@@ -2570,7 +2572,7 @@ class ControllerBridge {
                             // ADSR curve hit zero, cut the instrument
                             this.synthesizers[entry.trackNum].cutInstrument(entry.synthInstrIndex);
                             // @ts-ignore
-                            this.activeNoteData.splice(index, 1);
+                            indexToDelete = index;
                             this.notesOn[entry.trackNum][entry.midiNote] = 0;
                         } else {
                             entry.adsrTimer -= instrument.releaseCoefficient[entry.instrumentEntryIndex];
@@ -2581,9 +2583,13 @@ class ControllerBridge {
             }
             else {
                 // @ts-ignore
-                this.activeNoteData.splice(index, 1);
+                indexToDelete = index;
                 this.notesOn[entry.trackNum][entry.midiNote] = 0;
             }
+        }
+
+        if (indexToDelete != -1) {
+            this.activeNoteData.splice(indexToDelete, 1);
         }
 
         this.bpmTimer += this.controller.tracks[0].bpm;
