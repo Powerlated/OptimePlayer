@@ -170,6 +170,9 @@ class BlipBuf {
         if (bufSize < kernelSize * 2) {
             throw 'bufSize needs to be greater than kernelSize * 2';
         }
+        if (kernelSize % 4 != 0) {
+            throw 'kernelSize must be multiple of 16';
+        }
         // Lanzcos kernel
         let key = kernelSize.toString() + normalize + filterRatio + minimumPhase;
         this.kernel = BlipBuf.kernels[key];
@@ -513,11 +516,29 @@ class BlipBuf {
             if (bufPos > this.bufSize)
                 throw `Overflowed buffer (${bufPos} > ${this.bufSize}) `;
         }
-        for (let i = 0; i < this.kernelSize; i++) {
-            let kVal = this.kernel[this.kernelSize * subsamplePos + i];
-            this.bufL[bufPos] += kVal * diff;
-            if (++bufPos >= this.bufSize)
-                bufPos = 0;
+        let kernelSize = this.kernelSize;
+        let kernel = this.kernel;
+        let bufL = this.bufL;
+        let bufSize = this.bufSize;
+        let offs = kernelSize * subsamplePos;
+        let endOffs = offs + kernelSize;
+        while (offs < endOffs) {
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
         }
 
         this.channelValsL[channel] = val;
@@ -1223,7 +1244,7 @@ const MessageType = {
 
 class Sample {
     /**
-    * @param {Float32Array} data 
+    * @param {Float64Array} data 
     * @param {number} frequency
     * @param {number} sampleRate
     * @param {boolean} looping
@@ -1892,7 +1913,7 @@ class SampleSynthesizer {
 
         this.playingIndex = 0;
 
-        let emptySample = new Sample(new Float32Array(1), 440, sampleRate, false, 0);
+        let emptySample = new Sample(new Float64Array(1), 440, sampleRate, false, 0);
 
         for (let i = 0; i < this.instrs.length; i++) {
             this.instrs[i] = new SampleInstrument(this, i, this.sampleRate, emptySample);
@@ -2232,14 +2253,14 @@ const getvoltbl = [
 ];
 
 const squares = [
-    new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5]), 1, 8, true, 0),
-    new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5]), 1, 8, true, 0),
-    new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
-    new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
-    new Sample(new Float32Array([-0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
-    new Sample(new Float32Array([-0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
-    new Sample(new Float32Array([-0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
-    new Sample(new Float32Array([-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5]), 1, 8, true, 0)
+    new Sample(new Float64Array([-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float64Array([-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float64Array([-0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float64Array([-0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float64Array([-0.5, -0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float64Array([-0.5, -0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float64Array([-0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]), 1, 8, true, 0),
+    new Sample(new Float64Array([-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5]), 1, 8, true, 0)
 ];
 
 // based off SND_CalcChannelVolume from pret/pokediamond
@@ -2762,8 +2783,8 @@ async function playSeq(sdat, name) {
 
     currentlyPlayingId = id;
 
-    let bufferL = new Float32Array(BUFFER_SIZE);
-    let bufferR = new Float32Array(BUFFER_SIZE);
+    let bufferL = new Float64Array(BUFFER_SIZE);
+    let bufferR = new Float64Array(BUFFER_SIZE);
 
     let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 5);
     let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
@@ -2858,7 +2879,7 @@ function clamp(val, min, max) {
 }
 
 function decodePcm8(pcm8Data) {
-    let out = new Float32Array(pcm8Data.length);
+    let out = new Float64Array(pcm8Data.length);
 
     for (let i = 0; i < out.length; i++) {
         out[i] = (pcm8Data[i] << 24 >> 24) / 128;
@@ -2868,7 +2889,7 @@ function decodePcm8(pcm8Data) {
 }
 
 function decodePcm16(pcm16Data) {
-    let out = new Float32Array(pcm16Data.length >> 1);
+    let out = new Float64Array(pcm16Data.length >> 1);
 
     for (let i = 0; i < out.length; i++) {
         out[i] = ((read16LE(pcm16Data, i * 2) << 16) >> 16) / 32768;
@@ -2891,7 +2912,7 @@ const adpcmTable = [
 
 // Decodes IMA-ADPCM to PCM16
 function decodeAdpcm(adpcmData) {
-    let out = new Float32Array((adpcmData.length - 4) * 2);
+    let out = new Float64Array((adpcmData.length - 4) * 2);
     let outOffs = 0;
 
     let adpcmIndex = 0;
@@ -2961,15 +2982,15 @@ function decodeWavToSample(wavData, sampleFrequency) {
         }
     }
 
-    return new Sample(Float32Array.from(sampleData), sampleFrequency, sampleRate, false, 0);
+    return new Sample(Float64Array.from(sampleData), sampleFrequency, sampleRate, false, 0);
 }
 
 function playStrm(strmData) {
     const BUFFER_SIZE = 4096;
     const SAMPLE_RATE = 32768;
 
-    let bufferL = new Float32Array(BUFFER_SIZE);
-    let bufferR = new Float32Array(BUFFER_SIZE);
+    let bufferL = new Float64Array(BUFFER_SIZE);
+    let bufferR = new Float64Array(BUFFER_SIZE);
 
     console.log("Number of Samples: " + read32LE(strmData, 0x24));
 
@@ -3059,8 +3080,8 @@ function playSample(sample) {
         const BUFFER_SIZE = 4096;
         const SAMPLE_RATE = sample.sampleRate;
 
-        let bufferL = new Float32Array(BUFFER_SIZE);
-        let bufferR = new Float32Array(BUFFER_SIZE);
+        let bufferL = new Float64Array(BUFFER_SIZE);
+        let bufferR = new Float64Array(BUFFER_SIZE);
 
         let inBufferPos = 0;
         let timer = 0;
