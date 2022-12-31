@@ -351,6 +351,7 @@
                 let startTimestamp = performance.now();
 
                 instrumentsAdvanced = 0;
+                samplesConsidered = 0;
 
                 // keep it under 480 seconds
 
@@ -441,6 +442,7 @@
                     console.log(
                         `Rendered ${sample} samples in ${Math.round(elapsed * 10) / 10} seconds (${Math.round(sample / elapsed)} samples/s) (${Math.round(sample / elapsed / SAMPLE_RATE * 10) / 10}x realtime speed)
                         Average instruments advanced per sample: ${Math.round((instrumentsAdvanced / sample) * 10) / 10}
+                        Average samples considered per sample: ${Math.round((samplesConsidered / sample) * 10) / 10}
                         Stereo separation: ${g_enableStereoSeparation}
                         Audio anti-aliasing ${g_enableAntiAliasing}
                         Enable filter: ${g_enableFilter}
@@ -883,7 +885,9 @@
             function fsVisFrame(time) {
                 fsVisCanvas.width = window.innerWidth;
                 fsVisCanvas.height = window.innerHeight;
-                drawFsVis(fsVisCtx, time, 1);
+                if (fsVisVisible) {
+                    drawFsVis(fsVisCtx, time, 1);
+                }
                 requestAnimationFrame(fsVisFrame);
             }
             requestAnimationFrame(fsVisFrame);

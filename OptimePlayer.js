@@ -14,6 +14,7 @@ let g_useCubicResampler = false;
 
 // Global metrics
 let instrumentsAdvanced = 0;
+let samplesConsidered = 0;
 
 /** @type {ControllerBridge | null} */
 let currentBridge = null;
@@ -516,29 +517,26 @@ class BlipBuf {
             if (bufPos > this.bufSize)
                 throw `Overflowed buffer (${bufPos} > ${this.bufSize}) `;
         }
-        let kernelSize = this.kernelSize;
-        let kernel = this.kernel;
-        let bufL = this.bufL;
-        let bufSize = this.bufSize;
-        let offs = kernelSize * subsamplePos;
-        let endOffs = offs + kernelSize;
+        let offs = this.kernelSize * subsamplePos;
+        let endOffs = offs + this.kernelSize;
         while (offs < endOffs) {
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
-            bufL[bufPos++] += kernel[offs++] * diff; if (bufPos >= bufSize) bufPos = 0;
+            // Unrolling this really, REALLY helps. 
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
+            this.bufL[bufPos++] += this.kernel[offs++] * diff; if (bufPos >= this.bufSize) bufPos = 0;
         }
 
         this.channelValsL[channel] = val;
@@ -965,18 +963,22 @@ class AudioPlayer {
 
     safariHax = false;
 
-    constructor(bufferLength, sampleRate, needMoreSamples) {
+    constructor(bufferLength, needMoreSamples, sampleRate) {
         if (!AudioBuffer.prototype.copyToChannel) this.safariHax = true;
 
         this.bufferLength = bufferLength;
-        this.sampleRate = sampleRate;
         this.needMoreSamples = needMoreSamples;
 
         const AudioContext = window.AudioContext   // Normal browsers
             //@ts-ignore
             || window.webkitAudioContext; // Sigh... Safari
 
-        this.ctx = new AudioContext({ sampleRate: sampleRate });
+        if (sampleRate) {
+            this.ctx = new AudioContext({ sampleRate: sampleRate });
+        } else {
+            this.ctx = new AudioContext();
+        }
+        this.sampleRate = this.ctx.sampleRate;
 
         this.bufferPool = this.genBufferPool(256, this.bufferLength);
 
@@ -1260,18 +1262,25 @@ class Sample {
 
         this.sampleLength = 0;
 
-        this.enableFilter = true;
+        this.resampleMode = ResampleMode.Nearest;
     }
 }
 
-const InstrumentType = {
+const ResampleMode = Object.seal({
+    Nearest: 0,
+    Cubic: 1,
+    BlipBuf: 2,
+    BlipBufLowPass: 3,
+});
+
+const InstrumentType = Object.seal({
     SingleSample: 0x1,
     PsgPulse: 0x2,
     PsgNoise: 0x3,
 
     Drumset: 0x10,
     MultiSample: 0x11
-};
+});
 
 class InstrumentRecord {
     // fRecord = 0x1 - Single-Region Instrument
@@ -1395,43 +1404,55 @@ class SampleInstrument {
         let convertedSampleRate = this.freqRatio * this.sample.sampleRate;
         this.sampleT += this.invSampleRate * convertedSampleRate;
 
-        if (g_useCubicResampler && this.sample.enableFilter) {
-            let subT = this.sampleT % 1;
+        switch (this.sample.resampleMode) {
+            case ResampleMode.Nearest:
+                this.blipBuf.readOutSampleL();
+                this.output = this.getSampleDataAt(Math.floor(this.sampleT)) * this.volume;
 
-            /*
-            // Linear interpolation
-                let val0 = this.getSampleDataAt(Math.floor(this.sampleT));
-                let val1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
+                samplesConsidered++;
+                break;
+            case ResampleMode.Cubic:
+                let subT = this.sampleT % 1;
 
-                let valLerp = (val0 + subT * (val1 - val0));
-                this.output = valLerp * this.volume;
-            */
+                /*
+                // Linear interpolation
+                    let val0 = this.getSampleDataAt(Math.floor(this.sampleT));
+                    let val1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
+    
+                    let valLerp = (val0 + subT * (val1 - val0));
+                    this.output = valLerp * this.volume;
+                */
 
-            let p0 = this.getSampleDataAt(Math.floor(this.sampleT));
-            let p1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
-            let p2 = this.getSampleDataAt(Math.floor(this.sampleT + 2));
-            let p3 = this.getSampleDataAt(Math.floor(this.sampleT + 3));
+                let p0 = this.getSampleDataAt(Math.floor(this.sampleT));
+                let p1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
+                let p2 = this.getSampleDataAt(Math.floor(this.sampleT + 2));
+                let p3 = this.getSampleDataAt(Math.floor(this.sampleT + 3));
 
-            let valCubic = p1 + 0.5 * subT * (p2 - p0 + subT * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + subT * (3.0 * (p1 - p2) + p3 - p0)));
+                samplesConsidered++;
 
-            this.blipBuf.readOutSampleL();
-            this.output = valCubic * this.volume;
-        } else if (g_enableAntiAliasing) {
-            while (this.resampleT < this.sampleT) {
-                let val = this.getSampleDataAt(this.resampleT);
-                this.blipBuf.setValueL(0, this.t, val);
-                this.t += this.sampleRate / convertedSampleRate;
-                this.resampleT++;
-            }
+                let valCubic = p1 + 0.5 * subT * (p2 - p0 + subT * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + subT * (3.0 * (p1 - p2) + p3 - p0)));
 
-            this.output = this.blipBuf.readOutSampleL() * this.volume;
+                this.blipBuf.readOutSampleL();
+                this.output = valCubic * this.volume;
+                break;
+            case ResampleMode.BlipBuf:
+            case ResampleMode.BlipBufLowPass:
+                while (this.resampleT < this.sampleT) {
+                    let val = this.getSampleDataAt(this.resampleT);
+                    this.blipBuf.setValueL(0, this.t, val);
+                    this.t += this.sampleRate / convertedSampleRate;
+                    this.resampleT++;
 
-            if (this.sample.enableFilter) {
-                this.output = this.filter.transform(this.output);
-            }
-        } else {
-            this.blipBuf.readOutSampleL();
-            this.output = this.getSampleDataAt(Math.floor(this.sampleT)) * this.volume;
+                    samplesConsidered++;
+                }
+
+                this.output = this.blipBuf.readOutSampleL() * this.volume;
+
+                if (this.sample.resampleMode == ResampleMode.BlipBufLowPass) {
+                    this.output = this.filter.transform(this.output);
+                }
+                break;
+
         }
     }
 
@@ -2649,14 +2670,19 @@ class ControllerBridge {
 
                                 if (instrument.fRecord == InstrumentType.PsgPulse) {
                                     sample = squares[sampleId];
-                                    sample.enableFilter = false;
+                                    sample.resampleMode = ResampleMode.Nearest;
                                 } else {
                                     sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
-                                    sample.enableFilter = true;
-                                }
-
-                                if (!g_enableFilter) {
-                                    sample.enableFilter = false;
+                                    if (g_useCubicResampler) {
+                                        sample.resampleMode = ResampleMode.Cubic;
+                                    } else if (g_enableAntiAliasing) {
+                                        sample.resampleMode = ResampleMode.BlipBuf;
+                                        if (g_enableFilter) {
+                                            sample.resampleMode = ResampleMode.BlipBufLowPass;
+                                        }
+                                    } else {
+                                        sample.resampleMode = ResampleMode.Nearest;
+                                    }
                                 }
 
                                 // if (msg.fromKeyboard) { 
@@ -2776,8 +2802,11 @@ async function playSeq(sdat, name) {
         currentPlayer?.ctx.close();
     }
 
-    const BUFFER_SIZE = 512;
-    const SAMPLE_RATE = 32768;
+    const BUFFER_SIZE = 1024;
+    let player = new AudioPlayer(BUFFER_SIZE, synthesizeMore, null);
+    currentPlayer = player;
+    const SAMPLE_RATE = player.sampleRate;
+    console.log("Playing with sample rate: " + SAMPLE_RATE);
 
     let id = sdat.sseqNameIdDict[name];
 
@@ -2801,9 +2830,6 @@ async function playSeq(sdat, name) {
     // }
     currentBridge = bridge;
     currentFsVisBridge = fsVisBridge;
-
-    let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
-    currentPlayer = player;
 
     let timer = 0;
     function synthesizeMore() {
@@ -3068,7 +3094,7 @@ function playStrm(strmData) {
         // console.log("Syntheszing more audio");
     }
 
-    let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
+    let player = new AudioPlayer(BUFFER_SIZE, synthesizeMore, SAMPLE_RATE);
     synthesizeMore();
 }
 
@@ -3117,7 +3143,7 @@ function playSample(sample) {
 
         }
 
-        let player = new AudioPlayer(BUFFER_SIZE, SAMPLE_RATE, synthesizeMore);
+        let player = new AudioPlayer(BUFFER_SIZE, synthesizeMore, SAMPLE_RATE);
         synthesizeMore();
         console.log("start");
     }));
