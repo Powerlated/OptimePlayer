@@ -118,7 +118,8 @@
         }
     </style>
 
-    <script src="OptimePlayer.js"></script>
+    <script src="OptimePlayer/dsp.js"></script>
+    <script src="OptimePlayer/OptimePlayer.js"></script>
 
     <script>
         function downloadFileFromUrl(url) {
@@ -226,10 +227,6 @@
 
         window.onload = async () => {
             console.log("Optime Player");
-
-            synthtestSample = decodeWavToSample(await downloadFileFromUrl("assets/synthtest-amp.wav"), 440 * 2 ** ((9 - 12) / 12));
-            synthtest2Sample = decodeWavToSample(await downloadFileFromUrl("assets/synthtest2-amp.wav"), 440 * 2 ** ((3 - 36) / 12));
-
 
             /** @type {HTMLElement} */
             let dropZone = document.querySelector('#drop-zone');
