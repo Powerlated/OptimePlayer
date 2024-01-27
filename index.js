@@ -56,7 +56,7 @@ async function loadNdsRom(data) {
     }
 
     for (let i = 0; i < res.length; i++) {
-        let sdat = parseSdatFromRom(data, res[i]);
+        let sdat = Sdat.parseFromRom(data, res[i]);
 
         if (sdat != null) {
             for (let i = 0; i < sdat.sseqIdNameDict.length; i++) {

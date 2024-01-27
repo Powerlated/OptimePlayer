@@ -39,7 +39,7 @@ function loadSdatsFromRom(data) {
     }
 
     for (let i = 0; i < res.length; i++) {
-        let sdat = parseSdatFromRom(data, res[i]);
+        let sdat = Sdat.parseFromRom(data, res[i]);
 
         if (sdat != null) {
             sdats.push(sdat);

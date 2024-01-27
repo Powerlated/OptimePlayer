@@ -487,6 +487,427 @@ class Sdat {
         /** @type {Object.<number, Sample[]>} */
         this.sampleArchives = {};
     }
+
+    /**
+     * @param {number[] | Uint8Array} data
+     * @param {number} offset
+     */
+    static parseFromRom(data, offset) {
+        let sdat = new Sdat();
+
+        let sdatSize = read32LE(data, offset + 0x8);
+        console.log("SDAT file size: " + sdatSize);
+
+        let sdatData = new Uint8Array(sdatSize);
+
+        for (let i = 0; i < sdatSize; i++) {
+            sdatData[i] = data[offset + i];
+        }
+
+        // downloadUint8Array("OptimePlayer extracted.sdat", sdatData);
+
+        let numOfBlocks = read16LE(sdatData, 0xE);
+        let headerSize = read16LE(sdatData, 0xC);
+
+        console.log("Number of Blocks: " + numOfBlocks);
+        console.log("Header Size: " + headerSize);
+
+        if (headerSize > 256) {
+            console.log("Header size too big (> 256), rejecting.");
+            return;
+        }
+
+        let symbOffs = read32LE(sdatData, 0x10);
+        let symbSize = read32LE(sdatData, 0x14);
+        let infoOffs = read32LE(sdatData, 0x18);
+        let infoSize = read32LE(sdatData, 0x1C);
+        let fatOffs = read32LE(sdatData, 0x20);
+        let fatSize = read32LE(sdatData, 0x24);
+        let fileOffs = read32LE(sdatData, 0x28);
+        let fileSize = read32LE(sdatData, 0x2C);
+
+        console.log("SYMB Block Offset: " + hexN(symbOffs, 8));
+        console.log("SYMB Block Size: " + hexN(symbSize, 8));
+        console.log("INFO Block Offset: " + hexN(infoOffs, 8));
+        console.log("INFO Block Size: " + hexN(infoSize, 8));
+        console.log("FAT  Block Offset: " + hexN(fatOffs, 8));
+        console.log("FAT  Block Size: " + hexN(fatSize, 8));
+        console.log("FILE Block Offset: " + hexN(fileOffs, 8));
+        console.log("FILE Block Size: " + hexN(fileSize, 8));
+
+        // SYMB processing
+        {
+            // SSEQ symbols
+            let symbSseqListOffs = read32LE(sdatData, symbOffs + 0x8);
+            let symbSseqListNumEntries = read32LE(sdatData, symbOffs + symbSseqListOffs);
+
+            console.log("SYMB Bank List Offset: " + hexN(symbSseqListOffs, 8));
+            console.log("SYMB Number of SSEQ entries: " + symbSseqListNumEntries);
+
+            for (let i = 0; i < symbSseqListNumEntries; i++) {
+                let sseqNameOffs = read32LE(sdatData, symbOffs + symbSseqListOffs + 4 + i * 4);
+
+                let sseqNameArr = [];
+                let sseqNameCharOffs = 0;
+                while (true) {
+                    let char = sdatData[symbOffs + sseqNameOffs + sseqNameCharOffs];
+                    if (char === 0) break; // check for null terminator
+                    sseqNameCharOffs++;
+                    sseqNameArr.push(char);
+                }
+
+                // for some reason games have a ton of empty symbols
+                if (sseqNameOffs !== 0) {
+                    let seqName = String.fromCharCode(...sseqNameArr);
+
+                    sdat.sseqNameIdDict[seqName] = i;
+                    sdat.sseqIdNameDict[i] = seqName;
+                }
+            }
+        }
+
+        {
+            // SSAR symbols
+            let symbSsarListOffs = read32LE(sdatData, symbOffs + 0xC);
+            let symbSsarListNumEntries = read32LE(sdatData, symbOffs + symbSsarListOffs);
+
+            console.log("SYMB Number of SSAR entries: " + symbSsarListNumEntries);
+        }
+
+        {
+            // BANK symbols
+            let symbBankListOffs = read32LE(sdatData, symbOffs + 0x10);
+            let symbBankListNumEntries = read32LE(sdatData, symbOffs + symbBankListOffs);
+
+            console.log("SYMB Bank List Offset: " + hexN(symbBankListOffs, 8));
+            console.log("SYMB Number of BANK entries: " + symbBankListNumEntries);
+
+            for (let i = 0; i < symbBankListNumEntries; i++) {
+                let symbNameOffs = read32LE(sdatData, symbOffs + symbBankListOffs + 4 + i * 4);
+                if (i === 0) console.log("NDS file addr of BANK list 1st entry: " + hexN(offset + symbOffs + symbNameOffs, 8));
+
+                let bankNameArr = [];
+                let bankNameCharOffs = 0;
+                while (true) {
+                    let char = sdatData[symbOffs + symbNameOffs + bankNameCharOffs];
+                    if (char === 0) break; // check for null terminator
+                    bankNameCharOffs++;
+                    bankNameArr.push(char);
+                }
+
+                // for some reason games have a ton of empty symbols
+                if (symbNameOffs !== 0) {
+                    let bankName = String.fromCharCode(...bankNameArr);
+
+                    sdat.sbnkNameIdDict[bankName] = i;
+                    sdat.sbnkIdNameDict[i] = bankName;
+                }
+            }
+        }
+
+        {
+            // SWAR symbols
+            let symbSwarListOffs = read32LE(sdatData, symbOffs + 0x14);
+            let symbSwarListNumEntries = read32LE(sdatData, symbOffs + symbSwarListOffs);
+
+            console.log("SYMB Number of SWAR entries: " + symbSwarListNumEntries);
+        }
+
+        // INFO processing
+        {
+            // SSEQ info
+            let infoSseqListOffs = read32LE(sdatData, infoOffs + 0x8);
+            let infoSseqListNumEntries = read32LE(sdatData, infoOffs + infoSseqListOffs);
+            console.log("INFO Number of SSEQ entries: " + infoSseqListNumEntries);
+
+            for (let i = 0; i < infoSseqListNumEntries; i++) {
+                let infoSseqNameOffs = read32LE(sdatData, infoOffs + infoSseqListOffs + 4 + i * 4);
+
+                if (infoSseqNameOffs !== 0) {
+                    let info = new SseqInfo();
+                    info.fileId = read16LE(sdatData, infoOffs + infoSseqNameOffs + 0);
+                    info.bank = read16LE(sdatData, infoOffs + infoSseqNameOffs + 4);
+                    info.volume = sdatData[infoOffs + infoSseqNameOffs + 6];
+                    info.cpr = sdatData[infoOffs + infoSseqNameOffs + 7];
+                    info.ppr = sdatData[infoOffs + infoSseqNameOffs + 8];
+                    info.ply = sdatData[infoOffs + infoSseqNameOffs + 9];
+
+                    sdat.sseqInfos[i] = info;
+                    sdat.sseqList.push(i);
+                } else {
+                    sdat.sseqInfos[i] = null;
+                }
+            }
+        }
+
+        {
+            // SSAR info
+            let infoSsarListOffs = read32LE(sdatData, infoOffs + 0xC);
+            let infoSsarListNumEntries = read32LE(sdatData, infoOffs + infoSsarListOffs);
+            console.log("INFO Number of SSAR entries: " + infoSsarListNumEntries);
+
+            for (let i = 0; i < infoSsarListNumEntries; i++) {
+                let infoSsarNameOffs = read32LE(sdatData, infoOffs + infoSsarListOffs + 4 + i * 4);
+
+                if (infoSsarNameOffs !== 0) {
+                    let info = new SsarInfo();
+                    info.fileId = read16LE(sdatData, infoOffs + infoSsarNameOffs + 0);
+
+                    sdat.ssarInfos[i] = info;
+                } else {
+                    sdat.ssarInfos[i] = null;
+                }
+            }
+        }
+
+        {
+            // BANK info
+            let infoBankListOffs = read32LE(sdatData, infoOffs + 0x10);
+            let infoBankListNumEntries = read32LE(sdatData, infoOffs + infoBankListOffs);
+            console.log("INFO Number of BANK entries: " + infoBankListNumEntries);
+
+            for (let i = 0; i < infoBankListNumEntries; i++) {
+                let infoBankNameOffs = read32LE(sdatData, infoOffs + infoBankListOffs + 4 + i * 4);
+
+                if (infoBankNameOffs !== 0) {
+                    let info = new BankInfo();
+                    info.fileId = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x0);
+                    info.swarId[0] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x4);
+                    info.swarId[1] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x6);
+                    info.swarId[2] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x8);
+                    info.swarId[3] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0xA);
+
+                    sdat.sbnkInfos[i] = info;
+                } else {
+                    sdat.sbnkInfos[i] = null;
+                }
+            }
+        }
+
+        {
+            // SWAR info
+            let infoSwarListOffs = read32LE(sdatData, infoOffs + 0x14);
+            let infoSwarListNumEntries = read32LE(sdatData, infoOffs + infoSwarListOffs);
+            console.log("INFO Number of SWAR entries: " + infoSwarListNumEntries);
+
+            for (let i = 0; i < infoSwarListNumEntries; i++) {
+                let infoSwarNameOffs = read32LE(sdatData, infoOffs + infoSwarListOffs + 4 + i * 4);
+
+                if (infoSwarNameOffs) {
+                    let info = new SwarInfo();
+                    info.fileId = read16LE(sdatData, infoOffs + infoSwarNameOffs + 0x0);
+
+                    sdat.swarInfos[i] = info;
+                } else {
+                    sdat.swarInfos[i] = null;
+                }
+            }
+        }
+
+        // FAT / FILE processing
+        let fatNumFiles = read32LE(sdatData, fatOffs + 8);
+        console.log("FAT Number of files: " + fatNumFiles);
+
+        for (let i = 0; i < fatNumFiles; i++) {
+            let fileEntryOffs = fatOffs + 0xC + i * 0x10;
+
+            let fileDataOffs = read32LE(sdatData, fileEntryOffs);
+            let fileSize = read32LE(sdatData, fileEntryOffs + 4);
+
+            let fileData = new Uint8Array(fileSize);
+
+            for (let j = 0; j < fileSize; j++) {
+                fileData[j] = sdatData[fileDataOffs + j];
+            }
+
+            sdat.fat[i] = fileData;
+        }
+
+        // Decode sound banks
+        for (let i = 0; i < sdat.sbnkInfos.length; i++) {
+            let bank = new Bank();
+
+            let bankInfo = sdat.sbnkInfos[i];
+
+            if (bankInfo !== null) {
+                let bankFile = sdat.fat[bankInfo.fileId];
+
+                let numberOfInstruments = read32LE(bankFile, 0x38);
+                if (g_debug)
+                    console.log(`Bank ${i} / ${sdat.sbnkIdNameDict[i]}: ${numberOfInstruments} instruments`);
+                for (let j = 0; j < numberOfInstruments; j++) {
+                    let fRecord = bankFile[0x3C + j * 4];
+                    let recordOffset = read16LE(bankFile, 0x3C + j * 4 + 1);
+
+                    let instrument = new InstrumentRecord();
+                    instrument.fRecord = fRecord;
+
+                    /**
+                     * Thanks to ipatix and pret/pokediamond
+                     * @param {number} vol
+                     */
+                    function CalcDecayCoeff(vol) {
+                        if (vol === 127)
+                            return 0xFFFF;
+                        else if (vol === 126)
+                            return 0x3C00;
+                        else if (vol < 50)
+                            return (vol * 2 + 1) & 0xFFFF;
+                        else
+                            return (Math.floor(0x1E00 / (126 - vol))) & 0xFFFF;
+                    }
+
+                    /**
+                     * @param {number} attack
+                     * Thanks to ipatix and pret/pokediamond
+                     */
+                    function getEffectiveAttack(attack) {
+                        if (attack < 109)
+                            return 255 - attack;
+                        else
+                            return sAttackCoeffTable[127 - attack];
+                    }
+
+                    /**
+                     * Thanks to ipatix and pret/pokediamond
+                     * @param {number} sustain
+                     */
+                    function getSustainLevel(sustain) {
+                        return SNDi_DecibelSquareTable[sustain] << 7;
+                    }
+
+                    /**
+                     * @param {number} index
+                     * @param {number} offset
+                     */
+                    function readRecordData(index, offset) {
+                        instrument.swavInfoId[index] = read16LE(bankFile, recordOffset + 0x0 + offset);
+                        instrument.swarInfoId[index] = read16LE(bankFile, recordOffset + 0x2 + offset);
+                        instrument.noteNumber[index] = bankFile[recordOffset + 0x4 + offset];
+                        instrument.attack[index] = bankFile[recordOffset + 0x5 + offset];
+                        instrument.attackCoefficient[index] = getEffectiveAttack(instrument.attack[index]);
+                        instrument.decay[index] = bankFile[recordOffset + 0x6 + offset];
+                        instrument.decayCoefficient[index] = CalcDecayCoeff(instrument.decay[index]);
+                        instrument.sustain[index] = bankFile[recordOffset + 0x7 + offset];
+                        instrument.sustainLevel[index] = getSustainLevel(instrument.sustain[index]);
+                        instrument.release[index] = bankFile[recordOffset + 0x8 + offset];
+                        instrument.releaseCoefficient[index] = CalcDecayCoeff(instrument.release[index]);
+                        instrument.pan[index] = bankFile[recordOffset + 0x9 + offset];
+                    }
+
+                    switch (fRecord) {
+                        case 0: // Empty
+                            break;
+
+                        case InstrumentType.SingleSample: // Sample
+                        case InstrumentType.PsgPulse: // PSG Pulse
+                        case InstrumentType.PsgNoise: // PSG Noise
+                            readRecordData(0, 0);
+                            break;
+
+                        case InstrumentType.Drumset: // Drumset
+                        {
+                            let instrumentCount = bankFile[recordOffset + 1] - bankFile[recordOffset] + 1;
+
+                            instrument.lowerNote = bankFile[recordOffset + 0];
+                            instrument.upperNote = bankFile[recordOffset + 1];
+
+                            for (let k = 0; k < instrumentCount; k++) {
+                                readRecordData(k, 4 + k * 12);
+                            }
+                            break;
+                        }
+                        case InstrumentType.MultiSample: // Multi-Sample Instrument
+                        {
+                            let instrumentCount = 0;
+
+                            for (let k = 0; k < 8; k++) {
+                                let end = bankFile[recordOffset + k];
+                                instrument.regionEnd[k] = end;
+                                if (end === 0) {
+                                    instrumentCount = k;
+                                    break;
+                                } else if (end === 0x7F) {
+                                    instrumentCount = k + 1;
+                                    break;
+                                }
+                            }
+
+                            for (let k = 0; k < instrumentCount; k++) {
+                                readRecordData(k, 10 + k * 12);
+                            }
+                            break;
+                        }
+
+                        default:
+                            alert(`Instrument ${j}: Invalid fRecord: ${fRecord} Offset:${recordOffset}`);
+                            break;
+                    }
+
+                    bank.instruments[j] = instrument;
+                }
+
+                sdat.banks[i] = bank;
+            }
+        }
+
+        // Decode sample archives
+        for (let i = 0; i < sdat.swarInfos.length; i++) {
+            let archive = [];
+
+            let swarInfo = sdat.swarInfos[i];
+            if (swarInfo !== null) {
+                let swarFile = sdat.fat[swarInfo.fileId];
+
+                let sampleCount = read32LE(swarFile, 0x38);
+                for (let j = 0; j < sampleCount; j++) {
+                    let sampleOffset = read32LE(swarFile, 0x3C + j * 4);
+
+                    let wavType = swarFile[sampleOffset + 0];
+                    let loopFlag = swarFile[sampleOffset + 1];
+                    let sampleRate = read16LE(swarFile, sampleOffset + 2);
+                    let swarLoopOffset = read16LE(swarFile, sampleOffset + 6); // in 4-byte units
+                    let swarSampleLength = read32LE(swarFile, sampleOffset + 8); // in 4-byte units (excluding ADPCM header if any)
+
+                    let sampleDataLength = (swarLoopOffset + swarSampleLength) * 4;
+
+                    let sampleData = new Uint8Array(swarFile.buffer, sampleOffset + 0xC, sampleDataLength);
+
+                    let decoded;
+                    let loopPoint = 0;
+
+                    switch (wavType) {
+                        case 0: // PCM8
+                            loopPoint = swarLoopOffset * 4;
+                            decoded = decodePcm8(sampleData);
+                            // console.log(`Archive ${i}, Sample ${j}: PCM8`);
+                            break;
+                        case 1: // PCM16
+                            loopPoint = swarLoopOffset * 2;
+                            decoded = decodePcm16(sampleData);
+                            // console.log(`Archive ${i}, Sample ${j}: PCM16`);
+                            break;
+                        case 2: // IMA-ADPCM
+                            loopPoint = swarLoopOffset * 8 - 8;
+                            decoded = decodeAdpcm(sampleData);
+                            // console.log(`Archive ${i}, Sample ${j}: ADPCM`);
+                            break;
+                        default:
+                            throw new Error();
+                    }
+
+                    if (decoded !== null) {
+                        archive[j] = new Sample(decoded, 440, sampleRate, loopFlag !== 0, loopPoint);
+                        archive[j].sampleLength = swarSampleLength * 4;
+                    }
+                }
+
+                sdat.sampleArchives[i] = archive;
+            }
+        }
+
+        return sdat;
+    }
 }
 
 class Message {
@@ -2312,427 +2733,6 @@ function midiNoteToHz(note) {
     } else {
         return 440 * 2 ** ((note - 69) / 12);
     }
-}
-
-/**
- * @param {number[] | Uint8Array} data
- * @param {number} offset
- */
-function parseSdatFromRom(data, offset) {
-    let sdat = new Sdat();
-
-    let sdatSize = read32LE(data, offset + 0x8);
-    console.log("SDAT file size: " + sdatSize);
-
-    let sdatData = new Uint8Array(sdatSize);
-
-    for (let i = 0; i < sdatSize; i++) {
-        sdatData[i] = data[offset + i];
-    }
-
-    // downloadUint8Array("OptimePlayer extracted.sdat", sdatData);
-
-    let numOfBlocks = read16LE(sdatData, 0xE);
-    let headerSize = read16LE(sdatData, 0xC);
-
-    console.log("Number of Blocks: " + numOfBlocks);
-    console.log("Header Size: " + headerSize);
-
-    if (headerSize > 256) {
-        console.log("Header size too big (> 256), rejecting.");
-        return;
-    }
-
-    let symbOffs = read32LE(sdatData, 0x10);
-    let symbSize = read32LE(sdatData, 0x14);
-    let infoOffs = read32LE(sdatData, 0x18);
-    let infoSize = read32LE(sdatData, 0x1C);
-    let fatOffs = read32LE(sdatData, 0x20);
-    let fatSize = read32LE(sdatData, 0x24);
-    let fileOffs = read32LE(sdatData, 0x28);
-    let fileSize = read32LE(sdatData, 0x2C);
-
-    console.log("SYMB Block Offset: " + hexN(symbOffs, 8));
-    console.log("SYMB Block Size: " + hexN(symbSize, 8));
-    console.log("INFO Block Offset: " + hexN(infoOffs, 8));
-    console.log("INFO Block Size: " + hexN(infoSize, 8));
-    console.log("FAT  Block Offset: " + hexN(fatOffs, 8));
-    console.log("FAT  Block Size: " + hexN(fatSize, 8));
-    console.log("FILE Block Offset: " + hexN(fileOffs, 8));
-    console.log("FILE Block Size: " + hexN(fileSize, 8));
-
-    // SYMB processing
-    {
-        // SSEQ symbols
-        let symbSseqListOffs = read32LE(sdatData, symbOffs + 0x8);
-        let symbSseqListNumEntries = read32LE(sdatData, symbOffs + symbSseqListOffs);
-
-        console.log("SYMB Bank List Offset: " + hexN(symbSseqListOffs, 8));
-        console.log("SYMB Number of SSEQ entries: " + symbSseqListNumEntries);
-
-        for (let i = 0; i < symbSseqListNumEntries; i++) {
-            let sseqNameOffs = read32LE(sdatData, symbOffs + symbSseqListOffs + 4 + i * 4);
-
-            let sseqNameArr = [];
-            let sseqNameCharOffs = 0;
-            while (true) {
-                let char = sdatData[symbOffs + sseqNameOffs + sseqNameCharOffs];
-                if (char === 0) break; // check for null terminator
-                sseqNameCharOffs++;
-                sseqNameArr.push(char);
-            }
-
-            // for some reason games have a ton of empty symbols
-            if (sseqNameOffs !== 0) {
-                let seqName = String.fromCharCode(...sseqNameArr);
-
-                sdat.sseqNameIdDict[seqName] = i;
-                sdat.sseqIdNameDict[i] = seqName;
-            }
-        }
-    }
-
-    {
-        // SSAR symbols
-        let symbSsarListOffs = read32LE(sdatData, symbOffs + 0xC);
-        let symbSsarListNumEntries = read32LE(sdatData, symbOffs + symbSsarListOffs);
-
-        console.log("SYMB Number of SSAR entries: " + symbSsarListNumEntries);
-    }
-
-    {
-        // BANK symbols
-        let symbBankListOffs = read32LE(sdatData, symbOffs + 0x10);
-        let symbBankListNumEntries = read32LE(sdatData, symbOffs + symbBankListOffs);
-
-        console.log("SYMB Bank List Offset: " + hexN(symbBankListOffs, 8));
-        console.log("SYMB Number of BANK entries: " + symbBankListNumEntries);
-
-        for (let i = 0; i < symbBankListNumEntries; i++) {
-            let symbNameOffs = read32LE(sdatData, symbOffs + symbBankListOffs + 4 + i * 4);
-            if (i === 0) console.log("NDS file addr of BANK list 1st entry: " + hexN(offset + symbOffs + symbNameOffs, 8));
-
-            let bankNameArr = [];
-            let bankNameCharOffs = 0;
-            while (true) {
-                let char = sdatData[symbOffs + symbNameOffs + bankNameCharOffs];
-                if (char === 0) break; // check for null terminator
-                bankNameCharOffs++;
-                bankNameArr.push(char);
-            }
-
-            // for some reason games have a ton of empty symbols
-            if (symbNameOffs !== 0) {
-                let bankName = String.fromCharCode(...bankNameArr);
-
-                sdat.sbnkNameIdDict[bankName] = i;
-                sdat.sbnkIdNameDict[i] = bankName;
-            }
-        }
-    }
-
-    {
-        // SWAR symbols
-        let symbSwarListOffs = read32LE(sdatData, symbOffs + 0x14);
-        let symbSwarListNumEntries = read32LE(sdatData, symbOffs + symbSwarListOffs);
-
-        console.log("SYMB Number of SWAR entries: " + symbSwarListNumEntries);
-    }
-
-    // INFO processing
-    {
-        // SSEQ info
-        let infoSseqListOffs = read32LE(sdatData, infoOffs + 0x8);
-        let infoSseqListNumEntries = read32LE(sdatData, infoOffs + infoSseqListOffs);
-        console.log("INFO Number of SSEQ entries: " + infoSseqListNumEntries);
-
-        for (let i = 0; i < infoSseqListNumEntries; i++) {
-            let infoSseqNameOffs = read32LE(sdatData, infoOffs + infoSseqListOffs + 4 + i * 4);
-
-            if (infoSseqNameOffs !== 0) {
-                let info = new SseqInfo();
-                info.fileId = read16LE(sdatData, infoOffs + infoSseqNameOffs + 0);
-                info.bank = read16LE(sdatData, infoOffs + infoSseqNameOffs + 4);
-                info.volume = sdatData[infoOffs + infoSseqNameOffs + 6];
-                info.cpr = sdatData[infoOffs + infoSseqNameOffs + 7];
-                info.ppr = sdatData[infoOffs + infoSseqNameOffs + 8];
-                info.ply = sdatData[infoOffs + infoSseqNameOffs + 9];
-
-                sdat.sseqInfos[i] = info;
-                sdat.sseqList.push(i);
-            } else {
-                sdat.sseqInfos[i] = null;
-            }
-        }
-    }
-
-    {
-        // SSAR info
-        let infoSsarListOffs = read32LE(sdatData, infoOffs + 0xC);
-        let infoSsarListNumEntries = read32LE(sdatData, infoOffs + infoSsarListOffs);
-        console.log("INFO Number of SSAR entries: " + infoSsarListNumEntries);
-
-        for (let i = 0; i < infoSsarListNumEntries; i++) {
-            let infoSsarNameOffs = read32LE(sdatData, infoOffs + infoSsarListOffs + 4 + i * 4);
-
-            if (infoSsarNameOffs !== 0) {
-                let info = new SsarInfo();
-                info.fileId = read16LE(sdatData, infoOffs + infoSsarNameOffs + 0);
-
-                sdat.ssarInfos[i] = info;
-            } else {
-                sdat.ssarInfos[i] = null;
-            }
-        }
-    }
-
-    {
-        // BANK info
-        let infoBankListOffs = read32LE(sdatData, infoOffs + 0x10);
-        let infoBankListNumEntries = read32LE(sdatData, infoOffs + infoBankListOffs);
-        console.log("INFO Number of BANK entries: " + infoBankListNumEntries);
-
-        for (let i = 0; i < infoBankListNumEntries; i++) {
-            let infoBankNameOffs = read32LE(sdatData, infoOffs + infoBankListOffs + 4 + i * 4);
-
-            if (infoBankNameOffs !== 0) {
-                let info = new BankInfo();
-                info.fileId = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x0);
-                info.swarId[0] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x4);
-                info.swarId[1] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x6);
-                info.swarId[2] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x8);
-                info.swarId[3] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0xA);
-
-                sdat.sbnkInfos[i] = info;
-            } else {
-                sdat.sbnkInfos[i] = null;
-            }
-        }
-    }
-
-    {
-        // SWAR info
-        let infoSwarListOffs = read32LE(sdatData, infoOffs + 0x14);
-        let infoSwarListNumEntries = read32LE(sdatData, infoOffs + infoSwarListOffs);
-        console.log("INFO Number of SWAR entries: " + infoSwarListNumEntries);
-
-        for (let i = 0; i < infoSwarListNumEntries; i++) {
-            let infoSwarNameOffs = read32LE(sdatData, infoOffs + infoSwarListOffs + 4 + i * 4);
-
-            if (infoSwarNameOffs) {
-                let info = new SwarInfo();
-                info.fileId = read16LE(sdatData, infoOffs + infoSwarNameOffs + 0x0);
-
-                sdat.swarInfos[i] = info;
-            } else {
-                sdat.swarInfos[i] = null;
-            }
-        }
-    }
-
-    // FAT / FILE processing
-    let fatNumFiles = read32LE(sdatData, fatOffs + 8);
-    console.log("FAT Number of files: " + fatNumFiles);
-
-    for (let i = 0; i < fatNumFiles; i++) {
-        let fileEntryOffs = fatOffs + 0xC + i * 0x10;
-
-        let fileDataOffs = read32LE(sdatData, fileEntryOffs);
-        let fileSize = read32LE(sdatData, fileEntryOffs + 4);
-
-        let fileData = new Uint8Array(fileSize);
-
-        for (let j = 0; j < fileSize; j++) {
-            fileData[j] = sdatData[fileDataOffs + j];
-        }
-
-        sdat.fat[i] = fileData;
-    }
-
-    // Decode sound banks
-    for (let i = 0; i < sdat.sbnkInfos.length; i++) {
-        let bank = new Bank();
-
-        let bankInfo = sdat.sbnkInfos[i];
-
-        if (bankInfo !== null) {
-            let bankFile = sdat.fat[bankInfo.fileId];
-
-            let numberOfInstruments = read32LE(bankFile, 0x38);
-            if (g_debug)
-                console.log(`Bank ${i} / ${sdat.sbnkIdNameDict[i]}: ${numberOfInstruments} instruments`);
-            for (let j = 0; j < numberOfInstruments; j++) {
-                let fRecord = bankFile[0x3C + j * 4];
-                let recordOffset = read16LE(bankFile, 0x3C + j * 4 + 1);
-
-                let instrument = new InstrumentRecord();
-                instrument.fRecord = fRecord;
-
-                /**
-                 * Thanks to ipatix and pret/pokediamond
-                 * @param {number} vol
-                 */
-                function CalcDecayCoeff(vol) {
-                    if (vol === 127)
-                        return 0xFFFF;
-                    else if (vol === 126)
-                        return 0x3C00;
-                    else if (vol < 50)
-                        return (vol * 2 + 1) & 0xFFFF;
-                    else
-                        return (Math.floor(0x1E00 / (126 - vol))) & 0xFFFF;
-                }
-
-                /**
-                 * @param {number} attack
-                 * Thanks to ipatix and pret/pokediamond
-                 */
-                function getEffectiveAttack(attack) {
-                    if (attack < 109)
-                        return 255 - attack;
-                    else
-                        return sAttackCoeffTable[127 - attack];
-                }
-
-                /**
-                 * Thanks to ipatix and pret/pokediamond
-                 * @param {number} sustain
-                 */
-                function getSustainLevel(sustain) {
-                    return SNDi_DecibelSquareTable[sustain] << 7;
-                }
-
-                /**
-                 * @param {number} index
-                 * @param {number} offset
-                 */
-                function readRecordData(index, offset) {
-                    instrument.swavInfoId[index] = read16LE(bankFile, recordOffset + 0x0 + offset);
-                    instrument.swarInfoId[index] = read16LE(bankFile, recordOffset + 0x2 + offset);
-                    instrument.noteNumber[index] = bankFile[recordOffset + 0x4 + offset];
-                    instrument.attack[index] = bankFile[recordOffset + 0x5 + offset];
-                    instrument.attackCoefficient[index] = getEffectiveAttack(instrument.attack[index]);
-                    instrument.decay[index] = bankFile[recordOffset + 0x6 + offset];
-                    instrument.decayCoefficient[index] = CalcDecayCoeff(instrument.decay[index]);
-                    instrument.sustain[index] = bankFile[recordOffset + 0x7 + offset];
-                    instrument.sustainLevel[index] = getSustainLevel(instrument.sustain[index]);
-                    instrument.release[index] = bankFile[recordOffset + 0x8 + offset];
-                    instrument.releaseCoefficient[index] = CalcDecayCoeff(instrument.release[index]);
-                    instrument.pan[index] = bankFile[recordOffset + 0x9 + offset];
-                }
-
-                switch (fRecord) {
-                    case 0: // Empty
-                        break;
-
-                    case InstrumentType.SingleSample: // Sample
-                    case InstrumentType.PsgPulse: // PSG Pulse
-                    case InstrumentType.PsgNoise: // PSG Noise
-                        readRecordData(0, 0);
-                        break;
-
-                    case InstrumentType.Drumset: // Drumset 
-                    {
-                        let instrumentCount = bankFile[recordOffset + 1] - bankFile[recordOffset] + 1;
-
-                        instrument.lowerNote = bankFile[recordOffset + 0];
-                        instrument.upperNote = bankFile[recordOffset + 1];
-
-                        for (let k = 0; k < instrumentCount; k++) {
-                            readRecordData(k, 4 + k * 12);
-                        }
-                        break;
-                    }
-                    case InstrumentType.MultiSample: // Multi-Sample Instrument
-                    {
-                        let instrumentCount = 0;
-
-                        for (let k = 0; k < 8; k++) {
-                            let end = bankFile[recordOffset + k];
-                            instrument.regionEnd[k] = end;
-                            if (end === 0) {
-                                instrumentCount = k;
-                                break;
-                            } else if (end === 0x7F) {
-                                instrumentCount = k + 1;
-                                break;
-                            }
-                        }
-
-                        for (let k = 0; k < instrumentCount; k++) {
-                            readRecordData(k, 10 + k * 12);
-                        }
-                        break;
-                    }
-
-                    default:
-                        alert(`Instrument ${j}: Invalid fRecord: ${fRecord} Offset:${recordOffset}`);
-                        break;
-                }
-
-                bank.instruments[j] = instrument;
-            }
-
-            sdat.banks[i] = bank;
-        }
-    }
-
-    // Decode sample archives
-    for (let i = 0; i < sdat.swarInfos.length; i++) {
-        let archive = [];
-
-        let swarInfo = sdat.swarInfos[i];
-        if (swarInfo !== null) {
-            let swarFile = sdat.fat[swarInfo.fileId];
-
-            let sampleCount = read32LE(swarFile, 0x38);
-            for (let j = 0; j < sampleCount; j++) {
-                let sampleOffset = read32LE(swarFile, 0x3C + j * 4);
-
-                let wavType = swarFile[sampleOffset + 0];
-                let loopFlag = swarFile[sampleOffset + 1];
-                let sampleRate = read16LE(swarFile, sampleOffset + 2);
-                let swarLoopOffset = read16LE(swarFile, sampleOffset + 6); // in 4-byte units
-                let swarSampleLength = read32LE(swarFile, sampleOffset + 8); // in 4-byte units (excluding ADPCM header if any)
-
-                let sampleDataLength = (swarLoopOffset + swarSampleLength) * 4;
-
-                let sampleData = new Uint8Array(swarFile.buffer, sampleOffset + 0xC, sampleDataLength);
-
-                let decoded;
-                let loopPoint = 0;
-
-                switch (wavType) {
-                    case 0: // PCM8
-                        loopPoint = swarLoopOffset * 4;
-                        decoded = decodePcm8(sampleData);
-                        // console.log(`Archive ${i}, Sample ${j}: PCM8`);
-                        break;
-                    case 1: // PCM16
-                        loopPoint = swarLoopOffset * 2;
-                        decoded = decodePcm16(sampleData);
-                        // console.log(`Archive ${i}, Sample ${j}: PCM16`);
-                        break;
-                    case 2: // IMA-ADPCM
-                        loopPoint = swarLoopOffset * 8 - 8;
-                        decoded = decodeAdpcm(sampleData);
-                        // console.log(`Archive ${i}, Sample ${j}: ADPCM`);
-                        break;
-                    default:
-                        throw new Error();
-                }
-
-                if (decoded !== null) {
-                    archive[j] = new Sample(decoded, 440, sampleRate, loopFlag !== 0, loopPoint);
-                    archive[j].sampleLength = swarSampleLength * 4;
-                }
-            }
-
-            sdat.sampleArchives[i] = archive;
-        }
-    }
-
-    return sdat;
 }
 
 /**
