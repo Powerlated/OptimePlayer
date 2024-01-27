@@ -7,11 +7,11 @@ function downloadFileFromUrl(url) {
             if (client.status != 404) {
                 if (client.response instanceof ArrayBuffer) {
                     resolve(new Uint8Array(client.response));
-                    return;
+
                 }
             } else {
                 reject();
-                return;
+
             }
         };
         client.send();
@@ -299,6 +299,7 @@ window.onload = async () => {
 
             let finishedTime = sample / SAMPLE_RATE;
             let finishedPct = Math.round((finishedTime / lengthS) * 100);
+            // @ts-ignore
             progressBar.value = finishedPct;
             progressInfo.innerText = `${Math.round(finishedTime)} / ${Math.round(lengthS)} seconds`;
         }
@@ -325,7 +326,7 @@ window.onload = async () => {
 
             downloadUint8Array(name + ".wav", encoder.encode());
         }
-    };
+    }
 
     // Visualizer
     Promise.all(
@@ -385,7 +386,7 @@ window.onload = async () => {
                                 ctx.fillRect(ofsX + 3 + whiteKeyNum * whiteKeyWidth, ofsY + 3 + trackNum * sectionHeight, whiteKeyWidth, whiteKeyHeight);
                             } else {
                                 if (ctx.fillStyle != fillStyle) {
-                                    ctx.fillStyle = "#dddddd";;
+                                    ctx.fillStyle = "#dddddd";
                                 }
 
                                 ctx.fillRect(ofsX + 8 + whiteKeyNum * whiteKeyWidth, ofsY + 4 + trackNum * sectionHeight, blackKeyWidth, blackKeyHeight);
@@ -614,15 +615,17 @@ window.onload = async () => {
                     case "ArrowLeft":
                     case "ArrowRight":
                         let currentSseqListIndex = currentlyPlayingSdat.sseqList.indexOf(currentlyPlayingId);
-                        let prevSseqListIndex;
-                        if (key == "ArrowLeft") {
+                        let nextSseqListIndex;
+                        if (key === "ArrowLeft") {
                             nextSseqListIndex = currentlyPlayingSdat.sseqList[currentSseqListIndex - 1];
-                        } else if (key == "ArrowRight") {
+                        } else if (key === "ArrowRight") {
                             nextSseqListIndex = currentlyPlayingSdat.sseqList[currentSseqListIndex + 1];
                         }
                         if (nextSseqListIndex != undefined) {
                             playSeqById(currentlyPlayingSdat, nextSseqListIndex);
                         }
+                        break;
+                    default:
                         break;
                 }
             }
@@ -669,6 +672,8 @@ window.onload = async () => {
                     case "[": note = 89; isNote = true; break;
                     case "=": note = 90; isNote = true; break;
                     case "]": note = 91; isNote = true; break;
+                    default:
+                        break;
                 }
 
                 if (isNote) {
@@ -773,11 +778,11 @@ window.onload = async () => {
     registerCheckbox("#force-stereo-separation", true, checked => { g_enableForceStereoSeparation = checked; });
     registerCheckbox("#antialiasing", true, checked => { g_enableAntiAliasing = checked; });
     registerDropdown("#tuning-system", changed => {
-        if (changed == "equal") {
-            pureTuning = false;
+        if (changed === "equal") {
+            g_pureTuning = false;
         } else {
-            pureTuning = true;
-            pureTuningRootNote = parseInt(changed.split('-')[1]);
+            g_pureTuning = true;
+            g_pureTuningRootNote = parseInt(changed.split('-')[1]);
         }
     });
     // registerCheckbox("#soundgoodizer", true, c => { enableSoundgoodizer = c; });

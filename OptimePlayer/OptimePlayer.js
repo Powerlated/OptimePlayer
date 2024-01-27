@@ -32,6 +32,10 @@ let currentPlayer = null;
 /** @type {boolean[]} */
 let trackEnables = new Array(16).fill(true);
 
+/**
+ * @param {string} name
+ * @param {BlobPart} array
+ */
 function downloadUint8Array(name, array) {
     let blob = new Blob([array], { type: "application/octet-stream" });
     let link = document.createElement('a');
@@ -42,23 +46,26 @@ function downloadUint8Array(name, array) {
 
 //@ts-check
 class WavEncoder {
+    /**
+     * @param {number} sampleRate
+     * @param {number} bits
+     */
     constructor(sampleRate, bits) {
         this.sampleRate = sampleRate;
         this.bits = bits;
 
-        if (bits % 8 != 0) {
+        if (bits % 8 !== 0) {
             alert("WavDownloader.constructor: bits not multiple of 8:" + bits);
         }
     }
 
     recordBuffer = new Uint8ClampedArray(32);
     recordBufferAt = 0;
-    addSamples(left, right, size) {
-        for (let i = 0; i < size; i++) {
-            this.addSample(left[i], right[i]);
-        }
-    }
 
+    /**
+     * @param left {number}
+     * @param right {number}
+     */
     addSample(left, right) {
         if (this.recordBufferAt + 16 > this.recordBuffer.length) {
             const oldBuf = this.recordBuffer;
@@ -180,6 +187,11 @@ class AudioPlayer {
 
     safariHax = false;
 
+    /**
+     * @param {number} bufferLength
+     * @param {Function} needMoreSamples
+     * @param {number} sampleRate
+     */
     constructor(bufferLength, needMoreSamples, sampleRate) {
         if (!AudioBuffer.prototype.copyToChannel) this.safariHax = true;
 
@@ -233,6 +245,10 @@ class AudioPlayer {
     ctx;
     sourcesPlaying = 0;
 
+    /**
+     * @param {number} count
+     * @param {number} length
+     */
     genBufferPool(count, length) {
         let pool = new Array(count);
         for (let i = 0; i < count; i++) {
@@ -241,6 +257,10 @@ class AudioPlayer {
         return pool;
     }
 
+    /**
+     * @param {Float64Array} bufferLeft
+     * @param {Float64Array} bufferRight
+     */
     queueAudio(bufferLeft, bufferRight) {
         let buffer = this.bufferPool[this.bufferPoolAt];
         this.bufferPoolAt++;
@@ -271,7 +291,6 @@ class AudioPlayer {
         bufferSource.connect(this.gain);
         bufferSource.start(this.audioSec);
 
-        this.sampleRate = this.sampleRate;
         this.audioSec += this.bufferLength / this.sampleRate;
 
         this.sourcesPlaying++;
@@ -294,24 +313,51 @@ class AudioPlayer {
     }
 }
 
+/**
+ * @param {number[] | Uint8Array} data
+ * @param {number} addr
+ */
 function read16LE(data, addr) {
     return data[addr] | (data[addr + 1] << 8);
 }
 
+/**
+ * @param {number[] | Uint8Array} data
+ * @param {number} addr
+ */
 function read32LE(data, addr) {
     return data[addr] | (data[addr + 1] << 8) | (data[addr + 2] << 16) | (data[addr + 3] << 24);
 }
 
+/**
+ *
+ * @param n {string}
+ * @param width {number}
+ * @param z {string}
+ * @returns {string}
+ */
 function pad(n, width, z) {
     z = z || '0';
     n = n + '';
     return n.length >= width ? n : new Array(width - n.length + 1).join(z) + n;
 }
 
+/**
+ *
+ * @param i {number}
+ * @param digits {number}
+ * @returns {string}
+ */
 function hex(i, digits) {
     return `0x${pad(i.toString(16), digits, '0').toUpperCase()}`;
 }
 
+/**
+ *
+ * @param i {number}
+ * @param digits {number}
+ * @returns {string}
+ */
 function hexN(i, digits) {
     return pad(i.toString(16), digits, '0').toUpperCase();
 }
@@ -343,8 +389,6 @@ class CircularBuffer {
         }
 
         throw "CircularBuffer: overflow";
-
-        return false;
     }
 
     /** @returns {T} */
@@ -360,12 +404,14 @@ class CircularBuffer {
         }
         else {
             throw "CircularBuffer: underflow";
-            data = null;
         }
         return data;
     }
 
-    /** @returns {T} */
+    /**
+     * @returns {T}
+     * @param {number} offset
+     */
     peek(offset) {
         return this.buffer[(this.readPos + offset) % this.size];
     }
@@ -379,23 +425,31 @@ class CircularBuffer {
 
 class SseqInfo {
     constructor() {
+        /** @type {number | null} */
         this.fileId = null;
+        /** @type {number | null} */
         this.bank = null;
+        /** @type {number | null} */
         this.volume = null;
+        /** @type {number | null} */
         this.cpr = null; // what the hell does this mean?
+        /** @type {number | null} */
         this.ppr = null; // what the hell does this mean?
+        /** @type {number | null} */
         this.ply = null; // what the hell does this mean?
     }
 }
 
 class SsarInfo {
     constructor() {
+        /** @type {number | null} */
         this.fileId = null;
     }
 }
 
 class BankInfo {
     constructor() {
+        /** @type {number | null} */
         this.fileId = null;
         this.swarId = new Uint16Array(4);
     }
@@ -403,6 +457,7 @@ class BankInfo {
 
 class SwarInfo {
     constructor() {
+        /** @type {number | null} */
         this.fileId = null;
     }
 }
@@ -440,6 +495,14 @@ class Sdat {
 }
 
 class Message {
+    /**
+     * @param {boolean} fromKeyboard
+     * @param {number} channel
+     * @param {number} type
+     * @param {number} param0
+     * @param {number} param1
+     * @param {number} param2
+     */
     constructor(fromKeyboard, channel, type, param0, param1, param2) {
         this.fromKeyboard = fromKeyboard;
         this.trackNum = channel;
@@ -515,21 +578,36 @@ class InstrumentRecord {
 
         this.regionEnd = new Uint8Array(8);
 
+        /** @type {number[]} */
         this.swavInfoId = [];
+        /** @type {number[]} */
         this.swarInfoId = [];
+        /** @type {number[]} */
         this.noteNumber = [];
+        /** @type {number[]} */
         this.attack = [];
+        /** @type {number[]} */
         this.attackCoefficient = [];
+        /** @type {number[]} */
         this.decay = [];
+        /** @type {number[]} */
         this.decayCoefficient = [];
+        /** @type {number[]} */
         this.sustain = [];
+        /** @type {number[]} */
         this.sustainLevel = [];
+        /** @type {number[]} */
         this.release = [];
+        /** @type {number[]} */
         this.releaseCoefficient = [];
+        /** @type {number[]} */
         this.pan = [];
     }
 
-    /** @returns {number} */
+    /**
+     * @returns {number}
+     * @param {number} note
+     */
     resolveEntryIndex(note) {
         switch (this.fRecord) {
             case InstrumentType.SingleSample:
@@ -548,6 +626,8 @@ class InstrumentRecord {
                     if (note <= this.regionEnd[i]) return i;
                 }
                 return 7;
+            default:
+                throw new Error();
         }
 
         return 0;
@@ -611,10 +691,6 @@ class SampleInstrument {
         Object.seal(this);
     }
 
-    changeSample(sample) {
-        this.sample = sample;
-    }
-
     advance() {
         instrumentsAdvanced++;
 
@@ -630,15 +706,6 @@ class SampleInstrument {
                 break;
             case ResampleMode.Cubic:
                 let subT = this.sampleT % 1;
-
-                /*
-                // Linear interpolation
-                    let val0 = this.getSampleDataAt(Math.floor(this.sampleT));
-                    let val1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
-    
-                    let valLerp = (val0 + subT * (val1 - val0));
-                    this.output = valLerp * this.volume;
-                */
 
                 let p0 = this.getSampleDataAt(Math.floor(this.sampleT));
                 let p1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
@@ -665,7 +732,7 @@ class SampleInstrument {
 
                 this.output = this.blipBuf.readOutSampleL() * this.volume;
 
-                if (this.sample.resampleMode == ResampleMode.BlipBufLowPass) {
+                if (this.sample.resampleMode === ResampleMode.BlipBufLowPass) {
                     this.output = this.filter.transform(this.output);
                 }
                 break;
@@ -673,6 +740,9 @@ class SampleInstrument {
         }
     }
 
+    /**
+     * @param {number} t
+     */
     getSampleDataAt(t) {
         if (t >= this.sample.data.length && this.sample.looping) {
             let tNoIntro = t - this.sample.loopPoint;
@@ -713,6 +783,9 @@ class SampleInstrument {
         this.freqRatio = this.frequency / this.sample.frequency;
     }
 
+    /**
+     * @param {number} semitones
+     */
     setFinetune(semitones) {
         this.finetune = semitones;
         this.frequency = midiNoteToHz(this.midiNote + this.finetuneLfo + this.finetune);
@@ -750,7 +823,7 @@ class SseqController {
         if (!this.paused) {
             for (let i = 0; i < 16; i++) {
                 if (this.tracks[i].active) {
-                    while (this.tracks[i].restingFor == 0) {
+                    while (this.tracks[i].restingFor === 0) {
                         this.tracks[i].execute();
                     }
                     this.tracks[i].restingFor--;
@@ -761,12 +834,19 @@ class SseqController {
         this.ticksElapsed++;
     }
 
+    /**
+     * @param {number} num
+     * @param {number} pc
+     */
     startTrack(num, pc) {
         this.tracks[num].active = true;
         this.tracks[num].pc = pc;
         this.tracks[num].debugLog("Started! PC: " + hexN(pc, 6));
     }
 
+    /**
+     * @param {number} num
+     */
     endTrack(num) {
         this.tracks[num].active = false;
         this.tracks[num].debugLog("Ended track.");
@@ -774,6 +854,10 @@ class SseqController {
 }
 
 class SseqTrack {
+    /**
+     * @param {SseqController} controller
+     * @param {number} id
+     */
     constructor(controller, id) {
         /** @type {SseqController} */
         this.controller = controller;
@@ -811,21 +895,30 @@ class SseqTrack {
         this.sp = 0;
     }
 
-    debugLog(msg) {
+    /**
+     * @param {string} _msg
+     */
+    debugLog(_msg) {
         // console.log(`${this.id}: ${msg}`)
     }
 
+    /**
+     * @param {string} msg
+     */
     debugLogForce(msg) {
         console.log(`${this.id}: ${msg}`);
     }
 
+    /**
+     * @param {number} val
+     */
     push(val) {
         this.stack[this.sp++] = val;
         if (this.sp >= this.stack.length) alert("SSEQ stack overflow");
     }
 
     pop() {
-        if (this.sp == 0) alert("SSEQ stack underflow");
+        if (this.sp === 0) alert("SSEQ stack underflow");
         return this.stack[--this.sp];
     }
 
@@ -843,7 +936,7 @@ class SseqTrack {
         return val;
     }
 
-    readletiableLength(arr, offs) {
+    readVariableLength() {
         let num = 0;
         for (let i = 0; i < 4; i++) {
             let val = this.readPcInc();
@@ -851,7 +944,7 @@ class SseqTrack {
             num <<= 7;
             num |= val & 0x7F;
 
-            if ((val & 0x80) == 0) {
+            if ((val & 0x80) === 0) {
                 break;
             }
         }
@@ -876,7 +969,7 @@ class SseqTrack {
 
         if (opcode <= 0x7F) {
             let velocity = this.readPcInc();
-            let duration = this.readletiableLength();
+            let duration = this.readVariableLength();
 
             this.debugLog("Note: " + opcode);
             this.debugLog("Velocity: " + velocity);
@@ -942,7 +1035,7 @@ class SseqTrack {
                     }
                 case 0x81: // Set bank and program
                     {
-                        let bankAndProgram = this.readletiableLength();
+                        let bankAndProgram = this.readVariableLength();
                         this.program = bankAndProgram & 0x7F;
                         this.bank = (bankAndProgram >> 7) & 0x7F;
 
@@ -960,7 +1053,7 @@ class SseqTrack {
                 case 0xC0: // Pan
                     {
                         this.pan = this.readPcInc();
-                        if (this.pan == 127) this.pan = 128;
+                        if (this.pan === 127) this.pan = 128;
                         this.debugLog("Pan: " + this.pan);
                         this.sendMessage(false, MessageType.PanChange, this.pan);
                         break;
@@ -994,7 +1087,7 @@ class SseqTrack {
                     {
                         this.lfoType = this.readPcInc();
                         this.debugLog("LFO Type: " + this.lfoType);
-                        if (this.lfoType != LfoType.Volume) {
+                        if (this.lfoType !== LfoType.Volume) {
                             console.warn("Unimplemented LFO type: " + this.lfoType);
                         }
                         break;
@@ -1014,7 +1107,7 @@ class SseqTrack {
                     }
                 case 0x80: // Rest
                     {
-                        this.restingFor = this.readletiableLength();
+                        this.restingFor = this.readVariableLength();
                         this.debugLog("Resting For: " + this.restingFor);
                         break;
                     }
@@ -1135,7 +1228,7 @@ class SampleSynthesizer {
         /** @type {SampleInstrument[]} */
         this.instrs = new Array(this.instrsAvailable);
         /** @type {SampleInstrument[]} */
-        this.activeInstrs = new Array();
+        this.activeInstrs = [];
         this.t = 0;
         this.sampleRate = sampleRate;
 
@@ -1195,9 +1288,12 @@ class SampleSynthesizer {
         return currentIndex;
     }
 
+    /**
+     * @param {number} instrIndex
+     */
     cutInstrument(instrIndex) {
         const activeInstrIndex = this.activeInstrs.indexOf(this.instrs[instrIndex]);
-        if (activeInstrIndex == -1) {
+        if (activeInstrIndex === -1) {
             console.warn("Tried to cut instrument that wasn't playing");
             return;
         }
@@ -1227,6 +1323,9 @@ class SampleSynthesizer {
         this.t++;
     }
 
+    /**
+     * @param {number} semitones
+     */
     setFinetune(semitones) {
         this.finetune = semitones;
         for (let instr of this.instrs) {
@@ -1264,148 +1363,6 @@ class SampleSynthesizer {
         this.delayLineR.setDelay(delayR);
         this.delayLineR.gain = gainR;
         this.pan = pan;
-    }
-}
-
-/** @template T */
-class MinHeapEntry {
-    data /** @type {T} */;
-    index = 0;
-    priority = 0;
-}
-
-/** @template T */
-class MinHeap {
-    static parent(n) { return (n - 1) >> 1; }
-    static leftChild(n) { return n * 2 + 1; }
-    static rightChild(n) { return n * 2 + 2; }
-
-    /** @param {number} size */
-    constructor(size) {
-        /** @type {MinHeapEntry<T>[]} */
-        this.heap = new Array(size);
-
-        for (let i = 0; i < this.heap.length; i++) {
-            this.heap[i] = new MinHeapEntry();
-            this.heap[i].index = i;
-        }
-    }
-
-    entries = 0;
-
-    static createEmptyEntry() {
-        return new MinHeapEntry();
-    }
-
-    addEntry(data, priority) {
-        if (this.entries >= this.heap.length) {
-            alert("Heap overflow!");
-            return;
-        }
-
-        let index = this.entries;
-        this.entries++;
-        this.heap[index].data = data;
-        this.heap[index].priority = priority;
-        this.heap[index].index = index;
-
-        while (index != 0) {
-            let parentIndex = MinHeap.parent(index);
-            if (this.heap[parentIndex].priority > this.heap[index].priority) {
-                this.swap(index, parentIndex);
-                index = parentIndex;
-            } else {
-                break;
-            }
-        }
-        this.updateNextEvent();
-    }
-
-    updateNextEvent() {
-        if (this.entries > 0) {
-            this.nextEventTicks = this.heap[0].priority;
-        }
-    }
-
-    getFirstEntry() {
-        if (this.entries <= 0) {
-            alert("Tried to get from empty heap!");
-            return this.heap[0]; // This isn't supposed to happen.
-        }
-
-        return this.heap[0];
-    }
-
-    returnEvent = MinHeap.createEmptyEntry();
-
-    popFirstEntry() {
-        let event = this.getFirstEntry();
-
-        this.returnEvent.data = event.data;
-        this.returnEvent.priority = event.priority;
-        this.returnEvent.index = event.index;
-
-        if (this.entries == 1) {
-            this.entries--;
-            return this.returnEvent;
-        }
-
-        this.swap(0, this.entries - 1);
-
-        this.entries--;
-
-        // Satisfy the heap property again
-        let index = 0;
-        while (true) {
-            let left = MinHeap.leftChild(index);
-            let right = MinHeap.rightChild(index);
-            let smallest = index;
-
-            if (left < this.entries && this.heap[left].priority < this.heap[index].priority) {
-                smallest = left;
-            }
-            if (right < this.entries && this.heap[right].priority < this.heap[smallest].priority) {
-                smallest = right;
-            }
-
-            if (smallest != index) {
-                this.swap(index, smallest);
-                index = smallest;
-            } else {
-                break;
-            }
-        }
-
-        this.updateNextEvent();
-        return this.returnEvent;
-    }
-
-    setPriorityLower(index, newVal) {
-        this.heap[index].priority = newVal;
-
-        while (index != 0) {
-            let parentIndex = MinHeap.parent(index);
-            if (this.heap[parentIndex].priority > this.heap[index].priority) {
-                this.swap(index, parentIndex);
-                index = parentIndex;
-            } else {
-                break;
-            }
-        }
-    }
-
-    deleteEvent(index) {
-        this.setPriorityLower(index, -9999);
-        this.popFirstEntry();
-    }
-
-    swap(ix, iy) {
-        // console.log(`Swapped ${ix} with ${iy}`);
-        let temp = this.heap[ix];
-        this.heap[ix] = this.heap[iy];
-        this.heap[ix].index = ix;
-        this.heap[iy] = temp;
-        this.heap[iy].index = iy;
     }
 }
 
@@ -1502,6 +1459,10 @@ const squares = [
 ];
 
 // based off SND_CalcChannelVolume from pret/pokediamond
+/**
+ * @param {number} velocity
+ * @param {number} adsrTimer
+ */
 function calcChannelVolume(velocity, adsrTimer) {
     const SND_VOL_DB_MIN = -723;
 
@@ -1531,9 +1492,11 @@ function calcChannelVolume(velocity, adsrTimer) {
 }
 
 class FsVisControllerBridge {
-    /** @param {Sdat} sdat */
-    /** @param {string} id */
-    /** @param {number} runAheadTicks */
+    /**
+     * @param {Sdat} sdat
+     * @param {string | number} id
+     * @param {number} runAheadTicks
+     */
     constructor(sdat, id, runAheadTicks) {
         this.runAheadTicks = runAheadTicks;
 
@@ -1626,7 +1589,10 @@ const sLfoSinTable = [
     0
 ];
 
-// pret/pokediamond
+/**
+ * pret/pokediamond
+ * @param {number} x
+ */
 function SND_SinIdx(x) {
     if (x < 0x20) {
         return sLfoSinTable[x];
@@ -1643,9 +1609,13 @@ function SND_SinIdx(x) {
 }
 
 class ControllerBridge {
-    /** @param {number} sampleRate */
-    /** @param {Sdat} sdat */
-    /** @param {string} id */
+    /**
+     @param {number} sampleRate
+     @param {Sdat} sdat
+     @param sampleRate
+     @param sdat
+     @param {string} id
+     */
     constructor(sampleRate, sdat, id) {
         let info = sdat.sseqInfos[id];
         this.bankInfo = sdat.sbnkInfos[info.bank];
@@ -1676,16 +1646,19 @@ class ControllerBridge {
                 case InstrumentType.SingleSample:
                     typeString = "Single-Sample Instrument";
                     break;
+                default:
+                    throw new Error();
+                    break;
 
             }
 
-            if (instrument.fRecord != 0) {
+            if (instrument.fRecord !== 0) {
                 console.log(`Program ${i}: ${typeString}\nLinked archive ${instrument.swarInfoId[0]} Sample ${instrument.swavInfoId[0]}`);
             }
         }
 
         let dataOffset = read32LE(file, 0x18);
-        if (dataOffset != 0x1C) alert("SSEQ offset is not 0x1C? it is: " + hex(dataOffset, 8));
+        if (dataOffset !== 0x1C) alert("SSEQ offset is not 0x1C? it is: " + hex(dataOffset, 8));
 
         this.sdat = sdat;
         /** @type {CircularBuffer<Message>} */
@@ -1712,7 +1685,6 @@ class ControllerBridge {
 
         this.loop = 0;
 
-        // /** @type {MinHeap<}
         this.activeNoteData = [];
 
         this.bpmTimer = 0;
@@ -1731,7 +1703,7 @@ class ControllerBridge {
             let instr = this.synthesizers[entry.trackNum].instrs[entry.synthInstrIndex];
             // sometimes a SampleInstrument will be reused before the note it is playing is over due to Synthesizer polyphony limits
             // check here to make sure the note entry stored in the heap is referring to the same note it originally did 
-            if (instr.startTime == entry.startTime && instr.playing) {
+            if (instr.startTime === entry.startTime && instr.playing) {
                 // Cut instruments that have ended samples
                 if (!instr.sample.looping && instr.sampleT > instr.sample.data.length) {
                     // @ts-ignore
@@ -1740,7 +1712,7 @@ class ControllerBridge {
                 }
 
                 if (this.controller.ticksElapsed >= entry.endTime && !entry.fromKeyboard) {
-                    if (entry.adsrState != AdsrState.Release) {
+                    if (entry.adsrState !== AdsrState.Release) {
                         // console.log("to release: " + instrument.release[data.instrumentEntryIndex]);
                         this.notesOn[entry.trackNum][entry.midiNote] = 0;
                         entry.adsrState = AdsrState.Release;
@@ -1750,7 +1722,7 @@ class ControllerBridge {
                 // LFO code based off pret/pokediamond
                 let track = this.controller.tracks[entry.trackNum];
                 let lfoValue;
-                if (track.lfoDepth == 0) {
+                if (track.lfoDepth === 0) {
                     lfoValue = BigInt(0);
                 } else if (entry.lfoDelayCounter < track.lfoDelay) {
                     lfoValue = BigInt(0);
@@ -1758,7 +1730,7 @@ class ControllerBridge {
                     lfoValue = BigInt(SND_SinIdx(entry.lfoCounter >>> 8) * track.lfoDepth * track.lfoRange);
                 }
 
-                if (lfoValue != 0n) {
+                if (lfoValue !== 0n) {
                     switch (track.lfoType) {
                         case LfoType.Volume:
                             lfoValue *= 60n;
@@ -1786,7 +1758,7 @@ class ControllerBridge {
                     entry.lfoCounter &= 0xFF;
                     entry.lfoCounter |= tmp << 8;
 
-                    if (lfoValue != 0n) {
+                    if (lfoValue !== 0n) {
                         switch (track.lfoType) {
                             case LfoType.Pitch:
                                 // LFO value is in 1/64ths of a semitone
@@ -1805,7 +1777,7 @@ class ControllerBridge {
                         // console.log(data.adsrTimer);
                         instr.volume = calcChannelVolume(entry.velocity, entry.adsrTimer);
                         // one instrument hits full volume, start decay
-                        if (entry.adsrTimer == 0) {
+                        if (entry.adsrTimer === 0) {
                             // console.log("to decay: " + instrument.decay[data.instrumentEntryIndex])
                             entry.adsrState = AdsrState.Decay;
                         }
@@ -1827,7 +1799,7 @@ class ControllerBridge {
                     case AdsrState.Sustain:
                         break;
                     case AdsrState.Release:
-                        if (entry.adsrTimer <= -92544 || instrument.fRecord == InstrumentType.PsgPulse) {
+                        if (entry.adsrTimer <= -92544 || instrument.fRecord === InstrumentType.PsgPulse) {
                             // ADSR curve hit zero, cut the instrument
                             this.synthesizers[entry.trackNum].cutInstrument(entry.synthInstrIndex);
                             // @ts-ignore
@@ -1847,7 +1819,7 @@ class ControllerBridge {
             }
         }
 
-        if (indexToDelete != -1) {
+        if (indexToDelete !== -1) {
             this.activeNoteData.splice(indexToDelete, 1);
         }
 
@@ -1864,7 +1836,7 @@ class ControllerBridge {
 
                 switch (msg.type) {
                     case MessageType.PlayNote:
-                        if (this.activeKeyboardTrackNum != msg.trackNum || msg.fromKeyboard) {
+                        if (this.activeKeyboardTrackNum !== msg.trackNum || msg.fromKeyboard) {
                             let midiNote = msg.param0;
                             let velocity = msg.param1;
                             let duration = msg.param2;
@@ -1885,7 +1857,7 @@ class ControllerBridge {
                             if (archive) {
                                 let sample = archive[sampleId];
 
-                                if (instrument.fRecord == InstrumentType.PsgPulse) {
+                                if (instrument.fRecord === InstrumentType.PsgPulse) {
                                     sample = squares[sampleId];
                                     sample.resampleMode = ResampleMode.Nearest;
                                 } else {
@@ -1908,7 +1880,7 @@ class ControllerBridge {
                                 // console.log("MIDI Note " + midiNote);
                                 // console.log("Base MIDI Note: " + instrument.noteNumber[index]);
 
-                                // if (instrument.fRecord == InstrumentType.PsgPulse) {
+                                // if (instrument.fRecord === InstrumentType.PsgPulse) {
                                 //     console.log("PSG Pulse");
                                 // }
 
@@ -1924,10 +1896,8 @@ class ControllerBridge {
 
                                 // }
 
-                                // TODO: implement per-instrument pan
-
                                 let track = this.controller.tracks[msg.trackNum];
-                                let initialVolume = instrument.attackCoefficient[index] == 0 ? calcChannelVolume(velocity, 0) : 0;
+                                let initialVolume = instrument.attackCoefficient[index] === 0 ? calcChannelVolume(velocity, 0) : 0;
                                 let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, midiNote, initialVolume, this.controller.ticksElapsed);
 
                                 this.notesOn[msg.trackNum][midiNote] = 1;
@@ -1945,7 +1915,8 @@ class ControllerBridge {
                                         adsrTimer: -92544, // idk why this number, ask gbatek
                                         fromKeyboard: msg.fromKeyboard,
                                         lfoCounter: 0,
-                                        lfoDelayCounter: 0
+                                        lfoDelayCounter: 0,
+                                        delayCounter: 0,
                                     }
                                 );
                             }
@@ -1963,7 +1934,7 @@ class ControllerBridge {
                             }
                         }
 
-                        if (tracksActive == 0) {
+                        if (tracksActive === 0) {
                             this.fadingStart = true;
                         }
                         break;
@@ -1995,6 +1966,10 @@ class ControllerBridge {
     }
 }
 
+/**
+ * @param {number} i
+ * @param {number} bit
+ */
 function bitTest(i, bit) {
     return (i & (1 << bit)) !== 0;
 }
@@ -2003,8 +1978,8 @@ function bitTest(i, bit) {
 * @param {Sdat} sdat
 * @param {number} id
 */
-function playSeqById(sdat, id) {
-    playSeq(sdat, sdat.sseqIdNameDict[id]);
+async function playSeqById(sdat, id) {
+    await playSeq(sdat, sdat.sseqIdNameDict[id]);
 }
 
 /**
@@ -2016,7 +1991,7 @@ async function playSeq(sdat, name) {
     currentlyPlayingName = name;
     if (currentBridge) {
         currentBridge.destroy();
-        currentPlayer?.ctx.close();
+        await currentPlayer?.ctx.close();
     }
 
     const BUFFER_SIZE = 1024;
@@ -2035,16 +2010,6 @@ async function playSeq(sdat, name) {
     let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 5);
     let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
 
-    // // debugging hexdump
-    // let offs = 0;
-    // for (let i = 0; i < 16; i++) {
-    //     let str = "";
-    //     for (let j = 0; j < 16; j++) {
-    //         str += hexN(file[offs], 2) + " ";
-    //         offs++;
-    //     }
-    //     console.log(str);
-    // }
     currentBridge = bridge;
     currentFsVisBridge = fsVisBridge;
 
@@ -2116,11 +2081,18 @@ async function downloadSample(sample) {
     downloadUint8Array("sample.wav", downloader.encode());
 }
 
-
+/**
+ * @param {number} val
+ * @param {number} min
+ * @param {number} max
+ */
 function clamp(val, min, max) {
     return Math.min(Math.max(val, min), max);
 }
 
+/**
+ * @param {number[] | Uint8Array} pcm8Data
+ */
 function decodePcm8(pcm8Data) {
     let out = new Float64Array(pcm8Data.length);
 
@@ -2131,6 +2103,9 @@ function decodePcm8(pcm8Data) {
     return out;
 }
 
+/**
+ * @param {number[] | Uint8Array} pcm16Data
+ */
 function decodePcm16(pcm16Data) {
     let out = new Float64Array(pcm16Data.length >> 1);
 
@@ -2153,17 +2128,19 @@ const adpcmTable = [
     0x5771, 0x602F, 0x69CE, 0x7462, 0x7FFF
 ];
 
-// Decodes IMA-ADPCM to PCM16
+
+/**
+ * Decodes IMA-ADPCM to PCM16
+ * @param {Uint8Array} adpcmData
+ */
 function decodeAdpcm(adpcmData) {
     let out = new Float64Array((adpcmData.length - 4) * 2);
     let outOffs = 0;
 
-    let adpcmIndex = 0;
-
     let header = read32LE(adpcmData, 0);
     // ADPCM header
     let currentValue = header & 0xFFFF;
-    adpcmIndex = clamp(header >> 16, 0, 88);
+    let adpcmIndex = clamp(header >> 16, 0, 88);
 
     for (let i = 4; i < adpcmData.length; i++) {
         for (let j = 0; j < 2; j++) {
@@ -2171,11 +2148,11 @@ function decodeAdpcm(adpcmData) {
 
             let tableVal = adpcmTable[adpcmIndex];
             let diff = tableVal >> 3;
-            if ((data & 1) != 0) diff += tableVal >> 2;
-            if ((data & 2) != 0) diff += tableVal >> 1;
-            if ((data & 4) != 0) diff += tableVal >> 0;
+            if ((data & 1) !== 0) diff += tableVal >> 2;
+            if ((data & 2) !== 0) diff += tableVal >> 1;
+            if ((data & 4) !== 0) diff += tableVal >> 0;
 
-            if ((data & 8) == 8) {
+            if ((data & 8) === 8) {
                 currentValue = Math.max(currentValue - diff, -0x7FFF);
             }
             else {
@@ -2190,7 +2167,10 @@ function decodeAdpcm(adpcmData) {
     return out;
 }
 
-/** @param {Uint8Array} wavData */
+/**
+ * @param {Uint8Array} wavData
+ * @param {number} sampleFrequency
+ */
 function decodeWavToSample(wavData, sampleFrequency) {
     /** @type {number[]} */
     let sampleData = [];
@@ -2222,12 +2202,18 @@ function decodeWavToSample(wavData, sampleFrequency) {
             case 16:
                 sampleData.push(((read16LE(wavData, i) << 16) >> 16) / 32767);
                 break;
+            default:
+                throw new Error();
+                break;
         }
     }
 
     return new Sample(Float64Array.from(sampleData), sampleFrequency, sampleRate, false, 0);
 }
 
+/**
+ * @param {any[] | Uint8Array} strmData
+ */
 function playStrm(strmData) {
     const BUFFER_SIZE = 4096;
     const SAMPLE_RATE = 32768;
@@ -2283,6 +2269,8 @@ function playStrm(strmData) {
         case 2:
             format = "IMA-ADPCM";
             break;
+        default:
+            throw new Error();
     }
 
     console.log("Format: " + format);
@@ -2319,7 +2307,7 @@ function playStrm(strmData) {
  * @param {Sample} sample 
  * */
 function playSample(sample) {
-    return /** @type {Promise<void>} */(new Promise((resolve, reject) => {
+    return /** @type {Promise<void>} */(new Promise(resolve => {
         const BUFFER_SIZE = 4096;
         const SAMPLE_RATE = sample.sampleRate;
 
@@ -2366,8 +2354,11 @@ function playSample(sample) {
     }));
 }
 
-// pureRootNote is an offset from A in 
-/** @returns {number} */
+/**
+ * pureRootNote is an offset from A in
+ * @returns {number}
+ * @param {number} note
+ */
 function midiNoteToHz(note) {
     if (g_pureTuning) {
         let roundError = note - Math.round(note);
@@ -2380,9 +2371,8 @@ function midiNoteToHz(note) {
         let rootNoteHz = 440 * 2 ** (((g_pureTuningRootNote + roundError) / 12) + octave);
 
         switch (noteInOctave) {
-            default:
             case 0: // Do / C
-                return rootNoteHz * (1 / 1);
+                return rootNoteHz;
             case 1: // Di / C#
                 return rootNoteHz * (256 / 243);
             case 2: // Re / D
@@ -2405,12 +2395,18 @@ function midiNoteToHz(note) {
                 return rootNoteHz * (16 / 9);
             case 11: // Ti / B
                 return rootNoteHz * (243 / 128);
+            default:
+                throw new Error();
         }
     } else {
         return 440 * 2 ** ((note - 69) / 12);
     }
 }
 
+/**
+ * @param {number[] | Uint8Array} data
+ * @param {number} offset
+ */
 function parseSdatFromRom(data, offset) {
     let sdat = new Sdat();
 
@@ -2470,13 +2466,13 @@ function parseSdatFromRom(data, offset) {
             let sseqNameCharOffs = 0;
             while (true) {
                 let char = sdatData[symbOffs + sseqNameOffs + sseqNameCharOffs];
-                if (char == 0) break; // check for null terminator
+                if (char === 0) break; // check for null terminator
                 sseqNameCharOffs++;
                 sseqNameArr.push(char);
             }
 
             // for some reason games have a ton of empty symbols
-            if (sseqNameOffs != 0) {
+            if (sseqNameOffs !== 0) {
                 let seqName = String.fromCharCode(...sseqNameArr);
 
                 sdat.sseqNameIdDict[seqName] = i;
@@ -2503,19 +2499,19 @@ function parseSdatFromRom(data, offset) {
 
         for (let i = 0; i < symbBankListNumEntries; i++) {
             let symbNameOffs = read32LE(sdatData, symbOffs + symbBankListOffs + 4 + i * 4);
-            if (i == 0) console.log("NDS file addr of BANK list 1st entry: " + hexN(offset + symbOffs + symbNameOffs, 8));
+            if (i === 0) console.log("NDS file addr of BANK list 1st entry: " + hexN(offset + symbOffs + symbNameOffs, 8));
 
             let bankNameArr = [];
             let bankNameCharOffs = 0;
             while (true) {
                 let char = sdatData[symbOffs + symbNameOffs + bankNameCharOffs];
-                if (char == 0) break; // check for null terminator
+                if (char === 0) break; // check for null terminator
                 bankNameCharOffs++;
                 bankNameArr.push(char);
             }
 
             // for some reason games have a ton of empty symbols
-            if (symbNameOffs != 0) {
+            if (symbNameOffs !== 0) {
                 let bankName = String.fromCharCode(...bankNameArr);
 
                 // console.log(bankName);
@@ -2543,7 +2539,7 @@ function parseSdatFromRom(data, offset) {
         for (let i = 0; i < infoSseqListNumEntries; i++) {
             let infoSseqNameOffs = read32LE(sdatData, infoOffs + infoSseqListOffs + 4 + i * 4);
 
-            if (infoSseqNameOffs != 0) {
+            if (infoSseqNameOffs !== 0) {
                 let info = new SseqInfo();
                 info.fileId = read16LE(sdatData, infoOffs + infoSseqNameOffs + 0);
                 info.bank = read16LE(sdatData, infoOffs + infoSseqNameOffs + 4);
@@ -2569,7 +2565,7 @@ function parseSdatFromRom(data, offset) {
         for (let i = 0; i < infoSsarListNumEntries; i++) {
             let infoSsarNameOffs = read32LE(sdatData, infoOffs + infoSsarListOffs + 4 + i * 4);
 
-            if (infoSsarNameOffs != 0) {
+            if (infoSsarNameOffs !== 0) {
                 let info = new SsarInfo();
                 info.fileId = read16LE(sdatData, infoOffs + infoSsarNameOffs + 0);
 
@@ -2589,7 +2585,7 @@ function parseSdatFromRom(data, offset) {
         for (let i = 0; i < infoBankListNumEntries; i++) {
             let infoBankNameOffs = read32LE(sdatData, infoOffs + infoBankListOffs + 4 + i * 4);
 
-            if (infoBankNameOffs != 0) {
+            if (infoBankNameOffs !== 0) {
                 let info = new BankInfo();
                 info.fileId = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x0);
                 info.swarId[0] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x4);
@@ -2652,7 +2648,7 @@ function parseSdatFromRom(data, offset) {
 
         let bankInfo = sdat.sbnkInfos[i];
 
-        if (bankInfo != null) {
+        if (bankInfo !== null) {
             let bankFile = sdat.fat[bankInfo.fileId];
 
             // downloadUint8Array(sdat.sbnkIdNameDict[i] + ".sbnk", bankFile);
@@ -2661,17 +2657,20 @@ function parseSdatFromRom(data, offset) {
             if (debug)
                 console.log(`Bank ${i} / ${sdat.sbnkIdNameDict[i]}: ${numberOfInstruments} instruments`);
             for (let j = 0; j < numberOfInstruments; j++) {
-                let fRecord = bankFile[0x3C + j * 4 + 0];
+                let fRecord = bankFile[0x3C + j * 4];
                 let recordOffset = read16LE(bankFile, 0x3C + j * 4 + 1);
 
                 let instrument = new InstrumentRecord();
                 instrument.fRecord = fRecord;
 
-                // Thanks to ipatix and pret/pokediamond
+                /**
+                 * Thanks to ipatix and pret/pokediamond
+                 * @param {number} vol
+                 */
                 function CalcDecayCoeff(vol) {
-                    if (vol == 127)
+                    if (vol === 127)
                         return 0xFFFF;
-                    else if (vol == 126)
+                    else if (vol === 126)
                         return 0x3C00;
                     else if (vol < 50)
                         return (vol * 2 + 1) & 0xFFFF;
@@ -2679,7 +2678,10 @@ function parseSdatFromRom(data, offset) {
                         return (Math.floor(0x1E00 / (126 - vol))) & 0xFFFF;
                 }
 
-                // Thanks to ipatix and pret/pokediamond
+                /**
+                 * @param {number} attack
+                 * Thanks to ipatix and pret/pokediamond
+                 */
                 function getEffectiveAttack(attack) {
                     if (attack < 109)
                         return 255 - attack;
@@ -2687,15 +2689,22 @@ function parseSdatFromRom(data, offset) {
                         return sAttackCoeffTable[127 - attack];
                 }
 
-                // Thanks to ipatix and pret/pokediamond
+                /**
+                 * Thanks to ipatix and pret/pokediamond
+                 * @param {number} sustain
+                 */
                 function getSustainLevel(sustain) {
                     return SNDi_DecibelSquareTable[sustain] << 7;
                 }
 
+                /**
+                 * @param {number} index
+                 * @param {number} offset
+                 */
                 function readRecordData(index, offset) {
                     instrument.swavInfoId[index] = read16LE(bankFile, recordOffset + 0x0 + offset);
                     instrument.swarInfoId[index] = read16LE(bankFile, recordOffset + 0x2 + offset);
-                    // if (i == 4) {
+                    // if (i === 4) {
                     //     console.log(`Instrument ${j}, Record ${index}: SWAV Info ID offset:${hex(recordOffset + 0x0 + offset, 0)} value:${instrument.swavInfoId[index]}`);
                     //     console.log(`Instrument ${j}, Record ${index}: SWAR Info ID offset:${hex(recordOffset + 0x2 + offset, 0)} value:${instrument.swarInfoId[index]}`);
                     // }
@@ -2740,10 +2749,10 @@ function parseSdatFromRom(data, offset) {
                             for (let k = 0; k < 8; k++) {
                                 let end = bankFile[recordOffset + k];
                                 instrument.regionEnd[k] = end;
-                                if (end == 0) {
+                                if (end === 0) {
                                     instrumentCount = k;
                                     break;
-                                } else if (end == 0x7F) {
+                                } else if (end === 0x7F) {
                                     instrumentCount = k + 1;
                                     break;
                                 }
@@ -2758,7 +2767,7 @@ function parseSdatFromRom(data, offset) {
                             for (let k = 0; k < instrumentCount; k++) {
                                 readRecordData(k, 10 + k * 12);
 
-                                // if (i == 4) {
+                                // if (i === 4) {
                                 //     console.log(`Read in record data offset:${hex(10 + k * 12, 0)}`);
                                 // }
 
@@ -2783,7 +2792,7 @@ function parseSdatFromRom(data, offset) {
         let archive = [];
 
         let swarInfo = sdat.swarInfos[i];
-        if (swarInfo != null) {
+        if (swarInfo !== null) {
             let swarFile = sdat.fat[swarInfo.fileId];
 
             let sampleCount = read32LE(swarFile, 0x38);
@@ -2819,10 +2828,13 @@ function parseSdatFromRom(data, offset) {
                         decoded = decodeAdpcm(sampleData);
                         // console.log(`Archive ${i}, Sample ${j}: ADPCM`);
                         break;
+                    default:
+                        throw new Error();
+                        break;
                 }
 
-                if (decoded != null) {
-                    archive[j] = new Sample(decoded, 440, sampleRate, loopFlag != 0, loopPoint);
+                if (decoded !== null) {
+                    archive[j] = new Sample(decoded, 440, sampleRate, loopFlag !== 0, loopPoint);
                     archive[j].sampleLength = swarSampleLength * 4;
                 }
             }
@@ -2834,17 +2846,21 @@ function parseSdatFromRom(data, offset) {
     return sdat;
 }
 
+/**
+ * @param {any[] | Uint8Array} data
+ * @param {string | any[]} sequence
+ */
 function searchForSequences(data, sequence) {
     let seqs = [];
 
     for (let i = 0; i < data.length; i++) {
-        if (data[i] == sequence[0]) {
+        if (data[i] === sequence[0]) {
             for (let j = 1; j < sequence.length; j++) {
-                if (data[i + j] != sequence[j]) {
+                if (data[i + j] !== sequence[j]) {
                     break;
                 }
 
-                if (j == sequence.length - 1) seqs.push(i);
+                if (j === sequence.length - 1) seqs.push(i);
             }
         }
     }
@@ -2852,6 +2868,9 @@ function searchForSequences(data, sequence) {
     return seqs;
 }
 
+/**
+ * @param {number} keyInOctave
+ */
 function getKeyNum(keyInOctave) {
     // THIS IS STARTING FROM THE KEY OF A
     switch (keyInOctave) {
@@ -2873,6 +2892,9 @@ function getKeyNum(keyInOctave) {
     }
 }
 
+/**
+ * @param {number} keyInOctave
+ */
 function isBlackKey(keyInOctave) {
     // THIS IS STARTING FROM THE KEY OF A
     switch (keyInOctave) {
@@ -2940,7 +2962,7 @@ function drawFsVis(ctx, time, noteAlpha) {
 
         let activeNotes = currentFsVisBridge.activeNotes;
 
-        if (lastTicks != currentFsVisBridge.controller.ticksElapsed) {
+        if (lastTicks !== currentFsVisBridge.controller.ticksElapsed) {
             lastTickTime = time;
         }
         ctx.globalAlpha = noteAlpha;
@@ -3013,6 +3035,9 @@ function drawFsVis(ctx, time, noteAlpha) {
 
         // console.log("Drew " + drew + "Notes");
 
+        /**
+         * @param {boolean} black
+         */
         function drawKeys(black) {
             // piano has 88 keys
             for (let j = 0; j < 88; j++) {
@@ -3026,12 +3051,12 @@ function drawFsVis(ctx, time, noteAlpha) {
                 let blackKey = isBlackKey(keyInOctave);
 
 
-                if (blackKey == black) {
+                if (blackKey === black) {
                     let whiteKeyNum = octave * 7 + keyNum;
 
                     let fillStyle;
                     if (!blackKey) {
-                        if (activeNoteTrackNums[midiNote] != -1) {
+                        if (activeNoteTrackNums[midiNote] !== -1) {
                             ctx.fillStyle = fsVisPalette[activeNoteTrackNums[midiNote]];
                             activeNoteTrackNums[midiNote] = -1;
                         } else {
@@ -3045,7 +3070,7 @@ function drawFsVis(ctx, time, noteAlpha) {
 
                         ctx.fillRect(x, y, w, h);
                     } else {
-                        if (activeNoteTrackNums[midiNote] != -1) {
+                        if (activeNoteTrackNums[midiNote] !== -1) {
                             ctx.fillStyle = fsVisPalette[activeNoteTrackNums[midiNote]];
                             activeNoteTrackNums[midiNote] = -1;
                         } else {

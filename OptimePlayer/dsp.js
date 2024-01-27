@@ -20,13 +20,13 @@ class BlipBuf {
         if (bufSize < kernelSize * 2) {
             throw 'bufSize needs to be greater than kernelSize * 2';
         }
-        if (kernelSize % 4 != 0) {
+        if (kernelSize % 4 !== 0) {
             throw 'kernelSize must be multiple of 16';
         }
         // Lanzcos kernel
         let key = kernelSize.toString() + normalize + filterRatio + minimumPhase;
         this.kernel = BlipBuf.kernels[key];
-        if (this.kernel == undefined) {
+        if (this.kernel === undefined) {
             this.kernel = BlipBuf.genKernel(kernelSize, normalize, filterRatio, minimumPhase);
             console.log(this.kernel);
             BlipBuf.kernels[key] = this.kernel;
@@ -101,11 +101,19 @@ class BlipBuf {
     }
 
     // Complex Absolute Value
+    /**
+     * @param {number} x
+     * @param {number} y
+     */
     static cabs(x, y) {
         return Math.sqrt((x * x) + (y * y));
     }
 
     // Complex Exponential
+    /**
+     * @param {number} x
+     * @param {number} y
+     */
     static cexp(x, y) {
         let expx = Math.E ** x;
         return [expx * Math.cos(y), expx * Math.sin(y)];
@@ -455,6 +463,9 @@ class BiquadFilter {
         }
     }
 
+    /**
+     * @param {number} inSample
+     */
     transform(inSample) {
         for (let i = 0; i < this.numCascade; i++) {
             // compute result
@@ -475,6 +486,14 @@ class BiquadFilter {
         return inSample;
     }
 
+    /**
+     * @param {number} aa0
+     * @param {number} aa1
+     * @param {number} aa2
+     * @param {number} b0
+     * @param {number} b1
+     * @param {number} b2
+     */
     setCoefficients(aa0, aa1, aa2, b0, b1, b2) {
         if (isNaN(aa0)) throw "aa0 is NaN";
         if (isNaN(aa1)) throw "aa1 is NaN";
@@ -509,6 +528,12 @@ class BiquadFilter {
         this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
     }
 
+    /**
+     * @param {number} sampleRate
+     * @param {number} centreFrequency
+     * @param {number} q
+     * @param {number} dbGain
+     */
     setPeakingEq(sampleRate, centreFrequency, q, dbGain) {
         let w0 = 2 * Math.PI * centreFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
@@ -525,6 +550,11 @@ class BiquadFilter {
         this.setCoefficients(aa0, aa1, aa2, b0, b1, b2);
     }
 
+    /**
+     * @param {number} sampleRate
+     * @param {number} cutoffFrequency
+     * @param {number} q
+     */
     setHighPassFilter(sampleRate, cutoffFrequency, q) {
         let w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
@@ -563,6 +593,12 @@ class BiquadFilter {
         return filter;
     }
 
+    /**
+     * @param {number} order
+     * @param {number} sampleRate
+     * @param {number} centreFrequency
+     * @param {number} q
+     */
     static bandPassFilterConstantSkirtGain(order, sampleRate, centreFrequency, q) {
         let w0 = 2 * Math.PI * centreFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
@@ -578,6 +614,12 @@ class BiquadFilter {
         return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 
+    /**
+     * @param {number} order
+     * @param {number} sampleRate
+     * @param {number} centreFrequency
+     * @param {number} q
+     */
     static bandPassFilterConstantPeakGain(order, sampleRate, centreFrequency, q) {
         let w0 = 2 * Math.PI * centreFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
@@ -593,6 +635,12 @@ class BiquadFilter {
         return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 
+    /**
+     * @param {number} order
+     * @param {number} sampleRate
+     * @param {number} centreFrequency
+     * @param {number} q
+     */
     static notchFilter(order, sampleRate, centreFrequency, q) {
         let w0 = 2 * Math.PI * centreFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
@@ -608,6 +656,12 @@ class BiquadFilter {
         return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 
+    /**
+     * @param {number} order
+     * @param {number} sampleRate
+     * @param {number} centreFrequency
+     * @param {number} q
+     */
     static allPassFilter(order, sampleRate, centreFrequency, q) {
         let w0 = 2 * Math.PI * centreFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
@@ -623,12 +677,26 @@ class BiquadFilter {
         return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 
+    /**
+     * @param {number} order
+     * @param {number} sampleRate
+     * @param {number} centreFrequency
+     * @param {number} q
+     * @param {number} dbGain
+     */
     static peakingEQ(order, sampleRate, centreFrequency, q, dbGain) {
         let filter = new BiquadFilter(order,);
         filter.setPeakingEq(sampleRate, centreFrequency, q, dbGain);
         return filter;
     }
 
+    /**
+     * @param {number} order
+     * @param {number} sampleRate
+     * @param {number} cutoffFrequency
+     * @param {number} shelfSlope
+     * @param {number} dbGain
+     */
     static lowShelf(order, sampleRate, cutoffFrequency, shelfSlope, dbGain) {
         let w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
@@ -646,6 +714,13 @@ class BiquadFilter {
         return new BiquadFilter(order, a0, a1, a2, b0, b1, b2);
     }
 
+    /**
+     * @param {number} order
+     * @param {number} sampleRate
+     * @param {number} cutoffFrequency
+     * @param {number} shelfSlope
+     * @param {number} dbGain
+     */
     static highShelf(order, sampleRate, cutoffFrequency, shelfSlope, dbGain) {
         let w0 = 2 * Math.PI * cutoffFrequency / sampleRate;
         let cosw0 = Math.cos(w0);
@@ -665,6 +740,10 @@ class BiquadFilter {
 }
 
 
+/**
+ * @param {number} t
+ * @param {number} dt
+ */
 function polyBlep(t, dt) {
     // 0 <= t < 1
     if (t < dt) {
@@ -684,6 +763,10 @@ function polyBlep(t, dt) {
     }
 }
 
+/**
+ * @param {number} t
+ * @param {number} dt
+ */
 function polyBlepTest(t, dt) {
     // 0 <= t < 1
     if (t < dt) {

@@ -139,6 +139,7 @@ async function renderVideoSeq(sdat, id, outFile) {
         if (frameTimer >= 1 / FPS) {
             frameTimer -= 1 / FPS;
 
+            // @ts-ignore
             drawFsVis(ctx, frameTimer * 1000, fadeoutVolMul);
             let imageData = ctx.getImageData(0, 0, WIDTH, HEIGHT);
 
@@ -207,7 +208,7 @@ const sseqName = process.argv[3];
 let outFile = process.argv[4];
 if (outFile == undefined) {
     outFile = sseqName;
-};
+}
 let sdats = loadSdatsFromRom(fs.readFileSync(dsRomPath));
 // console.log(sdats)
 let sseqId = null;
