@@ -1,43 +1,42 @@
 // @ts-check
 
 /** GLOBALS GO HERE **/
-let debug = false;
+let g_debug = false;
 
 let g_enableStereoSeparation = false;
 let g_enableForceStereoSeparation = false;
 let g_enableAntiAliasing = true;
 let g_pureTuning = false;
 let g_pureTuningRootNote = 0;
-let g_enableSoundgoodizer = true;
 let g_enableFilter = true;
 let g_useCubicResampler = false;
 
 // Global metrics
-let instrumentsAdvanced = 0;
-let samplesConsidered = 0;
+let g_instrumentsAdvanced = 0;
+let g_samplesConsidered = 0;
 
 /** @type {ControllerBridge | null} */
-let currentBridge = null;
+let g_currentBridge = null;
 /** @type {FsVisControllerBridge | null} */
 let currentFsVisBridge = null;
 /** @type {string | null} */
-let currentlyPlayingName = null;
+let g_currentlyPlayingName = null;
 /** @type {Sdat | null} */
-let currentlyPlayingSdat = null;
+let g_currentlyPlayingSdat = null;
 /** @type {number} */
-let currentlyPlayingId = 0;
+let g_currentlyPlayingId = 0;
 /** @type {AudioPlayer | null} */
-let currentPlayer = null;
+let g_currentPlayer = null;
 
 /** @type {boolean[]} */
-let trackEnables = new Array(16).fill(true);
+let g_trackEnables = new Array(16).fill(true);
 
 /**
  * @param {string} name
  * @param {BlobPart} array
  */
 function downloadUint8Array(name, array) {
-    let blob = new Blob([array], { type: "application/octet-stream" });
+    let blob = new Blob([array], {type: "application/octet-stream"});
     let link = document.createElement('a');
     link.href = window.URL.createObjectURL(blob);
     link.download = name;
@@ -190,7 +189,7 @@ class AudioPlayer {
     /**
      * @param {number} bufferLength
      * @param {Function} needMoreSamples
-     * @param {number} sampleRate
+     * @param {number | null} sampleRate
      */
     constructor(bufferLength, needMoreSamples, sampleRate) {
         if (!AudioBuffer.prototype.copyToChannel) this.safariHax = true;
@@ -203,7 +202,7 @@ class AudioPlayer {
             || window.webkitAudioContext; // Sigh... Safari
 
         if (sampleRate) {
-            this.ctx = new AudioContext({ sampleRate: sampleRate });
+            this.ctx = new AudioContext({sampleRate: sampleRate});
         } else {
             this.ctx = new AudioContext();
         }
@@ -235,7 +234,7 @@ class AudioPlayer {
         document.addEventListener('touchend', fixAudioContext);
 
         this.gain = this.ctx.createGain();
-        this.gain.gain.value = 0.25;
+        this.gain.gain.value = 1;
         this.gain.connect(this.ctx.destination);
     }
 
@@ -401,8 +400,7 @@ class CircularBuffer {
             if (this.readPos >= this.size) {
                 this.readPos = 0;
             }
-        }
-        else {
+        } else {
             throw "CircularBuffer: underflow";
         }
         return data;
@@ -526,13 +524,13 @@ const MessageType = {
 
 class Sample {
     /**
-    * @param {Float64Array} data 
-    * @param {number} frequency
-    * @param {number} sampleRate
-    * @param {boolean} looping
-    * @param {number} loopPoint
-    *
-    */
+     * @param {Float64Array} data
+     * @param {number} frequency
+     * @param {number} sampleRate
+     * @param {boolean} looping
+     * @param {number} loopPoint
+     *
+     */
     constructor(data, frequency, sampleRate, looping, loopPoint) {
         this.data = data;
         this.frequency = frequency;
@@ -541,7 +539,7 @@ class Sample {
         this.loopPoint = loopPoint;
 
         this.resampleMode = ResampleMode.Nearest;
-        this.sampleLength = undefined;
+        this.sampleLength = 0;
     }
 }
 
@@ -641,11 +639,11 @@ class Bank {
 
 class SampleInstrument {
     /**
-    * @param {SampleSynthesizer} synth
-    * @param {number} instrNum
-    * @param {number} sampleRate 
-    * @param {Sample} sample
-    */
+     * @param {SampleSynthesizer} synth
+     * @param {number} instrNum
+     * @param {number} sampleRate
+     * @param {Sample} sample
+     */
     constructor(synth, instrNum, sampleRate, sample) {
         this.instrNum = instrNum;
         this.synth = synth;
@@ -685,7 +683,7 @@ class SampleInstrument {
     }
 
     advance() {
-        instrumentsAdvanced++;
+        g_instrumentsAdvanced++;
 
         let convertedSampleRate = this.freqRatio * this.sample.sampleRate;
         this.sampleT += this.invSampleRate * convertedSampleRate;
@@ -695,7 +693,7 @@ class SampleInstrument {
                 this.blipBuf.readOutSampleL();
                 this.output = this.getSampleDataAt(Math.floor(this.sampleT)) * this.volume;
 
-                samplesConsidered++;
+                g_samplesConsidered++;
                 break;
             case ResampleMode.Cubic:
                 let subT = this.sampleT % 1;
@@ -705,7 +703,7 @@ class SampleInstrument {
                 let p2 = this.getSampleDataAt(Math.floor(this.sampleT + 2));
                 let p3 = this.getSampleDataAt(Math.floor(this.sampleT + 3));
 
-                samplesConsidered++;
+                g_samplesConsidered++;
 
                 let valCubic = p1 + 0.5 * subT * (p2 - p0 + subT * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + subT * (3.0 * (p1 - p2) + p3 - p0)));
 
@@ -720,7 +718,7 @@ class SampleInstrument {
                     this.t += this.sampleRate / convertedSampleRate;
                     this.resampleT++;
 
-                    samplesConsidered++;
+                    g_samplesConsidered++;
                 }
 
                 this.output = this.blipBuf.readOutSampleL() * this.volume;
@@ -950,7 +948,7 @@ class SseqTrack {
         return num;
     }
 
-    /** 
+    /**
      * @param {boolean} fromKeyboard
      * @param {number} type
      * @param {number} param0
@@ -977,210 +975,210 @@ class SseqTrack {
         } else {
             switch (opcode) {
                 case 0xFE: // Allocate track
-                    {
-                        // This probably isn't important for emulation
-                        let alloced = this.readPcInc(2);
+                {
+                    // This probably isn't important for emulation
+                    let alloced = this.readPcInc(2);
 
-                        for (let i = 0; i < 16; i++) {
-                            if (bitTest(alloced, i)) {
-                                this.debugLog("Allocated track " + i);
-                            }
+                    for (let i = 0; i < 16; i++) {
+                        if (bitTest(alloced, i)) {
+                            this.debugLog("Allocated track " + i);
                         }
-                        break;
                     }
+                    break;
+                }
                 case 0x93: // Start new track thread 
-                    {
-                        let trackNum = this.readPcInc();
-                        let trackOffs = this.readPcInc(3);
+                {
+                    let trackNum = this.readPcInc();
+                    let trackOffs = this.readPcInc(3);
 
-                        this.controller.startTrack(trackNum, trackOffs);
+                    this.controller.startTrack(trackNum, trackOffs);
 
-                        this.debugLogForce("Started track thread " + trackNum);
-                        this.debugLog("Offset: " + hex(trackOffs, 6));
+                    this.debugLogForce("Started track thread " + trackNum);
+                    this.debugLog("Offset: " + hex(trackOffs, 6));
 
-                        break;
-                    }
+                    break;
+                }
                 case 0xC7: // Mono / Poly
-                    {
-                        let param = this.readPcInc();
-                        this.mono = bitTest(param, 0);
-                        break;
-                    }
+                {
+                    let param = this.readPcInc();
+                    this.mono = bitTest(param, 0);
+                    break;
+                }
                 case 0xCE: // Portamento On / Off
-                    {
-                        this.portamentoEnable = this.readPcInc();
-                        this.debugLog("Portamento On / Off: " + this.portamentoEnable);
-                        break;
-                    }
+                {
+                    this.portamentoEnable = this.readPcInc();
+                    this.debugLog("Portamento On / Off: " + this.portamentoEnable);
+                    break;
+                }
                 case 0xCF: // Portamento Time
-                    {
-                        this.portamentoTime = this.readPcInc();
-                        this.debugLog("Portamento Time: " + this.portamentoTime);
-                        break;
-                    }
+                {
+                    this.portamentoTime = this.readPcInc();
+                    this.debugLog("Portamento Time: " + this.portamentoTime);
+                    break;
+                }
                 case 0xE1: // BPM
-                    {
-                        this.bpm = this.readPcInc(2);
-                        this.debugLog("BPM: " + this.bpm);
-                        break;
-                    }
+                {
+                    this.bpm = this.readPcInc(2);
+                    this.debugLog("BPM: " + this.bpm);
+                    break;
+                }
                 case 0xC1: // Volume
-                    {
-                        this.volume = this.readPcInc();
-                        this.sendMessage(false, MessageType.VolumeChange, this.volume);
-                        this.debugLog("Volume: " + this.volume);
-                        break;
-                    }
+                {
+                    this.volume = this.readPcInc();
+                    this.sendMessage(false, MessageType.VolumeChange, this.volume);
+                    this.debugLog("Volume: " + this.volume);
+                    break;
+                }
                 case 0x81: // Set bank and program
-                    {
-                        let bankAndProgram = this.readVariableLength();
-                        this.program = bankAndProgram & 0x7F;
-                        this.bank = (bankAndProgram >> 7) & 0x7F;
+                {
+                    let bankAndProgram = this.readVariableLength();
+                    this.program = bankAndProgram & 0x7F;
+                    this.bank = (bankAndProgram >> 7) & 0x7F;
 
-                        this.debugLog(`Bank: ${this.bank} Program: ${this.program}`);
+                    this.debugLog(`Bank: ${this.bank} Program: ${this.program}`);
 
-                        this.sendMessage(false, MessageType.InstrumentChange, this.bank, this.program);
-                        break;
-                    }
+                    this.sendMessage(false, MessageType.InstrumentChange, this.bank, this.program);
+                    break;
+                }
                 case 0xC2: // Master Volume
-                    {
-                        this.masterVolume = this.readPcInc();
-                        this.debugLogForce("Master Volume: " + this.masterVolume);
-                        break;
-                    }
+                {
+                    this.masterVolume = this.readPcInc();
+                    this.debugLogForce("Master Volume: " + this.masterVolume);
+                    break;
+                }
                 case 0xC0: // Pan
-                    {
-                        this.pan = this.readPcInc();
-                        if (this.pan === 127) this.pan = 128;
-                        this.debugLog("Pan: " + this.pan);
-                        this.sendMessage(false, MessageType.PanChange, this.pan);
-                        break;
-                    }
+                {
+                    this.pan = this.readPcInc();
+                    if (this.pan === 127) this.pan = 128;
+                    this.debugLog("Pan: " + this.pan);
+                    this.sendMessage(false, MessageType.PanChange, this.pan);
+                    break;
+                }
                 case 0xC6: // Track Priority
-                    {
-                        this.priority = this.readPcInc();
-                        this.debugLog("Track Priority: " + this.priority);
-                        break;
-                    }
+                {
+                    this.priority = this.readPcInc();
+                    this.debugLog("Track Priority: " + this.priority);
+                    break;
+                }
                 case 0xC5: // Pitch Bend Range
-                    {
-                        this.pitchBendRange = this.readPcInc();
-                        this.debugLog("Pitch Bend Range: " + this.pitchBendRange);
-                        this.sendMessage(false, MessageType.PitchBend);
-                        break;
-                    }
+                {
+                    this.pitchBendRange = this.readPcInc();
+                    this.debugLog("Pitch Bend Range: " + this.pitchBendRange);
+                    this.sendMessage(false, MessageType.PitchBend);
+                    break;
+                }
                 case 0xCA: // LFO Depth
-                    {
-                        this.lfoDepth = this.readPcInc();
-                        this.debugLog("LFO Depth: " + this.lfoDepth);
-                        break;
-                    }
+                {
+                    this.lfoDepth = this.readPcInc();
+                    this.debugLog("LFO Depth: " + this.lfoDepth);
+                    break;
+                }
                 case 0xCB: // LFO Speed
-                    {
-                        this.lfoSpeed = this.readPcInc();
-                        this.debugLog("LFO Speed: " + this.lfoSpeed);
-                        break;
-                    }
+                {
+                    this.lfoSpeed = this.readPcInc();
+                    this.debugLog("LFO Speed: " + this.lfoSpeed);
+                    break;
+                }
                 case 0xCC: // LFO Type
-                    {
-                        this.lfoType = this.readPcInc();
-                        this.debugLog("LFO Type: " + this.lfoType);
-                        if (this.lfoType !== LfoType.Volume) {
-                            console.warn("Unimplemented LFO type: " + this.lfoType);
-                        }
-                        break;
+                {
+                    this.lfoType = this.readPcInc();
+                    this.debugLog("LFO Type: " + this.lfoType);
+                    if (this.lfoType !== LfoType.Volume) {
+                        console.warn("Unimplemented LFO type: " + this.lfoType);
                     }
+                    break;
+                }
                 case 0xCD: // LFO Range
-                    {
-                        this.lfoRange = this.readPcInc();
-                        this.debugLog("LFO Range: " + this.lfoRange);
-                        break;
-                    }
+                {
+                    this.lfoRange = this.readPcInc();
+                    this.debugLog("LFO Range: " + this.lfoRange);
+                    break;
+                }
                 case 0xC4: // Pitch Bend
-                    {
-                        this.pitchBend = this.readPcInc();
-                        this.debugLog("Pitch Bend: " + this.pitchBend);
-                        this.sendMessage(false, MessageType.PitchBend);
-                        break;
-                    }
+                {
+                    this.pitchBend = this.readPcInc();
+                    this.debugLog("Pitch Bend: " + this.pitchBend);
+                    this.sendMessage(false, MessageType.PitchBend);
+                    break;
+                }
                 case 0x80: // Rest
-                    {
-                        this.restingFor = this.readVariableLength();
-                        this.debugLog("Resting For: " + this.restingFor);
-                        break;
-                    }
+                {
+                    this.restingFor = this.readVariableLength();
+                    this.debugLog("Resting For: " + this.restingFor);
+                    break;
+                }
                 case 0x94: // Jump
-                    {
-                        let dest = this.readPcInc(3);
-                        this.pc = dest;
-                        this.debugLogForce(`Jump to: ${hexN(dest, 6)} Tick: ${this.controller.ticksElapsed}`);
+                {
+                    let dest = this.readPcInc(3);
+                    this.pc = dest;
+                    this.debugLogForce(`Jump to: ${hexN(dest, 6)} Tick: ${this.controller.ticksElapsed}`);
 
-                        this.sendMessage(false, MessageType.Jump);
-                        break;
-                    }
+                    this.sendMessage(false, MessageType.Jump);
+                    break;
+                }
                 case 0x95: // Call
-                    {
-                        let dest = this.readPcInc(3);
+                {
+                    let dest = this.readPcInc(3);
 
-                        // Push the return address
-                        this.push(this.pc);
-                        this.pc = dest;
-                        break;
-                    }
+                    // Push the return address
+                    this.push(this.pc);
+                    this.pc = dest;
+                    break;
+                }
                 case 0xFD: // Return
-                    {
-                        this.pc = this.pop();
-                        break;
-                    }
+                {
+                    this.pc = this.pop();
+                    break;
+                }
                 case 0xB0: // TODO: According to sseq2mid: arithmetic operations?
-                    {
-                        this.readPcInc(3);
-                        break;
-                    }
+                {
+                    this.readPcInc(3);
+                    break;
+                }
                 case 0xE0: // LFO Delay
-                    {
-                        this.lfoDelay = this.readPcInc(2);
-                        this.debugLog("LFO Delay: " + this.lfoDelay);
-                        break;
-                    }
+                {
+                    this.lfoDelay = this.readPcInc(2);
+                    this.debugLog("LFO Delay: " + this.lfoDelay);
+                    break;
+                }
                 case 0xD5: // Expression
-                    {
-                        this.expression = this.readPcInc();
-                        this.debugLog("Expression: " + this.expression);
-                        break;
-                    }
+                {
+                    this.expression = this.readPcInc();
+                    this.debugLog("Expression: " + this.expression);
+                    break;
+                }
                 case 0xFF: // End of Track
-                    {
-                        this.controller.endTrack(this.id);
-                        this.sendMessage(false, MessageType.TrackEnded);
-                        // Set restingFor to non-zero since the controller checks it to stop executing
-                        this.restingFor = 1;
-                        break;
-                    }
+                {
+                    this.controller.endTrack(this.id);
+                    this.sendMessage(false, MessageType.TrackEnded);
+                    // Set restingFor to non-zero since the controller checks it to stop executing
+                    this.restingFor = 1;
+                    break;
+                }
                 case 0xD0: // Attack Rate
-                    {
-                        console.warn("[WARN TODO] Attack rate set by sequence");
-                        this.attackRate = this.readPcInc();
-                        break;
-                    }
+                {
+                    console.warn("[WARN TODO] Attack rate set by sequence");
+                    this.attackRate = this.readPcInc();
+                    break;
+                }
                 case 0xD1: // Decay Rate
-                    {
-                        console.warn("[WARN TODO] Decay rate set by sequence");
-                        this.decayRate = this.readPcInc();
-                        break;
-                    }
+                {
+                    console.warn("[WARN TODO] Decay rate set by sequence");
+                    this.decayRate = this.readPcInc();
+                    break;
+                }
                 case 0xD2: // Sustain Rate
-                    {
-                        console.warn("[WARN TODO] Sustain rate set by sequence");
-                        this.sustainRate = this.readPcInc();
-                        break;
-                    }
+                {
+                    console.warn("[WARN TODO] Sustain rate set by sequence");
+                    this.sustainRate = this.readPcInc();
+                    break;
+                }
                 case 0xD3: // Release Rate
-                    {
-                        console.warn("[WARN TODO] Release rate set by sequence");
-                        this.releaseRate = this.readPcInc();
-                        break;
-                    }
+                {
+                    console.warn("[WARN TODO] Release rate set by sequence");
+                    this.releaseRate = this.readPcInc();
+                    break;
+                }
                 default:
                     console.error(`${this.id}: Unknown opcode: ` + hex(opcode, 2) + " PC: " + hex(opcodePc, 6));
             }
@@ -1219,12 +1217,10 @@ class DelayLine {
 
 class SampleSynthesizer {
     /**
-     * @param {number} id
      * @param {number} sampleRate
      * @param {number} instrsAvailable
      */
-    constructor(id, sampleRate, instrsAvailable) {
-        this.id = id;
+    constructor(sampleRate, instrsAvailable) {
         this.instrsAvailable = instrsAvailable;
 
         /** @type {SampleInstrument[]} */
@@ -1597,14 +1593,11 @@ const sLfoSinTable = [
 function SND_SinIdx(x) {
     if (x < 0x20) {
         return sLfoSinTable[x];
-    }
-    else if (x < 0x40) {
+    } else if (x < 0x40) {
         return sLfoSinTable[0x40 - x];
-    }
-    else if (x < 0x60) {
+    } else if (x < 0x60) {
         return (-sLfoSinTable[x - 0x40]) << 24 >> 24;
-    }
-    else {
+    } else {
         return (-sLfoSinTable[0x20 - (x - 0x60)]) << 24 >> 24;
     }
 }
@@ -1648,7 +1641,8 @@ class ControllerBridge {
                     typeString = "Single-Sample Instrument";
                     break;
                 default:
-                    throw new Error();
+                    console.warn(`Unrecognized instrument type: ${instrument.fRecord}`);
+                    break;
             }
 
             if (instrument.fRecord !== 0) {
@@ -1675,7 +1669,7 @@ class ControllerBridge {
         /** @type {SampleSynthesizer[]} */
         this.synthesizers = new Array(16);
         for (let i = 0; i < 16; i++) {
-            this.synthesizers[i] = new SampleSynthesizer(i, sampleRate, 16);
+            this.synthesizers[i] = new SampleSynthesizer(sampleRate, 16);
         }
 
         this.jumps = 0;
@@ -1706,7 +1700,6 @@ class ControllerBridge {
 
                 if (this.controller.ticksElapsed >= entry.endTime && !entry.fromKeyboard) {
                     if (entry.adsrState !== AdsrState.Release) {
-                        // console.log("to release: " + instrument.release[data.instrumentEntryIndex]);
                         this.notesOn[entry.trackNum][entry.midiNote] = 0;
                         entry.adsrState = AdsrState.Release;
                     }
@@ -1771,18 +1764,14 @@ class ControllerBridge {
                         instr.volume = calcChannelVolume(entry.velocity, entry.adsrTimer);
                         // one instrument hits full volume, start decay
                         if (entry.adsrTimer === 0) {
-                            // console.log("to decay: " + instrument.decay[data.instrumentEntryIndex])
                             entry.adsrState = AdsrState.Decay;
                         }
                         break;
                     case AdsrState.Decay:
                         entry.adsrTimer -= instrument.decayCoefficient[entry.instrumentEntryIndex];
-                        // console.log(data.adsrTimer);
                         // when instrument decays to sustain volume, go into sustain state
 
                         if (entry.adsrTimer <= instrument.sustainLevel[entry.instrumentEntryIndex]) {
-                            // console.log("to sustain:  " + instrument.sustain[data.instrumentEntryIndex]);
-                            // console.log("vol: " + (12 8 + data.adsrTimer / 723));
                             entry.adsrTimer = instrument.sustainLevel[entry.instrumentEntryIndex];
                             entry.adsrState = AdsrState.Sustain;
                         }
@@ -1804,8 +1793,7 @@ class ControllerBridge {
                         }
                         break;
                 }
-            }
-            else {
+            } else {
                 // @ts-ignore
                 indexToDelete = index;
                 this.notesOn[entry.trackNum][entry.midiNote] = 0;
@@ -1867,29 +1855,27 @@ class ControllerBridge {
                                     }
                                 }
 
-                                // if (msg.fromKeyboard) { 
-                                // console.log(this.bank);
-                                // console.log("Program " + this.controller.tracks[msg.trackNum].program);
-                                // console.log("MIDI Note " + midiNote);
-                                // console.log("Base MIDI Note: " + instrument.noteNumber[index]);
+                                if (g_debug) {
+                                    console.log(this.bank);
+                                    console.log("Program " + this.controller.tracks[msg.trackNum].program);
+                                    console.log("MIDI Note " + midiNote);
+                                    console.log("Base MIDI Note: " + instrument.noteNumber[index]);
 
-                                // if (instrument.fRecord === InstrumentType.PsgPulse) {
-                                //     console.log("PSG Pulse");
-                                // }
+                                    if (instrument.fRecord === InstrumentType.PsgPulse) {
+                                        console.log("PSG Pulse");
+                                    }
 
-                                // console.log("Attack: " + instrument.attack[index]);
-                                // console.log("Decay: " + instrument.decay[index]);
-                                // console.log("Sustain: " + instrument.sustain[index]);
-                                // console.log("Release: " + instrument.release[index]);
+                                    console.log("Attack: " + instrument.attack[index]);
+                                    console.log("Decay: " + instrument.decay[index]);
+                                    console.log("Sustain: " + instrument.sustain[index]);
+                                    console.log("Release: " + instrument.release[index]);
 
-                                // console.log("Attack Coefficient: " + instrument.attackCoefficient[index]);
-                                // console.log("Decay Coefficient: " + instrument.decayCoefficient[index]);
-                                // console.log("Sustain Level: " + instrument.sustainLevel[index]);
-                                // console.log("Release Coefficient: " + instrument.releaseCoefficient[index]);
+                                    console.log("Attack Coefficient: " + instrument.attackCoefficient[index]);
+                                    console.log("Decay Coefficient: " + instrument.decayCoefficient[index]);
+                                    console.log("Sustain Level: " + instrument.sustainLevel[index]);
+                                    console.log("Release Coefficient: " + instrument.releaseCoefficient[index]);
+                                }
 
-                                // }
-
-                                let track = this.controller.tracks[msg.trackNum];
                                 let initialVolume = instrument.attackCoefficient[index] === 0 ? calcChannelVolume(velocity, 0) : 0;
                                 let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, midiNote, initialVolume, this.controller.ticksElapsed);
 
@@ -1951,11 +1937,6 @@ class ControllerBridge {
                 }
             }
         }
-
-    }
-
-    destroy() {
-        this.destroyed = true;
     }
 }
 
@@ -1968,9 +1949,9 @@ function bitTest(i, bit) {
 }
 
 /**
-* @param {Sdat} sdat
-* @param {number} id
-*/
+ * @param {Sdat} sdat
+ * @param {number} id
+ */
 async function playSeqById(sdat, id) {
     await playSeq(sdat, sdat.sseqIdNameDict[id]);
 }
@@ -1980,22 +1961,21 @@ async function playSeqById(sdat, id) {
  * @param {string} name
  */
 async function playSeq(sdat, name) {
-    currentlyPlayingSdat = sdat;
-    currentlyPlayingName = name;
-    if (currentBridge) {
-        currentBridge.destroy();
-        await currentPlayer?.ctx.close();
+    g_currentlyPlayingSdat = sdat;
+    g_currentlyPlayingName = name;
+    if (g_currentBridge) {
+        await g_currentPlayer?.ctx.close();
     }
 
     const BUFFER_SIZE = 1024;
     let player = new AudioPlayer(BUFFER_SIZE, synthesizeMore, null);
-    currentPlayer = player;
+    g_currentPlayer = player;
     const SAMPLE_RATE = player.sampleRate;
     console.log("Playing with sample rate: " + SAMPLE_RATE);
 
     let id = sdat.sseqNameIdDict[name];
 
-    currentlyPlayingId = id;
+    g_currentlyPlayingId = id;
 
     let bufferL = new Float64Array(BUFFER_SIZE);
     let bufferR = new Float64Array(BUFFER_SIZE);
@@ -2003,10 +1983,11 @@ async function playSeq(sdat, name) {
     let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 5);
     let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
 
-    currentBridge = bridge;
+    g_currentBridge = bridge;
     currentFsVisBridge = fsVisBridge;
 
     let timer = 0;
+
     function synthesizeMore() {
         let startTimestamp = performance.now();
 
@@ -2019,13 +2000,12 @@ async function playSeq(sdat, name) {
                 bridge.tick();
                 fsVisBridge.tick();
             }
-            // synthesizer.play(440);
 
             let valL = 0;
             let valR = 0;
             for (let i = 0; i < 16; i++) {
                 bridge.synthesizers[i].nextSample();
-                if (trackEnables[i]) {
+                if (g_trackEnables[i]) {
                     valL += bridge.synthesizers[i].valL;
                     valR += bridge.synthesizers[i].valR;
                 }
@@ -2046,7 +2026,7 @@ async function playSeq(sdat, name) {
 }
 
 /**
- * @param {Sample} sample 
+ * @param {Sample} sample
  */
 async function downloadSample(sample) {
     let totalSamples = 0;
@@ -2117,7 +2097,6 @@ const adpcmTable = [
     0x5771, 0x602F, 0x69CE, 0x7462, 0x7FFF
 ];
 
-
 /**
  * Decodes IMA-ADPCM to PCM16
  * @param {Uint8Array} adpcmData
@@ -2143,8 +2122,7 @@ function decodeAdpcm(adpcmData) {
 
             if ((data & 8) === 8) {
                 currentValue = Math.max(currentValue - diff, -0x7FFF);
-            }
-            else {
+            } else {
                 currentValue = Math.min(currentValue + diff, 0x7FFF);
             }
             adpcmIndex = clamp(adpcmIndex + indexTable[data & 7], 0, 88);
@@ -2181,7 +2159,6 @@ function decodeWavToSample(wavData, sampleFrequency) {
 
     // Number of bytes in the wav data
     let subchunk2Size = read32LE(wavData, 40);
-
 
     for (let i = 44; i < 44 + subchunk2Size; i += bitsPerSample / 8 * numChannels) {
         switch (bitsPerSample) {
@@ -2248,7 +2225,9 @@ function playStrm(strmData) {
     let decodedR;
     let format;
     switch (strmData[0x18]) {
-        case 0: format = "PCM8"; break;
+        case 0:
+            format = "PCM8";
+            break;
         case 1:
             format = "PCM16";
             decodedL = decodePcm16(waveDataL);
@@ -2280,19 +2259,15 @@ function playStrm(strmData) {
             }
         }
 
-        // console.log(inBufferPos);
-
         player.queueAudio(bufferL, bufferR);
-
-        // console.log("Syntheszing more audio");
     }
 
     let player = new AudioPlayer(BUFFER_SIZE, synthesizeMore, SAMPLE_RATE);
     synthesizeMore();
 }
 
-/** 
- * @param {Sample} sample 
+/**
+ * @param {Sample} sample
  * */
 function playSample(sample) {
     return /** @type {Promise<void>} */(new Promise(resolve => {
@@ -2338,7 +2313,6 @@ function playSample(sample) {
 
         let player = new AudioPlayer(BUFFER_SIZE, synthesizeMore, SAMPLE_RATE);
         synthesizeMore();
-        console.log("start");
     }));
 }
 
@@ -2502,7 +2476,6 @@ function parseSdatFromRom(data, offset) {
             if (symbNameOffs !== 0) {
                 let bankName = String.fromCharCode(...bankNameArr);
 
-                // console.log(bankName);
                 sdat.sbnkNameIdDict[bankName] = i;
                 sdat.sbnkIdNameDict[i] = bankName;
             }
@@ -2625,12 +2598,9 @@ function parseSdatFromRom(data, offset) {
         }
 
         sdat.fat[i] = fileData;
-
-        // console.log(`Loaded FAT file id:${i} size:${fileSize}`);
     }
 
     // Decode sound banks
-    // console.log(sdat.sbnkInfos);
     for (let i = 0; i < sdat.sbnkInfos.length; i++) {
         let bank = new Bank();
 
@@ -2639,10 +2609,8 @@ function parseSdatFromRom(data, offset) {
         if (bankInfo !== null) {
             let bankFile = sdat.fat[bankInfo.fileId];
 
-            // downloadUint8Array(sdat.sbnkIdNameDict[i] + ".sbnk", bankFile);
-
             let numberOfInstruments = read32LE(bankFile, 0x38);
-            if (debug)
+            if (g_debug)
                 console.log(`Bank ${i} / ${sdat.sbnkIdNameDict[i]}: ${numberOfInstruments} instruments`);
             for (let j = 0; j < numberOfInstruments; j++) {
                 let fRecord = bankFile[0x3C + j * 4];
@@ -2692,10 +2660,6 @@ function parseSdatFromRom(data, offset) {
                 function readRecordData(index, offset) {
                     instrument.swavInfoId[index] = read16LE(bankFile, recordOffset + 0x0 + offset);
                     instrument.swarInfoId[index] = read16LE(bankFile, recordOffset + 0x2 + offset);
-                    // if (i === 4) {
-                    //     console.log(`Instrument ${j}, Record ${index}: SWAV Info ID offset:${hex(recordOffset + 0x0 + offset, 0)} value:${instrument.swavInfoId[index]}`);
-                    //     console.log(`Instrument ${j}, Record ${index}: SWAR Info ID offset:${hex(recordOffset + 0x2 + offset, 0)} value:${instrument.swarInfoId[index]}`);
-                    // }
                     instrument.noteNumber[index] = bankFile[recordOffset + 0x4 + offset];
                     instrument.attack[index] = bankFile[recordOffset + 0x5 + offset];
                     instrument.attackCoefficient[index] = getEffectiveAttack(instrument.attack[index]);
@@ -2719,49 +2683,38 @@ function parseSdatFromRom(data, offset) {
                         break;
 
                     case InstrumentType.Drumset: // Drumset 
-                        {
-                            let instrumentCount = bankFile[recordOffset + 1] - bankFile[recordOffset] + 1;
+                    {
+                        let instrumentCount = bankFile[recordOffset + 1] - bankFile[recordOffset] + 1;
 
-                            instrument.lowerNote = bankFile[recordOffset + 0];
-                            instrument.upperNote = bankFile[recordOffset + 1];
+                        instrument.lowerNote = bankFile[recordOffset + 0];
+                        instrument.upperNote = bankFile[recordOffset + 1];
 
-                            for (let k = 0; k < instrumentCount; k++) {
-                                readRecordData(k, 4 + k * 12);
-                            }
-                            break;
+                        for (let k = 0; k < instrumentCount; k++) {
+                            readRecordData(k, 4 + k * 12);
                         }
+                        break;
+                    }
                     case InstrumentType.MultiSample: // Multi-Sample Instrument
-                        {
-                            let instrumentCount = 0;
+                    {
+                        let instrumentCount = 0;
 
-                            for (let k = 0; k < 8; k++) {
-                                let end = bankFile[recordOffset + k];
-                                instrument.regionEnd[k] = end;
-                                if (end === 0) {
-                                    instrumentCount = k;
-                                    break;
-                                } else if (end === 0x7F) {
-                                    instrumentCount = k + 1;
-                                    break;
-                                }
+                        for (let k = 0; k < 8; k++) {
+                            let end = bankFile[recordOffset + k];
+                            instrument.regionEnd[k] = end;
+                            if (end === 0) {
+                                instrumentCount = k;
+                                break;
+                            } else if (end === 0x7F) {
+                                instrumentCount = k + 1;
+                                break;
                             }
-
-                            // if (i === 4) {
-                            //     console.log(`Multi-Sample record offset: ${hex(recordOffset, 0)}`);
-                            //     console.log(`Instrument count: ` + instrumentCount);
-                            // }
-
-
-                            for (let k = 0; k < instrumentCount; k++) {
-                                readRecordData(k, 10 + k * 12);
-
-                                // if (i === 4) {
-                                //     console.log(`Read in record data offset:${hex(10 + k * 12, 0)}`);
-                                // }
-
-                            }
-                            break;
                         }
+
+                        for (let k = 0; k < instrumentCount; k++) {
+                            readRecordData(k, 10 + k * 12);
+                        }
+                        break;
+                    }
 
                     default:
                         alert(`Instrument ${j}: Invalid fRecord: ${fRecord} Offset:${recordOffset}`);
@@ -2855,52 +2808,38 @@ function searchForSequences(data, sequence) {
     return seqs;
 }
 
-/**
- * @param {number} keyInOctave
- */
-function getKeyNum(keyInOctave) {
-    // THIS IS STARTING FROM THE KEY OF A
-    switch (keyInOctave) {
-        case 0: return 0;
-        case 2: return 1;
-        case 3: return 2;
-        case 5: return 3;
-        case 7: return 4;
-        case 8: return 5;
-        case 10: return 6;
-
-        case 1: return 0;
-        case 4: return 2;
-        case 6: return 3;
-        case 9: return 5;
-        case 11: return 6;
-
-        default: return 0;
-    }
+// THIS IS STARTING FROM THE KEY OF A
+// index is the "key in the octave"
+const getKeyNum = {
+    0: 0,
+    2: 1,
+    3: 2,
+    5: 3,
+    7: 4,
+    8: 5,
+    10: 6,
+    1: 0,
+    4: 2,
+    6: 3,
+    9: 5,
+    11: 6,
 }
 
-/**
- * @param {number} keyInOctave
- */
-function isBlackKey(keyInOctave) {
-    // THIS IS STARTING FROM THE KEY OF A
-    switch (keyInOctave) {
-        case 0: return false;
-        case 2: return false;
-        case 3: return false;
-        case 5: return false;
-        case 7: return false;
-        case 8: return false;
-        case 10: return false;
-
-        case 1: return true;
-        case 4: return true;
-        case 6: return true;
-        case 9: return true;
-        case 11: return true;
-
-        default: return false;
-    }
+// THIS IS STARTING FROM THE KEY OF A
+// index is the "key in the octave"
+const isBlackKey = {
+    0: false,
+    2: false,
+    3: false,
+    5: false,
+    7: false,
+    8: false,
+    10: false,
+    1: true,
+    4: true,
+    6: true,
+    9: true,
+    11: true,
 }
 
 const fsVisPalette = [
@@ -2922,14 +2861,14 @@ const fsVisPalette = [
     "#fa30a3",
 ];
 
-
 let activeNoteTrackNums = new Int8Array(128).fill(-1);
 let lastTickTime = 0;
 let lastTicks = 0;
+
 /**
-@param {CanvasRenderingContext2D} ctx 
-@param {number} time 
-@param {number} noteAlpha */
+ @param {CanvasRenderingContext2D} ctx
+ @param {number} time
+ @param {number} noteAlpha */
 function drawFsVis(ctx, time, noteAlpha) {
     ctx.imageSmoothingEnabled = false;
 
@@ -2945,7 +2884,7 @@ function drawFsVis(ctx, time, noteAlpha) {
     let pixelY = 1 / ctx.canvas.height;
 
     ctx.fillStyle = "#FF0000";
-    if (currentFsVisBridge && currentBridge && currentlyPlayingSdat) {
+    if (currentFsVisBridge && g_currentBridge && g_currentlyPlayingSdat) {
 
         let activeNotes = currentFsVisBridge.activeNotes;
 
@@ -2960,10 +2899,10 @@ function drawFsVis(ctx, time, noteAlpha) {
             let midiNote = entry.param0;
             let duration = entry.param2;
 
-            let bpm = currentBridge.controller.tracks[0].bpm;
+            let bpm = g_currentBridge.controller.tracks[0].bpm;
             let sPerTick = (1 / (bpm / 60)) / 48;
 
-            let ticksAdj = currentBridge.controller.ticksElapsed;
+            let ticksAdj = g_currentBridge.controller.ticksElapsed;
             ticksAdj += (time - lastTickTime) / 1000 / sPerTick;
             let relTime = entry.timestamp - ticksAdj;
 
@@ -2980,8 +2919,8 @@ function drawFsVis(ctx, time, noteAlpha) {
             let octave = Math.floor(pianoKey / 12);
             let keyInOctave = pianoKey % 12;
 
-            let keyNum = getKeyNum(keyInOctave);
-            let blackKey = isBlackKey(keyInOctave);
+            let keyNum = getKeyNum[keyInOctave];
+            let blackKey = isBlackKey[keyInOctave];
 
             let whiteKeyNum = octave * 7 + keyNum;
             ctx.strokeStyle = "#444444";
@@ -3034,14 +2973,12 @@ function drawFsVis(ctx, time, noteAlpha) {
                 let octave = Math.floor(j / 12);
                 let keyInOctave = j % 12;
 
-                let keyNum = getKeyNum(keyInOctave);
-                let blackKey = isBlackKey(keyInOctave);
-
+                let keyNum = getKeyNum[keyInOctave];
+                let blackKey = isBlackKey[keyInOctave];
 
                 if (blackKey === black) {
                     let whiteKeyNum = octave * 7 + keyNum;
 
-                    let fillStyle;
                     if (!blackKey) {
                         if (activeNoteTrackNums[midiNote] !== -1) {
                             ctx.fillStyle = fsVisPalette[activeNoteTrackNums[midiNote]];
@@ -3097,10 +3034,9 @@ function drawFsVis(ctx, time, noteAlpha) {
         } else {
             // Running under a browser
             ctx.font = 'bold 24px monospace';
-            ctx.fillText(`${currentlyPlayingSdat.sseqIdNameDict[currentlyPlayingId]} (ID: ${currentlyPlayingId})`, 24, 24);
+            ctx.fillText(`${g_currentlyPlayingSdat.sseqIdNameDict[g_currentlyPlayingId]} (ID: ${g_currentlyPlayingId})`, 24, 24);
         }
     }
-
 
     if (currentFsVisBridge)
         lastTicks = currentFsVisBridge.controller.ticksElapsed;

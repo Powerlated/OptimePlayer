@@ -200,9 +200,8 @@ window.onload = async () => {
     async function renderAndDownloadSeq(sdat, name) {
         progressModal.style.display = "block";
 
-        currentBridge?.destroy();
-        await currentPlayer?.ctx.close();
-        currentBridge = null;
+        await g_currentPlayer?.ctx.close();
+        g_currentBridge = null;
 
         let id = sdat.sseqNameIdDict[name];
 
@@ -223,8 +222,8 @@ window.onload = async () => {
 
         let startTimestamp = performance.now();
 
-        instrumentsAdvanced = 0;
-        samplesConsidered = 0;
+        g_instrumentsAdvanced = 0;
+        g_samplesConsidered = 0;
 
         // keep it under 480 seconds
 
@@ -284,7 +283,7 @@ window.onload = async () => {
                 let valL = 0;
                 let valR = 0;
                 for (let i = 0; i < 16; i++) {
-                    if (trackEnables[i]) {
+                    if (g_trackEnables[i]) {
                         let synth = bridge.synthesizers[i];
                         synth.nextSample();
                         valL += synth.valL;
@@ -314,8 +313,8 @@ window.onload = async () => {
 
             console.log(
                 `Rendered ${sample} samples in ${Math.round(elapsed * 10) / 10} seconds (${Math.round(sample / elapsed)} samples/s) (${Math.round(sample / elapsed / SAMPLE_RATE * 10) / 10}x realtime speed)
-                        Average instruments advanced per sample: ${Math.round((instrumentsAdvanced / sample) * 10) / 10}
-                        Average samples considered per sample: ${Math.round((samplesConsidered / sample) * 10) / 10}
+                        Average instruments advanced per sample: ${Math.round((g_instrumentsAdvanced / sample) * 10) / 10}
+                        Average samples considered per sample: ${Math.round((g_samplesConsidered / sample) * 10) / 10}
                         Stereo separation: ${g_enableStereoSeparation}
                         Audio anti-aliasing ${g_enableAntiAliasing}
                         Enable filter: ${g_enableFilter}
@@ -370,21 +369,21 @@ window.onload = async () => {
                         let octave = Math.floor(j / 12);
                         let keyInOctave = j % 12;
 
-                        let keyNum = getKeyNum(keyInOctave);
-                        let blackKey = isBlackKey(keyInOctave);
+                        let keyNum = getKeyNum[keyInOctave];
+                        let blackKey = isBlackKey[keyInOctave];
 
-                        if (blackKey == black) {
+                        if (blackKey === black) {
                             let whiteKeyNum = octave * 7 + keyNum;
 
                             let fillStyle;
                             if (!blackKey) {
-                                if (ctx.fillStyle != fillStyle) {
+                                if (ctx.fillStyle !== fillStyle) {
                                     ctx.fillStyle = "#ffffff";
                                 }
 
                                 ctx.fillRect(ofsX + 3 + whiteKeyNum * whiteKeyWidth, ofsY + 3 + trackNum * sectionHeight, whiteKeyWidth, whiteKeyHeight);
                             } else {
-                                if (ctx.fillStyle != fillStyle) {
+                                if (ctx.fillStyle !== fillStyle) {
                                     ctx.fillStyle = "#dddddd";
                                 }
 
@@ -428,15 +427,14 @@ window.onload = async () => {
                         let octave = Math.floor(j / 12);
                         let keyInOctave = j % 12;
 
-                        let keyNum = getKeyNum(keyInOctave);
-                        let blackKey = isBlackKey(keyInOctave);
+                        let keyNum = getKeyNum[keyInOctave];
+                        let blackKey = isBlackKey[keyInOctave];
 
-                        if (blackKey == black) {
+                        if (blackKey === black) {
                             let whiteKeyNum = octave * 7 + keyNum;
 
-                            let fillStyle;
-                            let noteOn = currentBridge?.notesOn[trackNum][midiNote];
-                            let noteOnKeyboard = currentBridge?.notesOnKeyboard[trackNum][midiNote];
+                            let noteOn = g_currentBridge?.notesOn[trackNum][midiNote];
+                            let noteOnKeyboard = g_currentBridge?.notesOnKeyboard[trackNum][midiNote];
                             if (!blackKey) {
                                 if (noteOn) {
                                     ctx.fillStyle = "#000000";
@@ -461,7 +459,7 @@ window.onload = async () => {
                 if (!black) {
                     drawKeys(false); // draw white keys
 
-                    if (trackNum == currentBridge?.activeKeyboardTrackNum) {
+                    if (trackNum === g_currentBridge?.activeKeyboardTrackNum) {
                         let x0 = ofsX + 0;
                         let y0 = ofsY + trackNum * sectionHeight;
                         let x1 = ofsX + section1Img.width + midsections * section2Img.width + section3Img.width;
@@ -475,7 +473,6 @@ window.onload = async () => {
                 }
             }
 
-
         }
 
         /**
@@ -486,7 +483,7 @@ window.onload = async () => {
             ctx.strokeStyle = 'black';
             ctx.lineWidth = 1;
             for (let i = 0; i < 16; i++) {
-                if (trackEnables[i]) {
+                if (g_trackEnables[i]) {
                     ctx.fillStyle = '#00cc00';
                 } else {
                     ctx.fillStyle = '#cc0000';
@@ -504,7 +501,7 @@ window.onload = async () => {
             if (time >= lastVisualizerTime + 1 / VISUALIZER_FPS) {
                 ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
-                if (!currentBridge) {
+                if (!g_currentBridge) {
                     ctx.globalAlpha = 0.25;
                 } else {
                     ctx.globalAlpha = 1;
@@ -547,7 +544,7 @@ window.onload = async () => {
                 clickRect.y1 = clickRect.y0 + 31;
 
                 clickRect.callback = () => {
-                    trackEnables[i] = !trackEnables[i];
+                    g_trackEnables[i] = !g_trackEnables[i];
                 };
 
                 clickRects.push(clickRect);
@@ -564,11 +561,11 @@ window.onload = async () => {
                 clickRect.y1 = ofsY + trackNum * sectionHeight + section3Img.height;
 
                 clickRect.callback = () => {
-                    if (currentBridge) {
-                        if (currentBridge.activeKeyboardTrackNum == trackNum) {
-                            currentBridge.activeKeyboardTrackNum = null;
+                    if (g_currentBridge) {
+                        if (g_currentBridge.activeKeyboardTrackNum == trackNum) {
+                            g_currentBridge.activeKeyboardTrackNum = null;
                         } else {
-                            currentBridge.activeKeyboardTrackNum = trackNum;
+                            g_currentBridge.activeKeyboardTrackNum = trackNum;
                         }
                     }
                 };
@@ -613,22 +610,22 @@ window.onload = async () => {
                 switch (key) {
                     case "ArrowLeft":
                     case "ArrowRight":
-                        let currentSseqListIndex = currentlyPlayingSdat.sseqList.indexOf(currentlyPlayingId);
+                        let currentSseqListIndex = g_currentlyPlayingSdat.sseqList.indexOf(g_currentlyPlayingId);
                         let nextSseqListIndex;
                         if (key === "ArrowLeft") {
-                            nextSseqListIndex = currentlyPlayingSdat.sseqList[currentSseqListIndex - 1];
+                            nextSseqListIndex = g_currentlyPlayingSdat.sseqList[currentSseqListIndex - 1];
                         } else if (key === "ArrowRight") {
-                            nextSseqListIndex = currentlyPlayingSdat.sseqList[currentSseqListIndex + 1];
+                            nextSseqListIndex = g_currentlyPlayingSdat.sseqList[currentSseqListIndex + 1];
                         }
                         if (nextSseqListIndex != undefined) {
-                            playSeqById(currentlyPlayingSdat, nextSseqListIndex);
+                            playSeqById(g_currentlyPlayingSdat, nextSseqListIndex);
                         }
                         break;
                     default:
                         break;
                 }
             }
-            if (currentBridge?.activeKeyboardTrackNum != null) {
+            if (g_currentBridge?.activeKeyboardTrackNum != null) {
                 let isNote = false;
                 let note = 0;
 
@@ -683,13 +680,13 @@ window.onload = async () => {
 
                     console.log(note);
                     if (down) {
-                        currentBridge.controller.tracks[currentBridge.activeKeyboardTrackNum].sendMessage(true, MessageType.PlayNote, note, 127, 2000);
-                        currentBridge.notesOnKeyboard[currentBridge.activeKeyboardTrackNum][note] = 1;
+                        g_currentBridge.controller.tracks[g_currentBridge.activeKeyboardTrackNum].sendMessage(true, MessageType.PlayNote, note, 127, 2000);
+                        g_currentBridge.notesOnKeyboard[g_currentBridge.activeKeyboardTrackNum][note] = 1;
                     } else {
-                        for (let entry of currentBridge.activeNoteData) {
-                            if (entry.trackNum == currentBridge.activeKeyboardTrackNum && entry.midiNote == note) {
+                        for (let entry of g_currentBridge.activeNoteData) {
+                            if (entry.trackNum == g_currentBridge.activeKeyboardTrackNum && entry.midiNote == note) {
                                 entry.adsrState = AdsrState.Release;
-                                currentBridge.notesOnKeyboard[currentBridge.activeKeyboardTrackNum][note] = 0;
+                                g_currentBridge.notesOnKeyboard[g_currentBridge.activeKeyboardTrackNum][note] = 0;
                             }
                         }
                     }
@@ -716,7 +713,7 @@ window.onload = async () => {
         let paused = false;
         pauseButton.onclick = () => {
             paused = !paused;
-            if (currentBridge) currentBridge.controller.paused = paused;
+            if (g_currentBridge) g_currentBridge.controller.paused = paused;
             if (currentFsVisBridge) currentFsVisBridge.controller.paused = paused;
             if (paused) {
                 pauseButton.innerText = "Unpause Sequence Player";
@@ -729,7 +726,7 @@ window.onload = async () => {
         let restartSequenceButton = document.querySelector("#restart-sequence-button");
         restartSequenceButton.onclick = () => {
             pauseButton.innerText = "Pause Sequence Player";
-            playSeq(currentlyPlayingSdat, currentlyPlayingName);
+            playSeq(g_currentlyPlayingSdat, g_currentlyPlayingName);
         };
     });
 
@@ -770,7 +767,7 @@ window.onload = async () => {
     requestAnimationFrame(fsVisFrame);
 
     (/** @type {HTMLButtonElement} */ (document.querySelector("#download-playing-button"))).onclick = e => {
-        renderAndDownloadSeq(currentlyPlayingSdat, currentlyPlayingName);
+        renderAndDownloadSeq(g_currentlyPlayingSdat, g_currentlyPlayingName);
     };
 
     registerCheckbox("#stereo-separation", true, checked => { g_enableStereoSeparation = checked; });

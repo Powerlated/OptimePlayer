@@ -70,10 +70,10 @@ async function renderVideoSeq(sdat, id, outFile) {
     let frameTimer = 0;
     let frames = 0;
 
-    currentlyPlayingSdat = sdat;
-    currentBridge = bridge;
+    g_currentlyPlayingSdat = sdat;
+    g_currentBridge = bridge;
     currentFsVisBridge = fsVisBridge;
-    currentlyPlayingId = id;
+    g_currentlyPlayingId = id;
 
     let videoStream = new stream.PassThrough({ highWaterMark: WIDTH * HEIGHT * 4 * 2 });
     let videoFfmpeg = ffmpeg(videoStream);
@@ -160,7 +160,7 @@ async function renderVideoSeq(sdat, id, outFile) {
         let valL = 0;
         let valR = 0;
         for (let i = 0; i < 16; i++) {
-            if (trackEnables[i]) {
+            if (g_trackEnables[i]) {
                 let synth = bridge.synthesizers[i];
                 synth.nextSample();
                 valL += synth.valL;
