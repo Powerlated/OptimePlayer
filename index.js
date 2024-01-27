@@ -201,7 +201,7 @@ window.onload = async () => {
         progressModal.style.display = "block";
 
         currentBridge?.destroy();
-        currentPlayer?.ctx.close();
+        await currentPlayer?.ctx.close();
         currentBridge = null;
 
         let id = sdat.sseqNameIdDict[name];
@@ -298,9 +298,8 @@ window.onload = async () => {
             }
 
             let finishedTime = sample / SAMPLE_RATE;
-            let finishedPct = Math.round((finishedTime / lengthS) * 100);
             // @ts-ignore
-            progressBar.value = finishedPct;
+            progressBar.value = Math.round((finishedTime / lengthS) * 100);
             progressInfo.innerText = `${Math.round(finishedTime)} / ${Math.round(lengthS)} seconds`;
         }
 

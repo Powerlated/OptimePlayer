@@ -210,8 +210,7 @@ class BlipBuf {
     */
     static genKernel(kernelSize, normalize, filterRatio, minimumPhase) {
         let kernel = new Float64Array(kernelSize * BlipBuf.KERNEL_RESOLUTION);
-        kernelSize = kernelSize;
-        if ((kernelSize & (kernelSize - 1)) != 0) {
+        if ((kernelSize & (kernelSize - 1)) !== 0) {
             throw "kernelSize not power of 2:" + kernelSize;
         }
         if (filterRatio <= 0 || filterRatio > Math.PI) {
@@ -265,8 +264,7 @@ class BlipBuf {
             let kMinPhase = new Float64Array(fullSize);
             for (let u = 0; u < kernelSize; u++) {
                 for (let v = 0; v < BlipBuf.KERNEL_RESOLUTION; v++) {
-                    let val = kernel[u + v * kernelSize];
-                    kMinPhase[index++] = val;
+                    kMinPhase[index++] = kernel[u + v * kernelSize];
                 }
             }
 

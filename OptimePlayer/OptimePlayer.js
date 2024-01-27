@@ -540,9 +540,8 @@ class Sample {
         this.looping = looping;
         this.loopPoint = loopPoint;
 
-        this.sampleLength = 0;
-
         this.resampleMode = ResampleMode.Nearest;
+        this.sampleLength = undefined;
     }
 }
 
@@ -629,8 +628,6 @@ class InstrumentRecord {
             default:
                 throw new Error();
         }
-
-        return 0;
     }
 }
 
@@ -664,11 +661,7 @@ class SampleInstrument {
         this.volume = 1;
 
         this.playing = false;
-
-        this.pan = 0.5;
-
         this.startTime = 0;
-
         this.midiNote = 0;
 
         this.t = 0;
@@ -893,6 +886,11 @@ class SseqTrack {
 
         this.stack = new Uint32Array(64);
         this.sp = 0;
+
+        this.attackRate = 0;
+        this.decayRate = 0;
+        this.sustainRate = 0;
+        this.releaseRate = 0;
     }
 
     /**
@@ -1161,21 +1159,25 @@ class SseqTrack {
                     }
                 case 0xD0: // Attack Rate
                     {
+                        console.warn("[WARN TODO] Attack rate set by sequence");
                         this.attackRate = this.readPcInc();
                         break;
                     }
                 case 0xD1: // Decay Rate
                     {
+                        console.warn("[WARN TODO] Decay rate set by sequence");
                         this.decayRate = this.readPcInc();
                         break;
                     }
                 case 0xD2: // Sustain Rate
                     {
+                        console.warn("[WARN TODO] Sustain rate set by sequence");
                         this.sustainRate = this.readPcInc();
                         break;
                     }
                 case 0xD3: // Release Rate
                     {
+                        console.warn("[WARN TODO] Release rate set by sequence");
                         this.releaseRate = this.readPcInc();
                         break;
                     }
@@ -1249,7 +1251,6 @@ class SampleSynthesizer {
         for (let i = 0; i < this.instrs.length; i++) {
             this.instrs[i] = new SampleInstrument(this, i, this.sampleRate, emptySample);
         }
-
 
         this.finetune = 0;
     }
@@ -1648,8 +1649,6 @@ class ControllerBridge {
                     break;
                 default:
                     throw new Error();
-                    break;
-
             }
 
             if (instrument.fRecord !== 0) {
@@ -1679,16 +1678,10 @@ class ControllerBridge {
             this.synthesizers[i] = new SampleSynthesizer(i, sampleRate, 16);
         }
 
-        this.destroyed = false;
         this.jumps = 0;
         this.fadingStart = false;
-
-        this.loop = 0;
-
         this.activeNoteData = [];
-
         this.bpmTimer = 0;
-
         this.activeKeyboardTrackNum = null;
     }
 
@@ -2046,10 +2039,6 @@ async function playSeq(sdat, name) {
             }
         }
 
-        let elapsed = (performance.now() - startTimestamp) / 1000;
-
-        // console.log(`${Math.round((elapsed / (BUFFER_SIZE / SAMPLE_RATE)) * 100)}% of allotted synthesis time used`);
-
         player.queueAudio(bufferL, bufferR);
     }
 
@@ -2204,7 +2193,6 @@ function decodeWavToSample(wavData, sampleFrequency) {
                 break;
             default:
                 throw new Error();
-                break;
         }
     }
 
@@ -2830,7 +2818,6 @@ function parseSdatFromRom(data, offset) {
                         break;
                     default:
                         throw new Error();
-                        break;
                 }
 
                 if (decoded !== null) {
