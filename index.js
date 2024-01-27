@@ -316,9 +316,6 @@ window.onload = async () => {
                         Average instruments advanced per sample: ${Math.round((g_instrumentsAdvanced / sample) * 10) / 10}
                         Average samples considered per sample: ${Math.round((g_samplesConsidered / sample) * 10) / 10}
                         Stereo separation: ${g_enableStereoSeparation}
-                        Audio anti-aliasing ${g_enableAntiAliasing}
-                        Enable filter: ${g_enableFilter}
-                        Use cubic resampling (check) / Sinc resampling (uncheck): ${g_useCubicResampler}
                         `
             );
 
@@ -684,7 +681,7 @@ window.onload = async () => {
                         g_currentBridge.notesOnKeyboard[g_currentBridge.activeKeyboardTrackNum][note] = 1;
                     } else {
                         for (let entry of g_currentBridge.activeNoteData) {
-                            if (entry.trackNum == g_currentBridge.activeKeyboardTrackNum && entry.midiNote == note) {
+                            if (entry.trackNum === g_currentBridge.activeKeyboardTrackNum && entry.midiNote === note) {
                                 entry.adsrState = AdsrState.Release;
                                 g_currentBridge.notesOnKeyboard[g_currentBridge.activeKeyboardTrackNum][note] = 0;
                             }
@@ -770,20 +767,12 @@ window.onload = async () => {
         renderAndDownloadSeq(g_currentlyPlayingSdat, g_currentlyPlayingName);
     };
 
-    registerCheckbox("#stereo-separation", true, checked => { g_enableStereoSeparation = checked; });
-    registerCheckbox("#force-stereo-separation", true, checked => { g_enableForceStereoSeparation = checked; });
-    registerCheckbox("#antialiasing", true, checked => { g_enableAntiAliasing = checked; });
-    registerDropdown("#tuning-system", changed => {
-        if (changed === "equal") {
-            g_pureTuning = false;
-        } else {
-            g_pureTuning = true;
-            g_pureTuningRootNote = parseInt(changed.split('-')[1]);
-        }
+    registerCheckbox("#stereo-separation", true, checked => {
+        g_enableStereoSeparation = checked;
     });
-    // registerCheckbox("#soundgoodizer", true, c => { enableSoundgoodizer = c; });
-    registerCheckbox("#enable-filter", true, c => { g_enableFilter = c; });
-    registerCheckbox("#use-cubic-resampler", false, c => { g_useCubicResampler = c; });
+    registerCheckbox("#force-stereo-separation", true, checked => {
+        g_enableForceStereoSeparation = checked;
+    });
 };
 
 /** @param {string} name */

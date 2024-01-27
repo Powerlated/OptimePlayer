@@ -11,7 +11,7 @@
         }
 
         body {
-            font-family: HindSiliguri;
+            font-family: HindSiliguri, sans-serif;
 
             text-align: center;
         }
@@ -41,7 +41,7 @@
             display: grid;
             grid-template-columns: 0.8fr 1.0fr 0.8fr;
             grid-template-rows: 0.7fr 1.3fr 1fr;
-            gap: 0px 0px;
+            gap: 0 0;
             grid-template-areas:
                 "song-picker . visualizer-pane"
                 "song-picker . ."
@@ -63,10 +63,6 @@
         #visualizer-pane {
             columns: 1;
 
-            display: none;
-        }
-
-        #soundgoodizer-container {
             display: none;
         }
 
@@ -124,93 +120,86 @@
 </head>
 
 <body>
-    <div id='drop-zone'>
-        <h1>Drop file!</h1>
+<div id='drop-zone'>
+    <h1>Drop file!</h1>
+</div>
+<h1 style="margin-bottom: 0">Optime Player</h1>
+<a href="https://github.com/Powerlated/OptimePlayer">https://github.com/Powerlated/OptimePlayer</a>
+
+
+<div id="progress-modal" class="modal">
+    <div class="modal-content">
+
+        <label for="progress-bar">Rendering progress:</label>
+        <progress id="progress-bar" value="0" max="100"></progress>
+        <p id="progress-info"></p>
     </div>
-    <h1 style="margin-bottom: 0">Optime Player</h1>
-    <a href="https://github.com/Powerlated/OptimePlayer">https://github.com/Powerlated/OptimePlayer</a>
+</div>
 
+<div class="container">
+    <div class="song-picker"></div>
 
-    <div id="progress-modal" class="modal">
-        <div class="modal-content">
-
-            <label for="progress-bar">Rendering progress:</label>
-            <progress id="progress-bar" value="0" max="100"></progress>
-            <p id="progress-info"></p>
+    <div>
+        <div id="file-picker-container">
+            <h3>Drag and drop a Nintendo DS ROM</h3>
+            <p>or</p>
+            <input type="file" id="file-picker" accept=".nds">
         </div>
-    </div>
-
-    <div class="container">
-        <div class="song-picker"></div>
+        <div id="demos">
+            <h3>Demos</h3>
+            <button onclick="loadDemo('new-super-mario-bros')">New Super Mario Bros.</button>
+            <button onclick="loadDemo('super-mario-64-ds')">Super Mario 64 DS</button>
+            <button onclick="loadDemo('pokemon-platinum')">Pokémon Platinum</button>
+            <button onclick="loadDemo('pokemon-heartgold')">Pokémon HeartGold</button>
+            <button onclick="loadDemo('pokemon-black-2')">Pokémon Black 2</button>
+            <button onclick="loadDemo('ace-attorney')">Phoenix Wright: Ace Attorney</button>
+        </div>
 
         <div>
-            <div id="file-picker-container">
-                <h3>Drag and drop a Nintendo DS ROM</h3>
-                <p>or</p>
-                <input type="file" id="file-picker" accept=".nds">
-            </div>
-            <div id="demos">
-                <h3>Demos</h3>
-                <button onclick="loadDemo('new-super-mario-bros')">New Super Mario Bros.</button>
-                <button onclick="loadDemo('super-mario-64-ds')">Super Mario 64 DS</button>
-                <button onclick="loadDemo('pokemon-platinum')">Pokémon Platinum</button>
-                <button onclick="loadDemo('pokemon-heartgold')">Pokémon HeartGold</button>
-                <button onclick="loadDemo('pokemon-black-2')">Pokémon Black 2</button>
-                <button onclick="loadDemo('ace-attorney')">Phoenix Wright: Ace Attorney</button>
-            </div>
+            <h3>Settings</h3>
+            <input type="checkbox" id="stereo-separation">
+            <label for="stereo-separation">Stereo Separation</label><br>
+            <input type="checkbox" id="force-stereo-separation">
+            <label for="force-stereo-separation">"Force" Stereo Separation (restart song to apply)</label><br>
 
-            <div>
-                <h3>Settings</h3>
-                <input type="checkbox" id="stereo-separation">
-                <label for="stereo-separation">Stereo Separation</label><br>
-                <input type="checkbox" id="force-stereo-separation">
-                <label for="force-stereo-separation">"Force" Stereo Separation (restart song to apply)</label><br>
-                <input type="checkbox" id="antialiasing">
-                <label for="antialiasing">Audio Anti-Aliasing</label><br>
-                <input type="checkbox" id="enable-filter">
-                <label for="enable-filter">Enable Filter</label><br>
-                <input type="checkbox" id="use-cubic-resampler">
-                <label for="use-cubic-resampler">Use Cubic Resampling (check) / Sinc Resampling (uncheck)</label><br>
-                <!-- <input type="checkbox" id="soundgoodizer"> -->
-                <!-- <label for="soundgoodizer">Enable Soundgoodizer</label><br> -->
-                <label for="tuning-system">Tuning System</label>
+            <label for="tuning-system">Tuning System</label>
 
-                <select name="tuning-systems" id="tuning-system">
-                    <option value="equal">Equal Temperament</option>
-                    <option value="pure-0">Pure A</option>
-                    <option value="pure-1">Pure A#</option>
-                    <option value="pure-2">Pure B</option>
-                    <option value="pure-3">Pure C</option>
-                    <option value="pure-4">Pure C#</option>
-                    <option value="pure-5">Pure D</option>
-                    <option value="pure-6">Pure D#</option>
-                    <option value="pure-7">Pure E</option>
-                    <option value="pure-8">Pure F</option>
-                    <option value="pure-9">Pure F#</option>
-                    <option value="pure-10">Pure G</option>
-                    <option value="pure-11">Pure G#</option>
-                </select>
-            </div>
-        </div>
-
-        <div id="visualizer-pane">
-            <div class="button-group">
-                <button id="fullscreen-vis-button">Open Fullscreen Visualizer</button>
-            </div>
-            <div class="button-group">
-                <button id="download-playing-button">Download Currently Playing Song</button>
-            </div>
-            <div class="button-group">
-                <button id="pause-button">Pause Sequence Player</button>
-                <button id="restart-sequence-button">Restart Sequence</button>
-            </div>
-            <div>
-                <canvas id="visualizer-canvas" width="400" height="688"> </canvas>
-            </div>
+            <select name="tuning-systems" id="tuning-system">
+                <option value="equal">Equal Temperament</option>
+                <option value="pure-0">Pure A</option>
+                <option value="pure-1">Pure A#</option>
+                <option value="pure-2">Pure B</option>
+                <option value="pure-3">Pure C</option>
+                <option value="pure-4">Pure C#</option>
+                <option value="pure-5">Pure D</option>
+                <option value="pure-6">Pure D#</option>
+                <option value="pure-7">Pure E</option>
+                <option value="pure-8">Pure F</option>
+                <option value="pure-9">Pure F#</option>
+                <option value="pure-10">Pure G</option>
+                <option value="pure-11">Pure G#</option>
+            </select>
         </div>
     </div>
 
-    <canvas id="fullscreen-vis-canvas"></canvas>
+    <div id="visualizer-pane">
+        <div class="button-group">
+            <button id="fullscreen-vis-button">Open Fullscreen Visualizer</button>
+        </div>
+        <div class="button-group">
+            <button id="download-playing-button">Download Currently Playing Song</button>
+        </div>
+        <div class="button-group">
+            <button id="pause-button">Pause Sequence Player</button>
+            <button id="restart-sequence-button">Restart Sequence</button>
+        </div>
+        <div>
+            <canvas id="visualizer-canvas" width="400" height="688"></canvas>
+        </div>
+    </div>
+</div>
+
+<canvas id="fullscreen-vis-canvas"></canvas>
 </body>
 
 </html>

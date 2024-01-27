@@ -5,11 +5,8 @@ let g_debug = false;
 
 let g_enableStereoSeparation = false;
 let g_enableForceStereoSeparation = false;
-let g_enableAntiAliasing = true;
 let g_pureTuning = false;
 let g_pureTuningRootNote = 0;
-let g_enableFilter = true;
-let g_useCubicResampler = false;
 
 // Global metrics
 let g_instrumentsAdvanced = 0;
@@ -538,16 +535,14 @@ class Sample {
         this.looping = looping;
         this.loopPoint = loopPoint;
 
-        this.resampleMode = ResampleMode.Nearest;
+        this.resampleMode = ResampleMode.Cubic;
         this.sampleLength = 0;
     }
 }
 
 const ResampleMode = Object.seal({
-    Nearest: 0,
+    NearestNeighbor: 0,
     Cubic: 1,
-    BlipBuf: 2,
-    BlipBufLowPass: 3,
 });
 
 const InstrumentType = Object.seal({
@@ -677,8 +672,6 @@ class SampleInstrument {
         // SQRT1_2 = 1/SQRT(2) maximally flat (Butterworth) filter
         this.filter = BiquadFilter.lowPassFilter(8, this.sampleRate, 16384, Math.SQRT1_2);
 
-        this.blipBuf = new BlipBuf(16, 32, true, 1, 1, true);
-
         Object.seal(this);
     }
 
@@ -688,12 +681,12 @@ class SampleInstrument {
         let convertedSampleRate = this.freqRatio * this.sample.sampleRate;
         this.sampleT += this.invSampleRate * convertedSampleRate;
 
-        switch (this.sample.resampleMode) {
-            case ResampleMode.Nearest:
-                this.blipBuf.readOutSampleL();
-                this.output = this.getSampleDataAt(Math.floor(this.sampleT)) * this.volume;
+        g_samplesConsidered++;
 
-                g_samplesConsidered++;
+        // TODO: Reintroduce anti-aliased zero-order hold but with high-speed fixed-function averaging instead of BlipBuf
+        switch (this.sample.resampleMode) {
+            case ResampleMode.NearestNeighbor:
+                this.output = this.getSampleDataAt(Math.floor(this.sampleT)) * this.volume;
                 break;
             case ResampleMode.Cubic:
                 let subT = this.sampleT % 1;
@@ -703,31 +696,10 @@ class SampleInstrument {
                 let p2 = this.getSampleDataAt(Math.floor(this.sampleT + 2));
                 let p3 = this.getSampleDataAt(Math.floor(this.sampleT + 3));
 
-                g_samplesConsidered++;
-
                 let valCubic = p1 + 0.5 * subT * (p2 - p0 + subT * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + subT * (3.0 * (p1 - p2) + p3 - p0)));
 
-                this.blipBuf.readOutSampleL();
                 this.output = valCubic * this.volume;
                 break;
-            case ResampleMode.BlipBuf:
-            case ResampleMode.BlipBufLowPass:
-                while (this.resampleT < this.sampleT) {
-                    let val = this.getSampleDataAt(this.resampleT);
-                    this.blipBuf.setValueL(0, this.t, val);
-                    this.t += this.sampleRate / convertedSampleRate;
-                    this.resampleT++;
-
-                    g_samplesConsidered++;
-                }
-
-                this.output = this.blipBuf.readOutSampleL() * this.volume;
-
-                if (this.sample.resampleMode === ResampleMode.BlipBufLowPass) {
-                    this.output = this.filter.transform(this.output);
-                }
-                break;
-
         }
     }
 
@@ -1272,7 +1244,6 @@ class SampleSynthesizer {
         instr.sampleT = 0;
         instr.resampleT = 0;
         instr.playing = true;
-        instr.blipBuf.reset();
         instr.filter.resetState();
 
         let currentIndex = this.playingIndex;
@@ -1840,19 +1811,10 @@ class ControllerBridge {
 
                                 if (instrument.fRecord === InstrumentType.PsgPulse) {
                                     sample = squares[sampleId];
-                                    sample.resampleMode = ResampleMode.Nearest;
+                                    sample.resampleMode = ResampleMode.NearestNeighbor;
                                 } else {
                                     sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
-                                    if (g_useCubicResampler) {
-                                        sample.resampleMode = ResampleMode.Cubic;
-                                    } else if (g_enableAntiAliasing) {
-                                        sample.resampleMode = ResampleMode.BlipBuf;
-                                        if (g_enableFilter) {
-                                            sample.resampleMode = ResampleMode.BlipBufLowPass;
-                                        }
-                                    } else {
-                                        sample.resampleMode = ResampleMode.Nearest;
-                                    }
+                                    sample.resampleMode = ResampleMode.Cubic;
                                 }
 
                                 if (g_debug) {
