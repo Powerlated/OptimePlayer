@@ -1,10 +1,13 @@
+/**
+ * @param {string | URL} url
+ */
 function downloadFileFromUrl(url) {
     return new Promise((resolve, reject) => {
         let client = new XMLHttpRequest();
         client.responseType = "arraybuffer";
         client.open("GET", url);
         client.onreadystatechange = () => {
-            if (client.status != 404) {
+            if (client.status !== 404) {
                 if (client.response instanceof ArrayBuffer) {
                     resolve(new Uint8Array(client.response));
 
@@ -18,7 +21,10 @@ function downloadFileFromUrl(url) {
     });
 }
 
-/** @returns {Promise<HTMLImageElement>} */
+/**
+ * @returns {Promise<HTMLImageElement>}
+ * @param {string} url
+ */
 function loadHtmlImageElementFromUrl(url) {
     return new Promise((resolve, reject) => {
         let htmlImageElement = new Image();
@@ -55,12 +61,12 @@ async function loadNdsRom(data) {
         if (sdat != null) {
             for (let i = 0; i < sdat.sseqIdNameDict.length; i++) {
                 let seqName = sdat.sseqIdNameDict[i];
-                if (seqName != undefined) {
+                if (seqName !== undefined) {
                     let button = document.createElement('button');
                     button.innerText = `${seqName} (ID: ${i})`;
                     button.style.textAlign = 'left';
                     document.querySelector(".song-picker").appendChild(button);
-                    button.onclick = e => {
+                    button.onclick = () => {
                         console.log(seqName);
                         playSeq(sdat, seqName);
                     };
@@ -69,36 +75,18 @@ async function loadNdsRom(data) {
 
             console.log("Searching for STRMs");
             for (let i = 0; i < sdat.fat.length; i++) {
-                if (read32LE(sdat.fat[i], 0) == 0x4D525453) {
+                if (read32LE(sdat.fat[i], 0) === 0x4D525453) {
                     console.log(`file id:${i} is STRM`);
 
                     // playStrm(sdat.fat[i]);
                 }
             }
-
-            // for (let i = 0; i < sdat.sampleArchives.length; i++) {
-            //     let archive = sdat.sampleArchives[i];
-            //     for (let j = 0; j < archive.length; j++) {
-            //         let sample = archive[j];
-
-            //         console.log(`Playing archive ${i}, sample ${j}, length ${sample.data.length / sample.sampleRate} seconds`)
-
-            //         await playSample(sample);
-            //     }
-            // }
-            // console.log("Done playing samples");
         }
     }
 
     /** @type {HTMLElement} */
-    let filePickerContainer = document.querySelector("#file-picker-container");
-    // filePickerContainer.style.display = 'none';
-
-    /** @type {HTMLElement} */
     let visualizerPane = document.querySelector("#visualizer-pane");
     visualizerPane.style.display = 'block';
-    // (/** @type {HTMLElement} */ (document.querySelector('#soundgoodizer-container'))).style.display = 'block';
-
 }
 
 window.onload = async () => {
@@ -177,7 +165,7 @@ window.onload = async () => {
                 bridge.jumps = 0;
                 loop++;
 
-                if (loop == LOOP_COUNT) {
+                if (loop === LOOP_COUNT) {
                     break;
                 }
             }
@@ -194,9 +182,9 @@ window.onload = async () => {
     }
 
     /**
-    * @param {Sdat} sdat
-    * @param {string} name
-    */
+     * @param {Sdat} sdat
+     * @param {string} name
+     */
     async function renderAndDownloadSeq(sdat, name) {
         progressModal.style.display = "block";
 
@@ -251,7 +239,7 @@ window.onload = async () => {
                     bridge.jumps = 0;
                     loop++;
 
-                    if (loop == 2) {
+                    if (loop === 2) {
                         bridge.fadingStart = true;
                     }
                 }
@@ -393,7 +381,7 @@ window.onload = async () => {
                 if (!layer2) {
                     drawKeys(false); // draw white keys
 
-                    ctx.drawImage(section1Img, ofsX + 0, ofsY + trackNum * sectionHeight);
+                    ctx.drawImage(section1Img, ofsX, ofsY + trackNum * sectionHeight);
 
                     for (let j = 0; j < midsections; j++) {
                         ctx.drawImage(section2Img, ofsX + section1Img.width + j * section2Img.width, ofsY + trackNum * sectionHeight);
@@ -485,8 +473,8 @@ window.onload = async () => {
                 } else {
                     ctx.fillStyle = '#cc0000';
                 }
-                ctx.fillRect(ofsX + 0, ofsY + sectionHeight * i + 3, 16, 31);
-                ctx.strokeRect(ofsX + 0, ofsY + sectionHeight * i + 3, 16, 31);
+                ctx.fillRect(ofsX, ofsY + sectionHeight * i + 3, 16, 31);
+                ctx.strokeRect(ofsX, ofsY + sectionHeight * i + 3, 16, 31);
             }
         }
 
@@ -559,7 +547,7 @@ window.onload = async () => {
 
                 clickRect.callback = () => {
                     if (g_currentBridge) {
-                        if (g_currentBridge.activeKeyboardTrackNum == trackNum) {
+                        if (g_currentBridge.activeKeyboardTrackNum === trackNum) {
                             g_currentBridge.activeKeyboardTrackNum = null;
                         } else {
                             g_currentBridge.activeKeyboardTrackNum = trackNum;
@@ -614,7 +602,7 @@ window.onload = async () => {
                         } else if (key === "ArrowRight") {
                             nextSseqListIndex = g_currentlyPlayingSdat.sseqList[currentSseqListIndex + 1];
                         }
-                        if (nextSseqListIndex != undefined) {
+                        if (nextSseqListIndex) {
                             playSeqById(g_currentlyPlayingSdat, nextSseqListIndex);
                         }
                         break;
@@ -773,6 +761,13 @@ window.onload = async () => {
     registerCheckbox("#force-stereo-separation", true, checked => {
         g_enableForceStereoSeparation = checked;
     });
+
+    registerDropdown("#tuning-system", value => {
+        let [usePureTuning, tonic] = value.split(" ");
+
+        g_usePureTuning = usePureTuning;
+        g_pureTuningTonic = parseInt(tonic);
+    })
 };
 
 /** @param {string} name */

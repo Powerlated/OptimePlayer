@@ -5,8 +5,8 @@ let g_debug = false;
 
 let g_enableStereoSeparation = false;
 let g_enableForceStereoSeparation = false;
-let g_pureTuning = false;
-let g_pureTuningRootNote = 0;
+let g_usePureTuning = false;
+let g_pureTuningTonic = 0;
 
 // Global metrics
 let g_instrumentsAdvanced = 0;
@@ -2284,44 +2284,31 @@ function playSample(sample) {
  * @param {number} note
  */
 function midiNoteToHz(note) {
-    if (g_pureTuning) {
+    if (g_usePureTuning) {
         let roundError = note - Math.round(note);
         note = Math.round(note);
 
-        let noteRelRoot = note - 69 - g_pureTuningRootNote;
+        let noteRelRoot = note - 69 - g_pureTuningTonic;
         let octave = Math.floor(noteRelRoot / 12);
         let noteInOctave = ((noteRelRoot % 12) + 12) % 12;
+        let rootNoteHz = 440 * 2 ** (((g_pureTuningTonic + roundError) / 12) + octave);
 
-        let rootNoteHz = 440 * 2 ** (((g_pureTuningRootNote + roundError) / 12) + octave);
+        const pythagoreanTuningRatios = [
+            1,          // Do / C
+            256 / 243,  // Di / C#
+            9 / 8,      // Re / D
+            32 / 27,    // Ri / D#
+            81 / 64,    // Mi / E
+            4 / 3,      // Fa / F
+            729 / 512,  // Fi / F#
+            3 / 2,      // So / G
+            128 / 81,   // Si / G#
+            27 / 16,    // La / A
+            16 / 9,     // Li / A#
+            243 / 128,  // Ti / B
+        ]
 
-        switch (noteInOctave) {
-            case 0: // Do / C
-                return rootNoteHz;
-            case 1: // Di / C#
-                return rootNoteHz * (256 / 243);
-            case 2: // Re / D
-                return rootNoteHz * (9 / 8);
-            case 3: // Ri / D#
-                return rootNoteHz * (32 / 27);
-            case 4: // Mi / E
-                return rootNoteHz * (81 / 64);
-            case 5: // Fa / F
-                return rootNoteHz * (4 / 3);
-            case 6: // Fi / F#
-                return rootNoteHz * (729 / 512);
-            case 7: // So / G
-                return rootNoteHz * (3 / 2);
-            case 8: // Si / G#
-                return rootNoteHz * (128 / 81);
-            case 9: // La / A
-                return rootNoteHz * (27 / 16);
-            case 10: // Li / A#
-                return rootNoteHz * (16 / 9);
-            case 11: // Ti / B
-                return rootNoteHz * (243 / 128);
-            default:
-                throw new Error();
-        }
+        return rootNoteHz * pythagoreanTuningRatios[noteInOctave];
     } else {
         return 440 * 2 ** ((note - 69) / 12);
     }
