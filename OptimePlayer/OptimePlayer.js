@@ -1130,24 +1130,10 @@ class SampleInstrument {
 
         g_samplesConsidered++;
 
+        // TODO: Reintroduce ResampleMode consideration here - I removed it because I wasn't satisfied with the performance of BlipBuf,
+        // TODO:     and because the cubic implementation was creating clicking noises in the Pokemon BW ending music
         // TODO: Reintroduce anti-aliased zero-order hold but with high-speed fixed-function averaging instead of BlipBuf
-        switch (this.sample.resampleMode) {
-            case ResampleMode.NearestNeighbor:
-                this.output = this.getSampleDataAt(Math.floor(this.sampleT)) * this.volume;
-                break;
-            case ResampleMode.Cubic:
-                let subT = this.sampleT % 1;
-
-                let p0 = this.getSampleDataAt(Math.floor(this.sampleT));
-                let p1 = this.getSampleDataAt(Math.floor(this.sampleT + 1));
-                let p2 = this.getSampleDataAt(Math.floor(this.sampleT + 2));
-                let p3 = this.getSampleDataAt(Math.floor(this.sampleT + 3));
-
-                let valCubic = p1 + 0.5 * subT * (p2 - p0 + subT * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + subT * (3.0 * (p1 - p2) + p3 - p0)));
-
-                this.output = valCubic * this.volume;
-                break;
-        }
+        this.output = this.getSampleDataAt(Math.floor(this.sampleT)) * this.volume;
     }
 
     /**
