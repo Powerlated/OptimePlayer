@@ -10,6 +10,8 @@ let g_pureTuningTonic = 0;
 let g_instrumentsAdvanced = 0;
 let g_samplesConsidered = 0;
 
+/** @type {Sdat | null} */
+let g_loadedSdat = null;
 /** @type {Controller | null} */
 let g_currentController = null;
 /** @type {FsVisController | null} */
@@ -171,6 +173,28 @@ class WavEncoder {
     }
 }
 
+function fixAudioContext() {
+    console.log("Fixing iOS audio context...");
+    if (g_currentPlayer == null) throw new Error();
+
+    // Create empty buffer
+    let buffer = g_currentPlayer.ctx.createBuffer(1, 1, 22050);
+
+    /** @type {any} */
+    let source = g_currentPlayer.ctx.createBufferSource();
+    source.buffer = buffer;
+    // Connect to output (speakers)
+    source.connect(g_currentPlayer.ctx.destination);
+    // Play sound
+    if (source.start) {
+        source.start(0);
+    } else if (source.play) {
+        source.play(0);
+    } else if (source.noteOn) {
+        source.noteOn(0);
+    }
+}
+
 class AudioPlayer {
     bufferLength;
     sampleRate;
@@ -205,24 +229,6 @@ class AudioPlayer {
 
         this.bufferPool = this.genBufferPool(256, this.bufferLength);
 
-        const fixAudioContext = () => {
-            // Create empty buffer
-            let buffer = this.ctx.createBuffer(1, 1, 22050);
-
-            /** @type {any} */
-            let source = this.ctx.createBufferSource();
-            source.buffer = buffer;
-            // Connect to output (speakers)
-            source.connect(this.ctx.destination);
-            // Play sound
-            if (source.start) {
-                source.start(0);
-            } else if (source.play) {
-                source.play(0);
-            } else if (source.noteOn) {
-                source.noteOn(0);
-            }
-        };
         // iOS 6-8
         document.addEventListener('touchstart', fixAudioContext);
         // iOS 9
@@ -1071,7 +1077,7 @@ class SampleInstrument {
         g_samplesConsidered++;
 
         // TODO: Reintroduce ResampleMode consideration here - I removed it because I wasn't satisfied with the performance of BlipBuf,
-        // TODO:     and because the cubic implementation was creating clicking noises in the Pokemon BW ending music
+        //      and because the cubic implementation was creating clicking noises in the Pokemon BW ending music */
         // TODO: Reintroduce anti-aliased zero-order hold but with high-speed fixed-function averaging instead of BlipBuf
         this.output = this.getSampleDataAt(Math.floor(this.sampleT)) * this.volume;
     }
@@ -1687,6 +1693,7 @@ class SampleSynthesizer {
         let delayL = Math.round(delaySL * this.sampleRate);
         let delayR = Math.round(delaySR * this.sampleRate);
         // console.log(`L:${delaySL * 1000}ms R:${delaySR * 1000}ms X:${x}`);
+        // TODO: Intelligent fadeouts to prevent clicking when panning
         this.delayLineL.setDelay(delayL);
         this.delayLineR.setDelay(delayR);
         this.delayLineR.gain = gainR;
@@ -1920,22 +1927,6 @@ const sLfoSinTable = [
     0
 ];
 
-/**
- * pret/pokediamond
- * @param {number} x
- */
-function SND_SinIdx(x) {
-    if (x < 0x20) {
-        return sLfoSinTable[x];
-    } else if (x < 0x40) {
-        return sLfoSinTable[0x40 - x];
-    } else if (x < 0x60) {
-        return (-sLfoSinTable[x - 0x40]) << 24 >> 24;
-    } else {
-        return (-sLfoSinTable[0x20 - (x - 0x60)]) << 24 >> 24;
-    }
-}
-
 class Controller {
     /**
      @param {number} sampleRate
@@ -2126,6 +2117,23 @@ class Controller {
                 } else if (entry.lfoDelayCounter < track.lfoDelay) {
                     lfoValue = BigInt(0);
                 } else {
+                    /**
+                     * pret/pokediamond
+                     * @param {number} x
+                     */
+                    function SND_SinIdx(x) {
+                        if (x < 0x20) {
+                            return sLfoSinTable[x];
+                        } else if (x < 0x40) {
+                            return sLfoSinTable[0x40 - x];
+                        } else if (x < 0x60) {
+                            return (-sLfoSinTable[x - 0x40]) << 24 >> 24;
+                        } else {
+                            return (-sLfoSinTable[0x20 - (x - 0x60)]) << 24 >> 24;
+                        }
+                    }
+
+
                     lfoValue = BigInt(SND_SinIdx(entry.lfoCounter >>> 8) * track.lfoDepth * track.lfoRange);
                 }
 

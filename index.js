@@ -64,14 +64,19 @@ async function loadNdsRom(data) {
         let sdat = Sdat.parseFromRom(view);
 
         if (sdat != null) {
+            g_loadedSdat = sdat;
+
             for (const [key, value] of sdat.sseqIdNameDict) {
                     let button = document.createElement('button');
                 button.innerText = `${value} (ID: ${key})`;
                     button.style.textAlign = 'left';
                 document.querySelector(".song-picker")?.appendChild(button);
                     button.onclick = () => {
-                        console.log(value);
-                        playSeq(sdat, value);
+                        setTimeout(() => {
+                            console.log(value);
+                            if (g_loadedSdat != null)
+                                playSeq(g_loadedSdat, value);
+                        });
                     };
             }
 
@@ -93,6 +98,8 @@ async function loadNdsRom(data) {
 
 window.onload = async () => {
     console.log("Optime Player");
+
+
 
     let dropZone = document.querySelector('#drop-zone');
     let filePicker = document.querySelector('#file-picker');
