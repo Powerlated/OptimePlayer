@@ -7,7 +7,10 @@
     "doc": "docs"
   },
   "scripts": {
-    "npx": "npx"
+    "npx": "npx",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "repository": {
     "type": "git",
@@ -21,7 +24,9 @@
   "homepage": "https://github.com/Powerlated/OptimePlayer#readme",
   "dependencies": {
     "canvas": "^2.9.3",
-    "fluent-ffmpeg": "^2.1.2"
+    "fluent-ffmpeg": "^2.1.2",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.12"
   },
   "devDependencies": {
     "@types/node": "^20.11.7"

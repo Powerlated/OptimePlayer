@@ -36,8 +36,12 @@ function loadHtmlImageElementFromUrl(url) {
     });
 }
 
+/**
+ * @param {Uint8Array} data
+ */
 async function loadNdsRom(data) {
     let songPicker = document.querySelector(".song-picker");
+    if (songPicker == null) throw new Error();
     while (songPicker.firstChild) {
         songPicker.removeChild(songPicker.firstChild);
     }
@@ -56,63 +60,64 @@ async function loadNdsRom(data) {
     }
 
     for (let i = 0; i < res.length; i++) {
-        let sdat = Sdat.parseFromRom(data, res[i]);
+        let view = new DataView(data.buffer, res[i]);
+        let sdat = Sdat.parseFromRom(view);
 
         if (sdat != null) {
-            for (let i = 0; i < sdat.sseqIdNameDict.length; i++) {
-                let seqName = sdat.sseqIdNameDict[i];
-                if (seqName !== undefined) {
+            for (const [key, value] of sdat.sseqIdNameDict) {
                     let button = document.createElement('button');
-                    button.innerText = `${seqName} (ID: ${i})`;
+                button.innerText = `${value} (ID: ${key})`;
                     button.style.textAlign = 'left';
-                    document.querySelector(".song-picker").appendChild(button);
+                document.querySelector(".song-picker")?.appendChild(button);
                     button.onclick = () => {
-                        console.log(seqName);
-                        playSeq(sdat, seqName);
+                        console.log(value);
+                        playSeq(sdat, value);
                     };
-                }
             }
 
             console.log("Searching for STRMs");
-            for (let i = 0; i < sdat.fat.length; i++) {
-                if (read32LE(sdat.fat[i], 0) === 0x4D525453) {
-                    console.log(`file id:${i} is STRM`);
+            for (const [key, value] of sdat.fat) {
+                if (read32LE(value, 0) === 0x4D525453) {
+                    console.log(`file id:${i} is     STRM`);
 
-                    // playStrm(sdat.fat[i]);
+                    // playStrm(sdat.fat[key);
                 }
             }
         }
     }
 
-    /** @type {HTMLElement} */
     let visualizerPane = document.querySelector("#visualizer-pane");
+    if (!(visualizerPane instanceof HTMLDivElement)) throw new Error();
     visualizerPane.style.display = 'block';
 }
 
 window.onload = async () => {
     console.log("Optime Player");
 
-    /** @type {HTMLElement} */
     let dropZone = document.querySelector('#drop-zone');
-    /** @type {HTMLInputElement} */
     let filePicker = document.querySelector('#file-picker');
+    if (!(dropZone instanceof HTMLDivElement)) throw new Error();
+    if (!(filePicker instanceof HTMLInputElement)) throw new Error();
 
     dropZone.style.visibility = 'hidden';
     window.addEventListener('dragover', e => {
+        if (!(dropZone instanceof HTMLDivElement)) throw new Error();
         e.preventDefault();
         // console.log("File dragged over");
         dropZone.style.visibility = 'visible';
     });
     dropZone.addEventListener('dragleave', e => {
+        if (!(dropZone instanceof HTMLDivElement)) throw new Error();
         e.preventDefault();
         // console.log("File drag leave");
         dropZone.style.visibility = 'hidden';
     });
     window.addEventListener('drop', e => {
         e.preventDefault();
-        if (e.dataTransfer.files[0] instanceof Blob) {
+        if (e.dataTransfer?.files[0] instanceof Blob) {
             console.log("File dropped");
 
+            if (!(dropZone instanceof HTMLDivElement)) throw new Error();
             dropZone.style.visibility = 'hidden';
 
             let reader = new FileReader();
@@ -126,6 +131,7 @@ window.onload = async () => {
     });
 
     filePicker.addEventListener("input", () => {
+        if (!(filePicker instanceof HTMLInputElement)) throw new Error();
         if (filePicker.files && filePicker.files.length > 0) {
             let file = filePicker.files[0];
             let reader = new FileReader();
@@ -149,7 +155,7 @@ window.onload = async () => {
     const SAMPLE_RATE = 32768;
 
     function getSseqLength(sdat, name) {
-        let id = sdat.sseqNameIdDict[name];
+        let id = sdat.sseqNameIdDict.get(name);
         let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
         let loop = 0;
         let playing = true;
@@ -191,7 +197,7 @@ window.onload = async () => {
         await g_currentPlayer?.ctx.close();
         g_currentBridge = null;
 
-        let id = sdat.sseqNameIdDict[name];
+        let id = sdat.sseqNameIdDict.get(name);
 
         let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
 

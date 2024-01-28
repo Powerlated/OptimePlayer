@@ -1,5 +1,3 @@
-// @ts-check
-
 /** GLOBALS GO HERE **/
 let g_debug = false;
 
@@ -310,19 +308,27 @@ class AudioPlayer {
 }
 
 /**
- * @param {number[] | Uint8Array} data
+ * @param {DataView} data
  * @param {number} addr
  */
-function read16LE(data, addr) {
-    return data[addr] | (data[addr + 1] << 8);
+function read8(data, addr) {
+    return data.getUint8(addr);
 }
 
 /**
- * @param {number[] | Uint8Array} data
+ * @param {DataView} data
+ * @param {number} addr
+ */
+function read16LE(data, addr) {
+    return data.getUint16(addr, true);
+}
+
+/**
+ * @param {DataView} data
  * @param {number} addr
  */
 function read32LE(data, addr) {
-    return data[addr] | (data[addr + 1] << 8) | (data[addr + 2] << 16) | (data[addr + 3] << 24);
+    return data.getUint32(addr, true);
 }
 
 /**
@@ -459,18 +465,17 @@ class SwarInfo {
 
 class Sdat {
     constructor() {
-        /** @type {Uint8Array[]} */
-        this.fat = [];
-
+        /**
+         * @type {number[]}
+         */
         this.sseqList = [];
 
         /** @type {(SseqInfo | null)[]} */
         this.sseqInfos = [];
-        this.sseqNameIdDict = [];
-        this.sseqIdNameDict = [];
-
-        this.sbnkNameIdDict = [];
-        this.sbnkIdNameDict = [];
+        this.sseqNameIdDict = new Map();
+        this.sseqIdNameDict = new Map();
+        this.sbnkNameIdDict = new Map();
+        this.sbnkIdNameDict = new Map();
 
         /** @type {(SsarInfo | null)[]} */
         this.ssarInfos = [];
@@ -484,30 +489,24 @@ class Sdat {
         /** @type {Bank[]} */
         this.banks = new Array(128);
 
-        /** @type {Object.<number, Sample[]>} */
-        this.sampleArchives = {};
+        /** @type {Map<number, Sample[]>} */
+        this.sampleArchives = new Map();
+
+        /** @type {Map<number, DataView>} */
+        this.fat = new Map();
     }
 
     /**
-     * @param {number[] | Uint8Array} data
-     * @param {number} offset
+     *
+     * @param {DataView} view
      */
-    static parseFromRom(data, offset) {
+    static parseFromRom(view) {
         let sdat = new Sdat();
 
-        let sdatSize = read32LE(data, offset + 0x8);
-        console.log("SDAT file size: " + sdatSize);
+        console.log("SDAT file size: " + view.byteLength);
 
-        let sdatData = new Uint8Array(sdatSize);
-
-        for (let i = 0; i < sdatSize; i++) {
-            sdatData[i] = data[offset + i];
-        }
-
-        // downloadUint8Array("OptimePlayer extracted.sdat", sdatData);
-
-        let numOfBlocks = read16LE(sdatData, 0xE);
-        let headerSize = read16LE(sdatData, 0xC);
+        let numOfBlocks = read16LE(view, 0xE);
+        let headerSize = read16LE(view, 0xC);
 
         console.log("Number of Blocks: " + numOfBlocks);
         console.log("Header Size: " + headerSize);
@@ -517,14 +516,14 @@ class Sdat {
             return;
         }
 
-        let symbOffs = read32LE(sdatData, 0x10);
-        let symbSize = read32LE(sdatData, 0x14);
-        let infoOffs = read32LE(sdatData, 0x18);
-        let infoSize = read32LE(sdatData, 0x1C);
-        let fatOffs = read32LE(sdatData, 0x20);
-        let fatSize = read32LE(sdatData, 0x24);
-        let fileOffs = read32LE(sdatData, 0x28);
-        let fileSize = read32LE(sdatData, 0x2C);
+        let symbOffs = read32LE(view, 0x10);
+        let symbSize = read32LE(view, 0x14);
+        let infoOffs = read32LE(view, 0x18);
+        let infoSize = read32LE(view, 0x1C);
+        let fatOffs = read32LE(view, 0x20);
+        let fatSize = read32LE(view, 0x24);
+        let fileOffs = read32LE(view, 0x28);
+        let fileSize = read32LE(view, 0x2C);
 
         console.log("SYMB Block Offset: " + hexN(symbOffs, 8));
         console.log("SYMB Block Size: " + hexN(symbSize, 8));
@@ -538,19 +537,19 @@ class Sdat {
         // SYMB processing
         {
             // SSEQ symbols
-            let symbSseqListOffs = read32LE(sdatData, symbOffs + 0x8);
-            let symbSseqListNumEntries = read32LE(sdatData, symbOffs + symbSseqListOffs);
+            let symbSseqListOffs = read32LE(view, symbOffs + 0x8);
+            let symbSseqListNumEntries = read32LE(view, symbOffs + symbSseqListOffs);
 
             console.log("SYMB Bank List Offset: " + hexN(symbSseqListOffs, 8));
             console.log("SYMB Number of SSEQ entries: " + symbSseqListNumEntries);
 
             for (let i = 0; i < symbSseqListNumEntries; i++) {
-                let sseqNameOffs = read32LE(sdatData, symbOffs + symbSseqListOffs + 4 + i * 4);
+                let sseqNameOffs = read32LE(view, symbOffs + symbSseqListOffs + 4 + i * 4);
 
                 let sseqNameArr = [];
                 let sseqNameCharOffs = 0;
                 while (true) {
-                    let char = sdatData[symbOffs + sseqNameOffs + sseqNameCharOffs];
+                    let char = read8(view, symbOffs + sseqNameOffs + sseqNameCharOffs);
                     if (char === 0) break; // check for null terminator
                     sseqNameCharOffs++;
                     sseqNameArr.push(char);
@@ -560,36 +559,36 @@ class Sdat {
                 if (sseqNameOffs !== 0) {
                     let seqName = String.fromCharCode(...sseqNameArr);
 
-                    sdat.sseqNameIdDict[seqName] = i;
-                    sdat.sseqIdNameDict[i] = seqName;
+                    sdat.sseqNameIdDict.set(seqName, i);
+                    sdat.sseqIdNameDict.set(i, seqName);
                 }
             }
         }
 
         {
             // SSAR symbols
-            let symbSsarListOffs = read32LE(sdatData, symbOffs + 0xC);
-            let symbSsarListNumEntries = read32LE(sdatData, symbOffs + symbSsarListOffs);
+            let symbSsarListOffs = read32LE(view, symbOffs + 0xC);
+            let symbSsarListNumEntries = read32LE(view, symbOffs + symbSsarListOffs);
 
             console.log("SYMB Number of SSAR entries: " + symbSsarListNumEntries);
         }
 
         {
             // BANK symbols
-            let symbBankListOffs = read32LE(sdatData, symbOffs + 0x10);
-            let symbBankListNumEntries = read32LE(sdatData, symbOffs + symbBankListOffs);
+            let symbBankListOffs = read32LE(view, symbOffs + 0x10);
+            let symbBankListNumEntries = read32LE(view, symbOffs + symbBankListOffs);
 
             console.log("SYMB Bank List Offset: " + hexN(symbBankListOffs, 8));
             console.log("SYMB Number of BANK entries: " + symbBankListNumEntries);
 
             for (let i = 0; i < symbBankListNumEntries; i++) {
-                let symbNameOffs = read32LE(sdatData, symbOffs + symbBankListOffs + 4 + i * 4);
-                if (i === 0) console.log("NDS file addr of BANK list 1st entry: " + hexN(offset + symbOffs + symbNameOffs, 8));
+                let symbNameOffs = read32LE(view, symbOffs + symbBankListOffs + 4 + i * 4);
+                if (i === 0) console.log("NDS file addr of BANK list 1st entry: " + hexN(view.byteOffset + symbOffs + symbNameOffs, 8));
 
                 let bankNameArr = [];
                 let bankNameCharOffs = 0;
                 while (true) {
-                    let char = sdatData[symbOffs + symbNameOffs + bankNameCharOffs];
+                    let char = read8(view, symbOffs + symbNameOffs + bankNameCharOffs);
                     if (char === 0) break; // check for null terminator
                     bankNameCharOffs++;
                     bankNameArr.push(char);
@@ -599,16 +598,16 @@ class Sdat {
                 if (symbNameOffs !== 0) {
                     let bankName = String.fromCharCode(...bankNameArr);
 
-                    sdat.sbnkNameIdDict[bankName] = i;
-                    sdat.sbnkIdNameDict[i] = bankName;
+                    sdat.sbnkNameIdDict.set(bankName, i);
+                    sdat.sbnkIdNameDict.set(i, bankName);
                 }
             }
         }
 
         {
             // SWAR symbols
-            let symbSwarListOffs = read32LE(sdatData, symbOffs + 0x14);
-            let symbSwarListNumEntries = read32LE(sdatData, symbOffs + symbSwarListOffs);
+            let symbSwarListOffs = read32LE(view, symbOffs + 0x14);
+            let symbSwarListNumEntries = read32LE(view, symbOffs + symbSwarListOffs);
 
             console.log("SYMB Number of SWAR entries: " + symbSwarListNumEntries);
         }
@@ -616,21 +615,21 @@ class Sdat {
         // INFO processing
         {
             // SSEQ info
-            let infoSseqListOffs = read32LE(sdatData, infoOffs + 0x8);
-            let infoSseqListNumEntries = read32LE(sdatData, infoOffs + infoSseqListOffs);
+            let infoSseqListOffs = read32LE(view, infoOffs + 0x8);
+            let infoSseqListNumEntries = read32LE(view, infoOffs + infoSseqListOffs);
             console.log("INFO Number of SSEQ entries: " + infoSseqListNumEntries);
 
             for (let i = 0; i < infoSseqListNumEntries; i++) {
-                let infoSseqNameOffs = read32LE(sdatData, infoOffs + infoSseqListOffs + 4 + i * 4);
+                let infoSseqNameOffs = read32LE(view, infoOffs + infoSseqListOffs + 4 + i * 4);
 
                 if (infoSseqNameOffs !== 0) {
                     let info = new SseqInfo();
-                    info.fileId = read16LE(sdatData, infoOffs + infoSseqNameOffs + 0);
-                    info.bank = read16LE(sdatData, infoOffs + infoSseqNameOffs + 4);
-                    info.volume = sdatData[infoOffs + infoSseqNameOffs + 6];
-                    info.cpr = sdatData[infoOffs + infoSseqNameOffs + 7];
-                    info.ppr = sdatData[infoOffs + infoSseqNameOffs + 8];
-                    info.ply = sdatData[infoOffs + infoSseqNameOffs + 9];
+                    info.fileId = read16LE(view, infoOffs + infoSseqNameOffs + 0);
+                    info.bank = read16LE(view, infoOffs + infoSseqNameOffs + 4);
+                    info.volume = read8(view, infoOffs + infoSseqNameOffs + 6);
+                    info.cpr = read8(view, infoOffs + infoSseqNameOffs + 7);
+                    info.ppr = read8(view, infoOffs + infoSseqNameOffs + 8);
+                    info.ply = read8(view, infoOffs + infoSseqNameOffs + 9);
 
                     sdat.sseqInfos[i] = info;
                     sdat.sseqList.push(i);
@@ -642,16 +641,16 @@ class Sdat {
 
         {
             // SSAR info
-            let infoSsarListOffs = read32LE(sdatData, infoOffs + 0xC);
-            let infoSsarListNumEntries = read32LE(sdatData, infoOffs + infoSsarListOffs);
+            let infoSsarListOffs = read32LE(view, infoOffs + 0xC);
+            let infoSsarListNumEntries = read32LE(view, infoOffs + infoSsarListOffs);
             console.log("INFO Number of SSAR entries: " + infoSsarListNumEntries);
 
             for (let i = 0; i < infoSsarListNumEntries; i++) {
-                let infoSsarNameOffs = read32LE(sdatData, infoOffs + infoSsarListOffs + 4 + i * 4);
+                let infoSsarNameOffs = read32LE(view, infoOffs + infoSsarListOffs + 4 + i * 4);
 
                 if (infoSsarNameOffs !== 0) {
                     let info = new SsarInfo();
-                    info.fileId = read16LE(sdatData, infoOffs + infoSsarNameOffs + 0);
+                    info.fileId = read16LE(view, infoOffs + infoSsarNameOffs + 0);
 
                     sdat.ssarInfos[i] = info;
                 } else {
@@ -662,20 +661,20 @@ class Sdat {
 
         {
             // BANK info
-            let infoBankListOffs = read32LE(sdatData, infoOffs + 0x10);
-            let infoBankListNumEntries = read32LE(sdatData, infoOffs + infoBankListOffs);
+            let infoBankListOffs = read32LE(view, infoOffs + 0x10);
+            let infoBankListNumEntries = read32LE(view, infoOffs + infoBankListOffs);
             console.log("INFO Number of BANK entries: " + infoBankListNumEntries);
 
             for (let i = 0; i < infoBankListNumEntries; i++) {
-                let infoBankNameOffs = read32LE(sdatData, infoOffs + infoBankListOffs + 4 + i * 4);
+                let infoBankNameOffs = read32LE(view, infoOffs + infoBankListOffs + 4 + i * 4);
 
                 if (infoBankNameOffs !== 0) {
                     let info = new BankInfo();
-                    info.fileId = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x0);
-                    info.swarId[0] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x4);
-                    info.swarId[1] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x6);
-                    info.swarId[2] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0x8);
-                    info.swarId[3] = read16LE(sdatData, infoOffs + infoBankNameOffs + 0xA);
+                    info.fileId = read16LE(view, infoOffs + infoBankNameOffs + 0x0);
+                    info.swarId[0] = read16LE(view, infoOffs + infoBankNameOffs + 0x4);
+                    info.swarId[1] = read16LE(view, infoOffs + infoBankNameOffs + 0x6);
+                    info.swarId[2] = read16LE(view, infoOffs + infoBankNameOffs + 0x8);
+                    info.swarId[3] = read16LE(view, infoOffs + infoBankNameOffs + 0xA);
 
                     sdat.sbnkInfos[i] = info;
                 } else {
@@ -686,16 +685,16 @@ class Sdat {
 
         {
             // SWAR info
-            let infoSwarListOffs = read32LE(sdatData, infoOffs + 0x14);
-            let infoSwarListNumEntries = read32LE(sdatData, infoOffs + infoSwarListOffs);
+            let infoSwarListOffs = read32LE(view, infoOffs + 0x14);
+            let infoSwarListNumEntries = read32LE(view, infoOffs + infoSwarListOffs);
             console.log("INFO Number of SWAR entries: " + infoSwarListNumEntries);
 
             for (let i = 0; i < infoSwarListNumEntries; i++) {
-                let infoSwarNameOffs = read32LE(sdatData, infoOffs + infoSwarListOffs + 4 + i * 4);
+                let infoSwarNameOffs = read32LE(view, infoOffs + infoSwarListOffs + 4 + i * 4);
 
                 if (infoSwarNameOffs) {
                     let info = new SwarInfo();
-                    info.fileId = read16LE(sdatData, infoOffs + infoSwarNameOffs + 0x0);
+                    info.fileId = read16LE(view, infoOffs + infoSwarNameOffs + 0x0);
 
                     sdat.swarInfos[i] = info;
                 } else {
@@ -705,22 +704,16 @@ class Sdat {
         }
 
         // FAT / FILE processing
-        let fatNumFiles = read32LE(sdatData, fatOffs + 8);
+        let fatNumFiles = read32LE(view, fatOffs + 8);
         console.log("FAT Number of files: " + fatNumFiles);
 
         for (let i = 0; i < fatNumFiles; i++) {
             let fileEntryOffs = fatOffs + 0xC + i * 0x10;
 
-            let fileDataOffs = read32LE(sdatData, fileEntryOffs);
-            let fileSize = read32LE(sdatData, fileEntryOffs + 4);
+            let fileDataOffs = read32LE(view, fileEntryOffs);
+            let fileSize = read32LE(view, fileEntryOffs + 4);
 
-            let fileData = new Uint8Array(fileSize);
-
-            for (let j = 0; j < fileSize; j++) {
-                fileData[j] = sdatData[fileDataOffs + j];
-            }
-
-            sdat.fat[i] = fileData;
+            sdat.fat.set(i, new DataView(view.buffer, fileDataOffs, fileSize));
         }
 
         // Decode sound banks
@@ -730,13 +723,15 @@ class Sdat {
             let bankInfo = sdat.sbnkInfos[i];
 
             if (bankInfo !== null) {
-                let bankFile = sdat.fat[bankInfo.fileId];
+                if (bankInfo.fileId == null) throw new Error();
+                let bankFile = sdat.fat.get(bankInfo.fileId);
+                if (bankFile == null) throw new Error();
 
                 let numberOfInstruments = read32LE(bankFile, 0x38);
                 if (g_debug)
-                    console.log(`Bank ${i} / ${sdat.sbnkIdNameDict[i]}: ${numberOfInstruments} instruments`);
+                    console.log(`Bank ${i} / ${sdat.sbnkIdNameDict.get(i)}: ${numberOfInstruments} instruments`);
                 for (let j = 0; j < numberOfInstruments; j++) {
-                    let fRecord = bankFile[0x3C + j * 4];
+                    let fRecord = read8(bankFile, 0x3C + j * 4);
                     let recordOffset = read16LE(bankFile, 0x3C + j * 4 + 1);
 
                     let instrument = new InstrumentRecord();
@@ -781,18 +776,19 @@ class Sdat {
                      * @param {number} offset
                      */
                     function readRecordData(index, offset) {
+                        if (bankFile == null) throw new Error();
                         instrument.swavInfoId[index] = read16LE(bankFile, recordOffset + 0x0 + offset);
                         instrument.swarInfoId[index] = read16LE(bankFile, recordOffset + 0x2 + offset);
-                        instrument.noteNumber[index] = bankFile[recordOffset + 0x4 + offset];
-                        instrument.attack[index] = bankFile[recordOffset + 0x5 + offset];
+                        instrument.noteNumber[index] = read8(bankFile, recordOffset + 0x4 + offset);
+                        instrument.attack[index] = read8(bankFile, recordOffset + 0x5 + offset);
                         instrument.attackCoefficient[index] = getEffectiveAttack(instrument.attack[index]);
-                        instrument.decay[index] = bankFile[recordOffset + 0x6 + offset];
+                        instrument.decay[index] = read8(bankFile, recordOffset + 0x6 + offset);
                         instrument.decayCoefficient[index] = CalcDecayCoeff(instrument.decay[index]);
-                        instrument.sustain[index] = bankFile[recordOffset + 0x7 + offset];
+                        instrument.sustain[index] = read8(bankFile, recordOffset + 0x7 + offset);
                         instrument.sustainLevel[index] = getSustainLevel(instrument.sustain[index]);
-                        instrument.release[index] = bankFile[recordOffset + 0x8 + offset];
+                        instrument.release[index] = read8(bankFile, recordOffset + 0x8 + offset);
                         instrument.releaseCoefficient[index] = CalcDecayCoeff(instrument.release[index]);
-                        instrument.pan[index] = bankFile[recordOffset + 0x9 + offset];
+                        instrument.pan[index] = read8(bankFile, recordOffset + 0x9 + offset);
                     }
 
                     switch (fRecord) {
@@ -807,10 +803,10 @@ class Sdat {
 
                         case InstrumentType.Drumset: // Drumset
                         {
-                            let instrumentCount = bankFile[recordOffset + 1] - bankFile[recordOffset] + 1;
+                            let instrumentCount = read8(bankFile, recordOffset + 1) - read8(bankFile, recordOffset) + 1;
 
-                            instrument.lowerNote = bankFile[recordOffset + 0];
-                            instrument.upperNote = bankFile[recordOffset + 1];
+                            instrument.lowerNote = read8(bankFile, recordOffset + 0);
+                            instrument.upperNote = read8(bankFile, recordOffset + 1);
 
                             for (let k = 0; k < instrumentCount; k++) {
                                 readRecordData(k, 4 + k * 12);
@@ -822,7 +818,7 @@ class Sdat {
                             let instrumentCount = 0;
 
                             for (let k = 0; k < 8; k++) {
-                                let end = bankFile[recordOffset + k];
+                                let end = read8(bankFile, recordOffset + k);
                                 instrument.regionEnd[k] = end;
                                 if (end === 0) {
                                     instrumentCount = k;
@@ -857,21 +853,23 @@ class Sdat {
 
             let swarInfo = sdat.swarInfos[i];
             if (swarInfo !== null) {
-                let swarFile = sdat.fat[swarInfo.fileId];
+                if (swarInfo.fileId == null) throw new Error();
+                let swarFile = sdat.fat.get(swarInfo.fileId);
+                if (swarFile == null) throw new Error();
 
                 let sampleCount = read32LE(swarFile, 0x38);
                 for (let j = 0; j < sampleCount; j++) {
                     let sampleOffset = read32LE(swarFile, 0x3C + j * 4);
 
-                    let wavType = swarFile[sampleOffset + 0];
-                    let loopFlag = swarFile[sampleOffset + 1];
+                    let wavType = read8(swarFile, sampleOffset + 0);
+                    let loopFlag = read8(swarFile, sampleOffset + 1);
                     let sampleRate = read16LE(swarFile, sampleOffset + 2);
                     let swarLoopOffset = read16LE(swarFile, sampleOffset + 6); // in 4-byte units
                     let swarSampleLength = read32LE(swarFile, sampleOffset + 8); // in 4-byte units (excluding ADPCM header if any)
 
                     let sampleDataLength = (swarLoopOffset + swarSampleLength) * 4;
 
-                    let sampleData = new Uint8Array(swarFile.buffer, sampleOffset + 0xC, sampleDataLength);
+                    let sampleData = new DataView(swarFile.buffer, swarFile.byteOffset + sampleOffset + 0xC, sampleDataLength);
 
                     let decoded;
                     let loopPoint = 0;
@@ -902,7 +900,7 @@ class Sdat {
                     }
                 }
 
-                sdat.sampleArchives[i] = archive;
+                sdat.sampleArchives.set(i, archive);
             }
         }
 
@@ -1089,10 +1087,6 @@ class SampleInstrument {
 
         this.output = 0;
 
-        // We use a sloping filter rather than a brick wall to allow some of the image harmonics through
-        // SQRT1_2 = 1/SQRT(2) maximally flat (Butterworth) filter
-        this.filter = BiquadFilter.lowPassFilter(8, this.sampleRate, 16384, Math.SQRT1_2);
-
         Object.seal(this);
     }
 
@@ -1142,22 +1136,11 @@ class SampleInstrument {
         }
     }
 
-    updateFilter() {
-        let convertedSampleRate = this.freqRatio * this.sample.sampleRate;
-        if (convertedSampleRate > this.nyquist) {
-            convertedSampleRate = this.nyquist;
-        }
-        // console.log(`[${this.synth.id}] cutoff: ` + convertedSampleRate);
-        this.filter.setLowPassFilter(this.sampleRate, convertedSampleRate, Math.SQRT1_2);
-    }
-
     /** @param {number} midiNote */
     setNote(midiNote) {
         this.midiNote = midiNote;
         this.frequency = midiNoteToHz(midiNote);
         this.freqRatio = this.frequency / this.sample.frequency;
-        this.updateFilter();
-        this.filter.resetState();
     }
 
     /** @param {number} semitones */
@@ -1178,7 +1161,7 @@ class SampleInstrument {
 }
 
 class SseqController {
-    /** @param {Array | Uint8Array} sseqFile
+    /** @param {DataView} sseqFile
      *  @param {number} dataOffset
      *  @param {CircularBuffer<Message>} messageBuffer
      **/
@@ -1196,8 +1179,6 @@ class SseqController {
 
         this.tracks[0].active = true;
         this.tracks[0].bpm = 120;
-
-        this.destroyed = false;
 
         this.ticksElapsed = 0;
         this.paused = false;
@@ -1312,7 +1293,7 @@ class SseqTrack {
     }
 
     readPc() {
-        return this.controller.sseqFile[this.pc + this.controller.dataOffset];
+        return this.controller.sseqFile.getUint8(this.pc + this.controller.dataOffset);
     }
 
     readPcInc(bytes = 1) {
@@ -1665,7 +1646,6 @@ class SampleSynthesizer {
         instr.sampleT = 0;
         instr.resampleT = 0;
         instr.playing = true;
-        instr.filter.resetState();
 
         let currentIndex = this.playingIndex;
 
@@ -1722,6 +1702,7 @@ class SampleSynthesizer {
         }
     }
 
+    // TODO: Mid/side processing to keep the low-end tight :)
     /** @param {number} pan */
     setPan(pan) {
         const SPEED_OF_SOUND = 343; // meters per second
@@ -1883,14 +1864,17 @@ function calcChannelVolume(velocity, adsrTimer) {
 class FsVisControllerBridge {
     /**
      * @param {Sdat} sdat
-     * @param {string | number} id
+     * @param {number} id
      * @param {number} runAheadTicks
      */
     constructor(sdat, id, runAheadTicks) {
         this.runAheadTicks = runAheadTicks;
 
         let info = sdat.sseqInfos[id];
-        let file = sdat.fat[info.fileId];
+        if (info == null) throw new Error();
+        if (info.fileId == null) throw new Error();
+        let file = sdat.fat.get(info.fileId);
+        if (file == null) throw new Error();
         let dataOffset = read32LE(file, 0x18);
 
         /** @type {CircularBuffer<Message>} */
@@ -2000,18 +1984,23 @@ class ControllerBridge {
      @param {Sdat} sdat
      @param sampleRate
      @param sdat
-     @param {string} id
+     @param {number} id
      */
     constructor(sampleRate, sdat, id) {
         let info = sdat.sseqInfos[id];
+        if (!info) throw new Error();
+        if (!info.bank) throw new Error();
         this.bankInfo = sdat.sbnkInfos[info.bank];
+        if (!this.bankInfo) throw new Error();
         this.bank = sdat.banks[info.bank];
 
         console.log("Playing SSEQ Id:" + id);
         console.log("FAT ID:" + info.fileId);
 
         console.log(`Linked archives: ${this.bankInfo.swarId[0]} ${this.bankInfo.swarId[1]} ${this.bankInfo.swarId[2]} ${this.bankInfo.swarId[3]}`);
-        let file = sdat.fat[info.fileId];
+        if (info.fileId == null) throw new Error();
+        let file = sdat.fat.get(info.fileId);
+        if (!file) throw new Error();
 
         for (let i = 0; i < this.bank.instruments.length; i++) {
             let instrument = this.bank.instruments[i];
@@ -2066,8 +2055,15 @@ class ControllerBridge {
 
         this.jumps = 0;
         this.fadingStart = false;
+        /**
+         * @type {{ trackNum: number; midiNote: number; velocity: number; synthInstrIndex: number; startTime: number; endTime: number; instrument: InstrumentRecord; instrumentEntryIndex: number; adsrState: number; adsrTimer: number; // idk why this number, ask gbatek
+         fromKeyboard: boolean; lfoCounter: number; lfoDelayCounter: number; delayCounter: number; }[]}
+         */
         this.activeNoteData = [];
         this.bpmTimer = 0;
+        /**
+         * @type {number | null}
+         */
         this.activeKeyboardTrackNum = null;
     }
 
@@ -2226,62 +2222,61 @@ class ControllerBridge {
                             let archiveId = instrument.swarInfoId[index];
                             let sampleId = instrument.swavInfoId[index];
 
-                            let archive = this.sdat.sampleArchives[this.bankInfo.swarId[archiveId]];
-                            if (archive) {
-                                let sample = archive[sampleId];
+                            let archive = this.sdat.sampleArchives.get(this.bankInfo.swarId[archiveId]);
+                            if (!archive) throw new Error();
+                            let sample = archive[sampleId];
+
+                            if (instrument.fRecord === InstrumentType.PsgPulse) {
+                                sample = squares[sampleId];
+                                sample.resampleMode = ResampleMode.NearestNeighbor;
+                            } else {
+                                sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
+                                sample.resampleMode = ResampleMode.Cubic;
+                            }
+
+                            if (g_debug) {
+                                console.log(this.bank);
+                                console.log("Program " + this.controller.tracks[msg.trackNum].program);
+                                console.log("MIDI Note " + midiNote);
+                                console.log("Base MIDI Note: " + instrument.noteNumber[index]);
 
                                 if (instrument.fRecord === InstrumentType.PsgPulse) {
-                                    sample = squares[sampleId];
-                                    sample.resampleMode = ResampleMode.NearestNeighbor;
-                                } else {
-                                    sample.frequency = midiNoteToHz(instrument.noteNumber[index]);
-                                    sample.resampleMode = ResampleMode.Cubic;
+                                    console.log("PSG Pulse");
                                 }
 
-                                if (g_debug) {
-                                    console.log(this.bank);
-                                    console.log("Program " + this.controller.tracks[msg.trackNum].program);
-                                    console.log("MIDI Note " + midiNote);
-                                    console.log("Base MIDI Note: " + instrument.noteNumber[index]);
+                                console.log("Attack: " + instrument.attack[index]);
+                                console.log("Decay: " + instrument.decay[index]);
+                                console.log("Sustain: " + instrument.sustain[index]);
+                                console.log("Release: " + instrument.release[index]);
 
-                                    if (instrument.fRecord === InstrumentType.PsgPulse) {
-                                        console.log("PSG Pulse");
-                                    }
-
-                                    console.log("Attack: " + instrument.attack[index]);
-                                    console.log("Decay: " + instrument.decay[index]);
-                                    console.log("Sustain: " + instrument.sustain[index]);
-                                    console.log("Release: " + instrument.release[index]);
-
-                                    console.log("Attack Coefficient: " + instrument.attackCoefficient[index]);
-                                    console.log("Decay Coefficient: " + instrument.decayCoefficient[index]);
-                                    console.log("Sustain Level: " + instrument.sustainLevel[index]);
-                                    console.log("Release Coefficient: " + instrument.releaseCoefficient[index]);
-                                }
-
-                                let initialVolume = instrument.attackCoefficient[index] === 0 ? calcChannelVolume(velocity, 0) : 0;
-                                let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, midiNote, initialVolume, this.controller.ticksElapsed);
-
-                                this.notesOn[msg.trackNum][midiNote] = 1;
-                                this.activeNoteData.push(
-                                    {
-                                        trackNum: msg.trackNum,
-                                        midiNote: midiNote,
-                                        velocity: velocity,
-                                        synthInstrIndex: synthInstrIndex,
-                                        startTime: this.controller.ticksElapsed,
-                                        endTime: this.controller.ticksElapsed + duration,
-                                        instrument: instrument,
-                                        instrumentEntryIndex: index,
-                                        adsrState: AdsrState.Attack,
-                                        adsrTimer: -92544, // idk why this number, ask gbatek
-                                        fromKeyboard: msg.fromKeyboard,
-                                        lfoCounter: 0,
-                                        lfoDelayCounter: 0,
-                                        delayCounter: 0,
-                                    }
-                                );
+                                console.log("Attack Coefficient: " + instrument.attackCoefficient[index]);
+                                console.log("Decay Coefficient: " + instrument.decayCoefficient[index]);
+                                console.log("Sustain Level: " + instrument.sustainLevel[index]);
+                                console.log("Release Coefficient: " + instrument.releaseCoefficient[index]);
                             }
+
+                            let initialVolume = instrument.attackCoefficient[index] === 0 ? calcChannelVolume(velocity, 0) : 0;
+                            let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, midiNote, initialVolume, this.controller.ticksElapsed);
+
+                            this.notesOn[msg.trackNum][midiNote] = 1;
+                            this.activeNoteData.push(
+                                {
+                                    trackNum: msg.trackNum,
+                                    midiNote: midiNote,
+                                    velocity: velocity,
+                                    synthInstrIndex: synthInstrIndex,
+                                    startTime: this.controller.ticksElapsed,
+                                    endTime: this.controller.ticksElapsed + duration,
+                                    instrument: instrument,
+                                    instrumentEntryIndex: index,
+                                    adsrState: AdsrState.Attack,
+                                    adsrTimer: -92544, // idk why this number, ask gbatek
+                                    fromKeyboard: msg.fromKeyboard,
+                                    lfoCounter: 0,
+                                    lfoDelayCounter: 0,
+                                    delayCounter: 0,
+                                }
+                            );
                         }
                         break;
                     case MessageType.Jump: {
@@ -2336,7 +2331,7 @@ function bitTest(i, bit) {
  * @param {number} id
  */
 async function playSeqById(sdat, id) {
-    await playSeq(sdat, sdat.sseqIdNameDict[id]);
+    await playSeq(sdat, sdat.sseqIdNameDict.get(id));
 }
 
 /**
@@ -2356,7 +2351,7 @@ async function playSeq(sdat, name) {
     const SAMPLE_RATE = player.sampleRate;
     console.log("Playing with sample rate: " + SAMPLE_RATE);
 
-    let id = sdat.sseqNameIdDict[name];
+    let id = sdat.sseqNameIdDict.get(name);
 
     g_currentlyPlayingId = id;
 
@@ -2396,10 +2391,6 @@ async function playSeq(sdat, name) {
 
             bufferL[i] = valL;
             bufferR[i] = valR;
-
-            if (bridge.controller.destroyed) {
-                return;
-            }
         }
 
         player.queueAudio(bufferL, bufferR);
@@ -2443,23 +2434,23 @@ function clamp(val, min, max) {
 }
 
 /**
- * @param {number[] | Uint8Array} pcm8Data
+ * @param {DataView} pcm8Data
  */
 function decodePcm8(pcm8Data) {
-    let out = new Float64Array(pcm8Data.length);
+    let out = new Float64Array(pcm8Data.byteLength);
 
     for (let i = 0; i < out.length; i++) {
-        out[i] = (pcm8Data[i] << 24 >> 24) / 128;
+        out[i] = (read8(pcm8Data, i) << 24 >> 24) / 128;
     }
 
     return out;
 }
 
 /**
- * @param {number[] | Uint8Array} pcm16Data
+ * @param {DataView} pcm16Data
  */
 function decodePcm16(pcm16Data) {
-    let out = new Float64Array(pcm16Data.length >> 1);
+    let out = new Float64Array(pcm16Data.byteLength >> 1);
 
     for (let i = 0; i < out.length; i++) {
         out[i] = ((read16LE(pcm16Data, i * 2) << 16) >> 16) / 32768;
@@ -2482,10 +2473,10 @@ const adpcmTable = [
 
 /**
  * Decodes IMA-ADPCM to PCM16
- * @param {Uint8Array} adpcmData
+ * @param {DataView} adpcmData
  */
 function decodeAdpcm(adpcmData) {
-    let out = new Float64Array((adpcmData.length - 4) * 2);
+    let out = new Float64Array((adpcmData.byteLength - 4) * 2);
     let outOffs = 0;
 
     let header = read32LE(adpcmData, 0);
@@ -2493,9 +2484,9 @@ function decodeAdpcm(adpcmData) {
     let currentValue = header & 0xFFFF;
     let adpcmIndex = clamp(header >> 16, 0, 88);
 
-    for (let i = 4; i < adpcmData.length; i++) {
+    for (let i = 4; i < adpcmData.byteLength; i++) {
         for (let j = 0; j < 2; j++) {
-            let data = (adpcmData[i] >> (j * 4)) & 0xF;
+            let data = (adpcmData.getUint8(i) >> (j * 4)) & 0xF;
 
             let tableVal = adpcmTable[adpcmIndex];
             let diff = tableVal >> 3;
@@ -2518,7 +2509,7 @@ function decodeAdpcm(adpcmData) {
 }
 
 /**
- * @param {Uint8Array} wavData
+ * @param {DataView} wavData
  * @param {number} sampleFrequency
  */
 function decodeWavToSample(wavData, sampleFrequency) {
@@ -2546,7 +2537,7 @@ function decodeWavToSample(wavData, sampleFrequency) {
     for (let i = 44; i < 44 + subchunk2Size; i += bitsPerSample / 8 * numChannels) {
         switch (bitsPerSample) {
             case 8:
-                sampleData.push(wavData[i] / 255);
+                sampleData.push(read8(wavData, i) / 255);
                 break;
             case 16:
                 sampleData.push(((read16LE(wavData, i) << 16) >> 16) / 32767);
@@ -2560,7 +2551,7 @@ function decodeWavToSample(wavData, sampleFrequency) {
 }
 
 /**
- * @param {any[] | Uint8Array} strmData
+ * @param {DataView} strmData
  */
 function playStrm(strmData) {
     const BUFFER_SIZE = 4096;
@@ -2571,7 +2562,7 @@ function playStrm(strmData) {
 
     console.log("Number of Samples: " + read32LE(strmData, 0x24));
 
-    let channels = strmData[0x1A];
+    let channels = read8(strmData, 0x1A);
     let numberOfBlocks = read32LE(strmData, 0x2C);
     let blockLength = read32LE(strmData, 0x30);
     let samplesPerBlock = read32LE(strmData, 0x34);
@@ -2596,21 +2587,18 @@ function playStrm(strmData) {
 
     console.log("Wave data size: " + waveDataSize);
 
-    let waveDataL = new Uint8Array(waveDataSize);
-    let waveDataR = new Uint8Array(waveDataSize);
+    let waveDataL = new DataView(strmData.buffer, 0x68, waveDataSize);
+    let waveDataR = new DataView(strmData.buffer, 0x68 + blockLength, waveDataSize);
 
-    for (let i = 0; i < waveDataSize; i++) {
-        waveDataL[i] = strmData[0x68 + i];
-        waveDataR[i] = strmData[0x68 + blockLength + i];
-    }
-
+    /** @type {Float64Array} */
     let decodedL;
+    /** @type {Float64Array} */
     let decodedR;
     let format;
-    switch (strmData[0x18]) {
+    switch (read8(strmData, 0x18)) {
         case 0:
             format = "PCM8";
-            break;
+            throw new Error();
         case 1:
             format = "PCM16";
             decodedL = decodePcm16(waveDataL);
@@ -2618,7 +2606,7 @@ function playStrm(strmData) {
             break;
         case 2:
             format = "IMA-ADPCM";
-            break;
+            throw new Error();
         default:
             throw new Error();
     }
@@ -2757,8 +2745,10 @@ function searchForSequences(data, sequence) {
     return seqs;
 }
 
-// THIS IS STARTING FROM THE KEY OF A
-// index is the "key in the octave"
+/**
+ * THIS IS STARTING FROM THE KEY OF A
+ * index is the "key in the octave"
+ * @type {{[index: number]: number}} */
 const getKeyNum = {
     0: 0,
     2: 1,
@@ -2772,10 +2762,12 @@ const getKeyNum = {
     6: 3,
     9: 5,
     11: 6,
-}
+};
 
-// THIS IS STARTING FROM THE KEY OF A
-// index is the "key in the octave"
+/**
+ * THIS IS STARTING FROM THE KEY OF A
+ * index is the "key in the octave"
+ * @type {{[index: number]: boolean}} */
 const isBlackKey = {
     0: false,
     2: false,
@@ -2789,7 +2781,7 @@ const isBlackKey = {
     6: true,
     9: true,
     11: true,
-}
+};
 
 const fsVisPalette = [
     "#da3fb1",
@@ -2983,7 +2975,7 @@ function drawFsVis(ctx, time, noteAlpha) {
         } else {
             // Running under a browser
             ctx.font = 'bold 24px monospace';
-            ctx.fillText(`${g_currentlyPlayingSdat.sseqIdNameDict[g_currentlyPlayingId]} (ID: ${g_currentlyPlayingId})`, 24, 24);
+            ctx.fillText(`${g_currentlyPlayingSdat.sseqIdNameDict.get(g_currentlyPlayingId)} (ID: ${g_currentlyPlayingId})`, 24, 24);
         }
     }
 
