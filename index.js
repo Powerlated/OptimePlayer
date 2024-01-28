@@ -156,7 +156,7 @@ window.onload = async () => {
 
     function getSseqLength(sdat, name) {
         let id = sdat.sseqNameIdDict.get(name);
-        let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
+        let controller = new Controller(SAMPLE_RATE, sdat, id);
         let loop = 0;
         let playing = true;
 
@@ -164,11 +164,11 @@ window.onload = async () => {
 
         // nintendo DS clock speed
         while (true) {
-            bridge.tick();
+            controller.tick();
             ticks++;
 
-            if (bridge.jumps > 0) {
-                bridge.jumps = 0;
+            if (controller.jumps > 0) {
+                controller.jumps = 0;
                 loop++;
 
                 if (loop === LOOP_COUNT) {
@@ -176,7 +176,7 @@ window.onload = async () => {
                 }
             }
 
-            if (bridge.fadingStart) {
+            if (controller.fadingStart) {
                 break;
             }
         }
@@ -195,11 +195,11 @@ window.onload = async () => {
         progressModal.style.display = "block";
 
         await g_currentPlayer?.ctx.close();
-        g_currentBridge = null;
+        g_currentController = null;
 
         let id = sdat.sseqNameIdDict.get(name);
 
-        let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
+        let controller = new Controller(SAMPLE_RATE, sdat, id);
 
         console.log("Rendering SSEQ Id:" + id);
         // console.log("FAT ID:" + info.fileId);
@@ -238,20 +238,20 @@ window.onload = async () => {
                 while (timer >= 64 * 2728 * SAMPLE_RATE) {
                     timer -= 64 * 2728 * SAMPLE_RATE;
 
-                    bridge.tick();
+                    controller.tick();
                 }
 
-                if (bridge.jumps > 0) {
-                    bridge.jumps = 0;
+                if (controller.jumps > 0) {
+                    controller.jumps = 0;
                     loop++;
 
                     if (loop === 2) {
-                        bridge.fadingStart = true;
+                        controller.fadingStart = true;
                     }
                 }
 
-                if (bridge.fadingStart) {
-                    bridge.fadingStart = false;
+                if (controller.fadingStart) {
+                    controller.fadingStart = false;
                     fadingOut = true;
                     fadeoutStartSample = sample + SAMPLE_RATE * 2;
                     console.log("Starting fadeout at sample: " + fadeoutStartSample);
@@ -278,7 +278,7 @@ window.onload = async () => {
                 let valR = 0;
                 for (let i = 0; i < 16; i++) {
                     if (g_trackEnables[i]) {
-                        let synth = bridge.synthesizers[i];
+                        let synth = controller.synthesizers[i];
                         synth.nextSample();
                         valL += synth.valL;
                         valR += synth.valR;
@@ -424,8 +424,8 @@ window.onload = async () => {
                         if (blackKey === black) {
                             let whiteKeyNum = octave * 7 + keyNum;
 
-                            let noteOn = g_currentBridge?.notesOn[trackNum][midiNote];
-                            let noteOnKeyboard = g_currentBridge?.notesOnKeyboard[trackNum][midiNote];
+                            let noteOn = g_currentController?.notesOn[trackNum][midiNote];
+                            let noteOnKeyboard = g_currentController?.notesOnKeyboard[trackNum][midiNote];
                             if (!blackKey) {
                                 if (noteOn) {
                                     ctx.fillStyle = "#000000";
@@ -450,7 +450,7 @@ window.onload = async () => {
                 if (!black) {
                     drawKeys(false); // draw white keys
 
-                    if (trackNum === g_currentBridge?.activeKeyboardTrackNum) {
+                    if (trackNum === g_currentController?.activeKeyboardTrackNum) {
                         let x0 = ofsX + 0;
                         let y0 = ofsY + trackNum * sectionHeight;
                         let x1 = ofsX + section1Img.width + midsections * section2Img.width + section3Img.width;
@@ -492,7 +492,7 @@ window.onload = async () => {
             if (time >= lastVisualizerTime + 1 / VISUALIZER_FPS) {
                 ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
-                if (!g_currentBridge) {
+                if (!g_currentController) {
                     ctx.globalAlpha = 0.25;
                 } else {
                     ctx.globalAlpha = 1;
@@ -552,11 +552,11 @@ window.onload = async () => {
                 clickRect.y1 = ofsY + trackNum * sectionHeight + section3Img.height;
 
                 clickRect.callback = () => {
-                    if (g_currentBridge) {
-                        if (g_currentBridge.activeKeyboardTrackNum === trackNum) {
-                            g_currentBridge.activeKeyboardTrackNum = null;
+                    if (g_currentController) {
+                        if (g_currentController.activeKeyboardTrackNum === trackNum) {
+                            g_currentController.activeKeyboardTrackNum = null;
                         } else {
-                            g_currentBridge.activeKeyboardTrackNum = trackNum;
+                            g_currentController.activeKeyboardTrackNum = trackNum;
                         }
                     }
                 };
@@ -616,7 +616,7 @@ window.onload = async () => {
                         break;
                 }
             }
-            if (g_currentBridge?.activeKeyboardTrackNum != null) {
+            if (g_currentController?.activeKeyboardTrackNum != null) {
                 let isNote = false;
                 let note = 0;
 
@@ -671,13 +671,13 @@ window.onload = async () => {
 
                     console.log(note);
                     if (down) {
-                        g_currentBridge.controller.tracks[g_currentBridge.activeKeyboardTrackNum].sendMessage(true, MessageType.PlayNote, note, 127, 2000);
-                        g_currentBridge.notesOnKeyboard[g_currentBridge.activeKeyboardTrackNum][note] = 1;
+                        g_currentController.sequence.tracks[g_currentController.activeKeyboardTrackNum].sendMessage(true, MessageType.PlayNote, note, 127, 2000);
+                        g_currentController.notesOnKeyboard[g_currentController.activeKeyboardTrackNum][note] = 1;
                     } else {
-                        for (let entry of g_currentBridge.activeNoteData) {
-                            if (entry.trackNum === g_currentBridge.activeKeyboardTrackNum && entry.midiNote === note) {
+                        for (let entry of g_currentController.activeNoteData) {
+                            if (entry.trackNum === g_currentController.activeKeyboardTrackNum && entry.midiNote === note) {
                                 entry.adsrState = AdsrState.Release;
-                                g_currentBridge.notesOnKeyboard[g_currentBridge.activeKeyboardTrackNum][note] = 0;
+                                g_currentController.notesOnKeyboard[g_currentController.activeKeyboardTrackNum][note] = 0;
                             }
                         }
                     }
@@ -704,8 +704,8 @@ window.onload = async () => {
         let paused = false;
         pauseButton.onclick = () => {
             paused = !paused;
-            if (g_currentBridge) g_currentBridge.controller.paused = paused;
-            if (currentFsVisBridge) currentFsVisBridge.controller.paused = paused;
+            if (g_currentController) g_currentController.sequence.paused = paused;
+            if (currentFsVisController) currentFsVisController.sequence.paused = paused;
             if (paused) {
                 pauseButton.innerText = "Unpause Sequence Player";
             } else {

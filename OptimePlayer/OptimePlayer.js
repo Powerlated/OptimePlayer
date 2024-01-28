@@ -10,10 +10,10 @@ let g_pureTuningTonic = 0;
 let g_instrumentsAdvanced = 0;
 let g_samplesConsidered = 0;
 
-/** @type {ControllerBridge | null} */
-let g_currentBridge = null;
-/** @type {FsVisControllerBridge | null} */
-let currentFsVisBridge = null;
+/** @type {Controller | null} */
+let g_currentController = null;
+/** @type {FsVisController | null} */
+let currentFsVisController = null;
 /** @type {string | null} */
 let g_currentlyPlayingName = null;
 /** @type {Sdat | null} */
@@ -1178,7 +1178,7 @@ class SampleInstrument {
     }
 }
 
-class SseqController {
+class Sequence {
     /** @param {DataView} sseqFile
      *  @param {number} dataOffset
      *  @param {CircularBuffer<Message>} messageBuffer
@@ -1188,11 +1188,11 @@ class SseqController {
         this.dataOffset = dataOffset;
         this.messageBuffer = messageBuffer;
 
-        /** @type {SseqTrack[]} */
+        /** @type {SequenceTrack[]} */
         this.tracks = new Array(16);
 
         for (let i = 0; i < 16; i++) {
-            this.tracks[i] = new SseqTrack(this, i);
+            this.tracks[i] = new SequenceTrack(this, i);
         }
 
         this.tracks[0].active = true;
@@ -1236,14 +1236,14 @@ class SseqController {
     }
 }
 
-class SseqTrack {
+class SequenceTrack {
     /**
-     * @param {SseqController} controller
+     * @param {Sequence} sequence
      * @param {number} id
      */
-    constructor(controller, id) {
-        /** @type {SseqController} */
-        this.controller = controller;
+    constructor(sequence, id) {
+        /** @type {Sequence} */
+        this.sequence = sequence;
         this.id = id;
 
         this.active = false;
@@ -1311,7 +1311,7 @@ class SseqTrack {
     }
 
     readPc() {
-        return this.controller.sseqFile.getUint8(this.pc + this.controller.dataOffset);
+        return this.sequence.sseqFile.getUint8(this.pc + this.sequence.dataOffset);
     }
 
     readPcInc(bytes = 1) {
@@ -1348,7 +1348,7 @@ class SseqTrack {
      * @param {number} param2
      */
     sendMessage(fromKeyboard, type, param0 = 0, param1 = 0, param2 = 0) {
-        this.controller.messageBuffer.insert(new Message(fromKeyboard, this.id, type, param0, param1, param2));
+        this.sequence.messageBuffer.insert(new Message(fromKeyboard, this.id, type, param0, param1, param2));
     }
 
     execute() {
@@ -1383,7 +1383,7 @@ class SseqTrack {
                     let trackNum = this.readPcInc();
                     let trackOffs = this.readPcInc(3);
 
-                    this.controller.startTrack(trackNum, trackOffs);
+                    this.sequence.startTrack(trackNum, trackOffs);
 
                     this.debugLogForce("Started track thread " + trackNum);
                     this.debugLog("Offset: " + hex(trackOffs, 6));
@@ -1503,7 +1503,7 @@ class SseqTrack {
                 {
                     let dest = this.readPcInc(3);
                     this.pc = dest;
-                    this.debugLogForce(`Jump to: ${hexN(dest, 6)} Tick: ${this.controller.ticksElapsed}`);
+                    this.debugLogForce(`Jump to: ${hexN(dest, 6)} Tick: ${this.sequence.ticksElapsed}`);
 
                     this.sendMessage(false, MessageType.Jump);
                     break;
@@ -1541,7 +1541,7 @@ class SseqTrack {
                 }
                 case 0xFF: // End of Track
                 {
-                    this.controller.endTrack(this.id);
+                    this.sequence.endTrack(this.id);
                     this.sendMessage(false, MessageType.TrackEnded);
                     // Set restingFor to non-zero since the controller checks it to stop executing
                     this.restingFor = 1;
@@ -1879,7 +1879,7 @@ function calcChannelVolume(velocity, adsrTimer) {
     return result / 127;
 }
 
-class FsVisControllerBridge {
+class FsVisController {
     /**
      * @param {Sdat} sdat
      * @param {number} id
@@ -1897,7 +1897,7 @@ class FsVisControllerBridge {
 
         /** @type {CircularBuffer<Message>} */
         this.messageBuffer = new CircularBuffer(512);
-        this.controller = new SseqController(file, dataOffset, this.messageBuffer);
+        this.sequence = new Sequence(file, dataOffset, this.messageBuffer);
         /** @type {CircularBuffer<Message>} */
         this.activeNotes = new CircularBuffer(2048);
 
@@ -1909,11 +1909,11 @@ class FsVisControllerBridge {
     }
 
     tick() {
-        this.bpmTimer += this.controller.tracks[0].bpm;
+        this.bpmTimer += this.sequence.tracks[0].bpm;
         while (this.bpmTimer >= 240) {
             this.bpmTimer -= 240;
 
-            this.controller.tick();
+            this.sequence.tick();
 
             while (this.messageBuffer.entries > 0) {
                 /** @type {Message} */
@@ -1925,7 +1925,7 @@ class FsVisControllerBridge {
                             this.activeNotes.pop();
                         }
 
-                        msg.timestamp = this.controller.ticksElapsed;
+                        msg.timestamp = this.sequence.ticksElapsed;
                         this.activeNotes.insert(msg);
                         break;
                 }
@@ -1996,7 +1996,7 @@ function SND_SinIdx(x) {
     }
 }
 
-class ControllerBridge {
+class Controller {
     /**
      @param {number} sampleRate
      @param {Sdat} sdat
@@ -2055,7 +2055,7 @@ class ControllerBridge {
         this.sdat = sdat;
         /** @type {CircularBuffer<Message>} */
         this.messageBuffer = new CircularBuffer(1024);
-        this.controller = new SseqController(file, dataOffset, this.messageBuffer);
+        this.sequence = new Sequence(file, dataOffset, this.messageBuffer);
 
         /** @type {Uint8Array[]} */
         this.notesOn = [];
@@ -2104,7 +2104,7 @@ class ControllerBridge {
                     this.synthesizers[entry.trackNum].cutInstrument(entry.synthInstrIndex);
                 }
 
-                if (this.controller.ticksElapsed >= entry.endTime && !entry.fromKeyboard) {
+                if (this.sequence.ticksElapsed >= entry.endTime && !entry.fromKeyboard) {
                     if (entry.adsrState !== AdsrState.Release) {
                         this.notesOn[entry.trackNum][entry.midiNote] = 0;
                         entry.adsrState = AdsrState.Release;
@@ -2112,7 +2112,7 @@ class ControllerBridge {
                 }
 
                 // LFO code based off pret/pokediamond
-                let track = this.controller.tracks[entry.trackNum];
+                let track = this.sequence.tracks[entry.trackNum];
                 let lfoValue;
                 if (track.lfoDepth === 0) {
                     lfoValue = BigInt(0);
@@ -2210,11 +2210,11 @@ class ControllerBridge {
             this.activeNoteData.splice(indexToDelete, 1);
         }
 
-        this.bpmTimer += this.controller.tracks[0].bpm;
+        this.bpmTimer += this.sequence.tracks[0].bpm;
         while (this.bpmTimer >= 240) {
             this.bpmTimer -= 240;
 
-            this.controller.tick();
+            this.sequence.tick();
 
             while (this.messageBuffer.entries > 0) {
 
@@ -2234,7 +2234,7 @@ class ControllerBridge {
                             // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
 
                             /** @type {InstrumentRecord} */
-                            let instrument = this.bank.instruments[this.controller.tracks[msg.trackNum].program];
+                            let instrument = this.bank.instruments[this.sequence.tracks[msg.trackNum].program];
 
                             let index = instrument.resolveEntryIndex(midiNote);
                             let archiveId = instrument.swarInfoId[index];
@@ -2254,7 +2254,7 @@ class ControllerBridge {
 
                             if (g_debug) {
                                 console.log(this.bank);
-                                console.log("Program " + this.controller.tracks[msg.trackNum].program);
+                                console.log("Program " + this.sequence.tracks[msg.trackNum].program);
                                 console.log("MIDI Note " + midiNote);
                                 console.log("Base MIDI Note: " + instrument.noteNumber[index]);
 
@@ -2274,7 +2274,7 @@ class ControllerBridge {
                             }
 
                             let initialVolume = instrument.attackCoefficient[index] === 0 ? calcChannelVolume(velocity, 0) : 0;
-                            let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, midiNote, initialVolume, this.controller.ticksElapsed);
+                            let synthInstrIndex = this.synthesizers[msg.trackNum].play(sample, midiNote, initialVolume, this.sequence.ticksElapsed);
 
                             this.notesOn[msg.trackNum][midiNote] = 1;
                             this.activeNoteData.push(
@@ -2283,8 +2283,8 @@ class ControllerBridge {
                                     midiNote: midiNote,
                                     velocity: velocity,
                                     synthInstrIndex: synthInstrIndex,
-                                    startTime: this.controller.ticksElapsed,
-                                    endTime: this.controller.ticksElapsed + duration,
+                                    startTime: this.sequence.ticksElapsed,
+                                    endTime: this.sequence.ticksElapsed + duration,
                                     instrument: instrument,
                                     instrumentEntryIndex: index,
                                     adsrState: AdsrState.Attack,
@@ -2304,7 +2304,7 @@ class ControllerBridge {
                     case MessageType.TrackEnded: {
                         let tracksActive = 0;
                         for (let i = 0; i < 16; i++) {
-                            if (this.controller.tracks[i].active) {
+                            if (this.sequence.tracks[i].active) {
                                 tracksActive++;
                             }
                         }
@@ -2323,7 +2323,7 @@ class ControllerBridge {
                         break;
                     }
                     case MessageType.PitchBend: {
-                        let track = this.controller.tracks[msg.trackNum];
+                        let track = this.sequence.tracks[msg.trackNum];
                         let pitchBend = track.pitchBend << 25 >> 25; // sign extend
                         pitchBend *= track.pitchBendRange / 2;
                         // pitch bend specified in 1/64 of a semitone
@@ -2359,7 +2359,7 @@ async function playSeqById(sdat, id) {
 async function playSeq(sdat, name) {
     g_currentlyPlayingSdat = sdat;
     g_currentlyPlayingName = name;
-    if (g_currentBridge) {
+    if (g_currentController) {
         await g_currentPlayer?.ctx.close();
     }
 
@@ -2376,11 +2376,11 @@ async function playSeq(sdat, name) {
     let bufferL = new Float64Array(BUFFER_SIZE);
     let bufferR = new Float64Array(BUFFER_SIZE);
 
-    let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 5);
-    let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
+    let fsVisController = new FsVisController(sdat, id, 384 * 5);
+    let controller = new Controller(SAMPLE_RATE, sdat, id);
 
-    g_currentBridge = bridge;
-    currentFsVisBridge = fsVisBridge;
+    g_currentController = controller;
+    currentFsVisController = fsVisController;
 
     let timer = 0;
 
@@ -2393,17 +2393,17 @@ async function playSeq(sdat, name) {
             while (timer >= 64 * 2728 * SAMPLE_RATE) {
                 timer -= 64 * 2728 * SAMPLE_RATE;
 
-                bridge.tick();
-                fsVisBridge.tick();
+                controller.tick();
+                fsVisController.tick();
             }
 
             let valL = 0;
             let valR = 0;
             for (let i = 0; i < 16; i++) {
-                bridge.synthesizers[i].nextSample();
+                controller.synthesizers[i].nextSample();
                 if (g_trackEnables[i]) {
-                    valL += bridge.synthesizers[i].valL;
-                    valR += bridge.synthesizers[i].valR;
+                    valL += controller.synthesizers[i].valL;
+                    valR += controller.synthesizers[i].valR;
                 }
             }
 
@@ -2843,11 +2843,11 @@ function drawFsVis(ctx, time, noteAlpha) {
     let pixelY = 1 / ctx.canvas.height;
 
     ctx.fillStyle = "#FF0000";
-    if (currentFsVisBridge && g_currentBridge && g_currentlyPlayingSdat) {
+    if (currentFsVisController && g_currentController && g_currentlyPlayingSdat) {
 
-        let activeNotes = currentFsVisBridge.activeNotes;
+        let activeNotes = currentFsVisController.activeNotes;
 
-        if (lastTicks !== currentFsVisBridge.controller.ticksElapsed) {
+        if (lastTicks !== currentFsVisController.sequence.ticksElapsed) {
             lastTickTime = time;
         }
         ctx.globalAlpha = noteAlpha;
@@ -2858,10 +2858,10 @@ function drawFsVis(ctx, time, noteAlpha) {
             let midiNote = entry.param0;
             let duration = entry.param2;
 
-            let bpm = g_currentBridge.controller.tracks[0].bpm;
+            let bpm = g_currentController.sequence.tracks[0].bpm;
             let sPerTick = (1 / (bpm / 60)) / 48;
 
-            let ticksAdj = g_currentBridge.controller.ticksElapsed;
+            let ticksAdj = g_currentController.sequence.ticksElapsed;
             ticksAdj += (time - lastTickTime) / 1000 / sPerTick;
             let relTime = entry.timestamp - ticksAdj;
 
@@ -2997,6 +2997,6 @@ function drawFsVis(ctx, time, noteAlpha) {
         }
     }
 
-    if (currentFsVisBridge)
-        lastTicks = currentFsVisBridge.controller.ticksElapsed;
+    if (currentFsVisController)
+        lastTicks = currentFsVisController.sequence.ticksElapsed;
 }

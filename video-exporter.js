@@ -51,8 +51,8 @@ function loadSdatsFromRom(data) {
 async function renderVideoSeq(sdat, id, outFile) {
     const SAMPLE_RATE = 32768;
 
-    let bridge = new ControllerBridge(SAMPLE_RATE, sdat, id);
-    let fsVisBridge = new FsVisControllerBridge(sdat, id, 384 * 3);
+    let controller = new Controller(SAMPLE_RATE, sdat, id);
+    let fsVisController = new FsVisController(sdat, id, 384 * 3);
 
     console.log("Rendering SSEQ Id:" + id);
 
@@ -71,8 +71,8 @@ async function renderVideoSeq(sdat, id, outFile) {
     let frames = 0;
 
     g_currentlyPlayingSdat = sdat;
-    g_currentBridge = bridge;
-    currentFsVisBridge = fsVisBridge;
+    g_currentController = controller;
+    currentFsVisController = fsVisController;
     g_currentlyPlayingId = id;
 
     let videoStream = new stream.PassThrough({ highWaterMark: WIDTH * HEIGHT * 4 * 2 });
@@ -97,22 +97,22 @@ async function renderVideoSeq(sdat, id, outFile) {
         while (timer >= 64 * 2728 * SAMPLE_RATE) {
             timer -= 64 * 2728 * SAMPLE_RATE;
 
-            bridge.tick();
-            fsVisBridge.tick();
+            controller.tick();
+            fsVisController.tick();
         }
 
-        if (bridge.jumps > 0) {
-            bridge.jumps = 0;
+        if (controller.jumps > 0) {
+            controller.jumps = 0;
             loop++;
 
             if (loop == 2) {
                 fadeoutLength = 5;
-                bridge.fadingStart = true;
+                controller.fadingStart = true;
             }
         }
 
-        if (bridge.fadingStart) {
-            bridge.fadingStart = false;
+        if (controller.fadingStart) {
+            controller.fadingStart = false;
             fadingOut = true;
             fadeoutStartSample = sample + SAMPLE_RATE * 2;
             console.log("Starting fadeout at sample: " + fadeoutStartSample);
@@ -161,7 +161,7 @@ async function renderVideoSeq(sdat, id, outFile) {
         let valR = 0;
         for (let i = 0; i < 16; i++) {
             if (g_trackEnables[i]) {
-                let synth = bridge.synthesizers[i];
+                let synth = controller.synthesizers[i];
                 synth.nextSample();
                 valL += synth.valL;
                 valR += synth.valR;
