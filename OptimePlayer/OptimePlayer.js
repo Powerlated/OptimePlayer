@@ -847,6 +847,8 @@ class Sdat {
             }
         }
 
+        let nSamples = 0;
+        let sSamples = 0;
         // Decode sample archives
         for (let i = 0; i < sdat.swarInfos.length; i++) {
             let archive = [];
@@ -894,15 +896,20 @@ class Sdat {
                             throw new Error();
                     }
 
-                    if (decoded !== null) {
-                        archive[j] = new Sample(decoded, 440, sampleRate, loopFlag !== 0, loopPoint);
-                        archive[j].sampleLength = swarSampleLength * 4;
-                    }
+                    nSamples++;
+                    sSamples += decoded.length * 8; // Each Float64Array entry is 8 bytes
+
+                    archive[j] = new Sample(decoded, 440, sampleRate, loopFlag !== 0, loopPoint);
+                    archive[j].sampleLength = swarSampleLength * 4;
                 }
 
                 sdat.sampleArchives.set(i, archive);
             }
         }
+
+        // TODO: Pokemon Black 2 USES A GIGABYTE OF RAM. FIX THIS.
+        console.log("Samples decoded: " + nSamples);
+        console.log(`Total in-memory size of samples: ${(sSamples / 1048576).toPrecision(4)} MiB`);
 
         return sdat;
     }
