@@ -308,6 +308,27 @@ class AudioPlayer {
 }
 
 /**
+ * Creates a DataView that views an ArrayBuffer relative to another DataView.
+ * @param {DataView} other
+ * @param {number} offset
+ * @param {number} length
+ * @returns {DataView}
+ */
+function createRelativeDataView(other, offset, length) {
+    return new DataView(other.buffer, other.byteOffset + offset, length);
+}
+
+/**
+ * Checks if an offset is out of the bounds of a DataView.
+ * @param {DataView} view
+ * @param {number} offset
+ * @returns {boolean}
+ */
+function dataViewOutOfBounds(view, offset) {
+    return view.byteOffset + offset >+ view.byteLength;
+}
+
+/**
  * @param {DataView} data
  * @param {number} addr
  */
@@ -512,7 +533,7 @@ class Sdat {
         console.log("Header Size: " + headerSize);
 
         if (headerSize > 256) {
-            console.log("Header size too big (> 256), rejecting.");
+            console.log("Header size too big (> 256), rejecting SDAT.");
             return;
         }
 
@@ -538,6 +559,10 @@ class Sdat {
         {
             // SSEQ symbols
             let symbSseqListOffs = read32LE(view, symbOffs + 0x8);
+            if (dataViewOutOfBounds(view, symbOffs + symbSseqListOffs)) {
+                console.log("SSEQ num entries pointer is out of bounds, rejecting SDAT.")
+                return;
+            }
             let symbSseqListNumEntries = read32LE(view, symbOffs + symbSseqListOffs);
 
             console.log("SYMB Bank List Offset: " + hexN(symbSseqListOffs, 8));
@@ -713,7 +738,7 @@ class Sdat {
             let fileDataOffs = read32LE(view, fileEntryOffs);
             let fileSize = read32LE(view, fileEntryOffs + 4);
 
-            sdat.fat.set(i, new DataView(view.buffer, fileDataOffs, fileSize));
+            sdat.fat.set(i, createRelativeDataView(view, fileDataOffs, fileSize));
         }
 
         // Decode sound banks
@@ -871,7 +896,7 @@ class Sdat {
 
                     let sampleDataLength = (swarLoopOffset + swarSampleLength) * 4;
 
-                    let sampleData = new DataView(swarFile.buffer, swarFile.byteOffset + sampleOffset + 0xC, sampleDataLength);
+                    let sampleData = createRelativeDataView(swarFile, sampleOffset + 0xC, sampleDataLength);
 
                     let decoded;
                     let loopPoint = 0;
@@ -2594,8 +2619,8 @@ function playStrm(strmData) {
 
     console.log("Wave data size: " + waveDataSize);
 
-    let waveDataL = new DataView(strmData.buffer, 0x68, waveDataSize);
-    let waveDataR = new DataView(strmData.buffer, 0x68 + blockLength, waveDataSize);
+    let waveDataL = createRelativeDataView(strmData, 0x68, waveDataSize);
+    let waveDataR = createRelativeDataView(strmData, 0x68 + blockLength, waveDataSize);
 
     /** @type {Float64Array} */
     let decodedL;
