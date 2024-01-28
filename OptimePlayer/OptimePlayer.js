@@ -469,6 +469,10 @@ class SsarInfo {
     }
 }
 
+/**
+ * Info for an instrument bank.
+ * Refers to up to 4 sound archives.
+ */
 class BankInfo {
     constructor() {
         /** @type {number | null} */
@@ -507,8 +511,8 @@ class Sdat {
         /** @type {(SwarInfo | null)[]} */
         this.swarInfos = [];
 
-        /** @type {Bank[]} */
-        this.banks = new Array(128);
+        /** @type {InstrumentBank[]} */
+        this.instrumentBanks = new Array(128);
 
         /** @type {Map<number, Sample[]>} */
         this.sampleArchives = new Map();
@@ -743,7 +747,7 @@ class Sdat {
 
         // Decode sound banks
         for (let i = 0; i < sdat.sbnkInfos.length; i++) {
-            let bank = new Bank();
+            let bank = new InstrumentBank();
 
             let bankInfo = sdat.sbnkInfos[i];
 
@@ -868,73 +872,9 @@ class Sdat {
                     bank.instruments[j] = instrument;
                 }
 
-                sdat.banks[i] = bank;
+                sdat.instrumentBanks[i] = bank;
             }
         }
-
-        let nSamples = 0;
-        let sSamples = 0;
-        // Decode sample archives
-        for (let i = 0; i < sdat.swarInfos.length; i++) {
-            let archive = [];
-
-            let swarInfo = sdat.swarInfos[i];
-            if (swarInfo !== null) {
-                if (swarInfo.fileId == null) throw new Error();
-                let swarFile = sdat.fat.get(swarInfo.fileId);
-                if (swarFile == null) throw new Error();
-
-                let sampleCount = read32LE(swarFile, 0x38);
-                for (let j = 0; j < sampleCount; j++) {
-                    let sampleOffset = read32LE(swarFile, 0x3C + j * 4);
-
-                    let wavType = read8(swarFile, sampleOffset + 0);
-                    let loopFlag = read8(swarFile, sampleOffset + 1);
-                    let sampleRate = read16LE(swarFile, sampleOffset + 2);
-                    let swarLoopOffset = read16LE(swarFile, sampleOffset + 6); // in 4-byte units
-                    let swarSampleLength = read32LE(swarFile, sampleOffset + 8); // in 4-byte units (excluding ADPCM header if any)
-
-                    let sampleDataLength = (swarLoopOffset + swarSampleLength) * 4;
-
-                    let sampleData = createRelativeDataView(swarFile, sampleOffset + 0xC, sampleDataLength);
-
-                    let decoded;
-                    let loopPoint = 0;
-
-                    switch (wavType) {
-                        case 0: // PCM8
-                            loopPoint = swarLoopOffset * 4;
-                            decoded = decodePcm8(sampleData);
-                            // console.log(`Archive ${i}, Sample ${j}: PCM8`);
-                            break;
-                        case 1: // PCM16
-                            loopPoint = swarLoopOffset * 2;
-                            decoded = decodePcm16(sampleData);
-                            // console.log(`Archive ${i}, Sample ${j}: PCM16`);
-                            break;
-                        case 2: // IMA-ADPCM
-                            loopPoint = swarLoopOffset * 8 - 8;
-                            decoded = decodeAdpcm(sampleData);
-                            // console.log(`Archive ${i}, Sample ${j}: ADPCM`);
-                            break;
-                        default:
-                            throw new Error();
-                    }
-
-                    nSamples++;
-                    sSamples += decoded.length * 8; // Each Float64Array entry is 8 bytes
-
-                    archive[j] = new Sample(decoded, 440, sampleRate, loopFlag !== 0, loopPoint);
-                    archive[j].sampleLength = swarSampleLength * 4;
-                }
-
-                sdat.sampleArchives.set(i, archive);
-            }
-        }
-
-        // TODO: Pokemon Black 2 USES A GIGABYTE OF RAM. FIX THIS.
-        console.log("Samples decoded: " + nSamples);
-        console.log(`Total in-memory size of samples: ${(sSamples / 1048576).toPrecision(4)} MiB`);
 
         return sdat;
     }
@@ -1076,7 +1016,7 @@ class InstrumentRecord {
 }
 
 // SBNK
-class Bank {
+class InstrumentBank {
     constructor() {
         /** @type {InstrumentRecord[]} */
         this.instruments = [];
@@ -2002,26 +1942,93 @@ class Controller {
      @param {Sdat} sdat
      @param sampleRate
      @param sdat
-     @param {number} id
+     @param {number} sseqId
      */
-    constructor(sampleRate, sdat, id) {
-        let info = sdat.sseqInfos[id];
-        if (!info) throw new Error();
-        if (!info.bank) throw new Error();
-        this.bankInfo = sdat.sbnkInfos[info.bank];
+    constructor(sampleRate, sdat, sseqId) {
+        let sseqInfo = sdat.sseqInfos[sseqId];
+        if (!sseqInfo) throw new Error();
+        if (!sseqInfo.bank) throw new Error();
+        this.bankInfo = sdat.sbnkInfos[sseqInfo.bank];
         if (!this.bankInfo) throw new Error();
-        this.bank = sdat.banks[info.bank];
+        this.instrumentBank = sdat.instrumentBanks[sseqInfo.bank];
 
-        console.log("Playing SSEQ Id:" + id);
-        console.log("FAT ID:" + info.fileId);
+        console.log("Playing SSEQ Id:" + sseqId);
+        console.log("FAT ID:" + sseqInfo.fileId);
 
-        console.log(`Linked archives: ${this.bankInfo.swarId[0]} ${this.bankInfo.swarId[1]} ${this.bankInfo.swarId[2]} ${this.bankInfo.swarId[3]}`);
-        if (info.fileId == null) throw new Error();
-        let file = sdat.fat.get(info.fileId);
-        if (!file) throw new Error();
+        if (sseqInfo.fileId == null) throw new Error();
 
-        for (let i = 0; i < this.bank.instruments.length; i++) {
-            let instrument = this.bank.instruments[i];
+        let sseqFile = sdat.fat.get(sseqInfo.fileId);
+        if (!sseqFile) throw new Error();
+
+        /** @type {Sample[][]} */
+        this.decodedSampleArchives = [];
+
+        let nSamples = 0;
+        let sSamples = 0;
+        // Decode sample archives
+        for (let i = 0; i < 4; i++) {
+            let decodedArchive = [];
+            let swarId = this.bankInfo.swarId[i];
+            let swarInfo = sdat.swarInfos[swarId];
+            if (swarInfo != null) {
+                console.log(`Linked archive: ${this.bankInfo.swarId[0]}`);
+                if (swarInfo.fileId == null) throw new Error();
+                let swarFile = sdat.fat.get(swarInfo.fileId);
+                if (swarFile == null) throw new Error();
+
+                let sampleCount = read32LE(swarFile, 0x38);
+                for (let j = 0; j < sampleCount; j++) {
+                    let sampleOffset = read32LE(swarFile, 0x3C + j * 4);
+
+                    let wavType = read8(swarFile, sampleOffset + 0);
+                    let loopFlag = read8(swarFile, sampleOffset + 1);
+                    let sampleRate = read16LE(swarFile, sampleOffset + 2);
+                    let swarLoopOffset = read16LE(swarFile, sampleOffset + 6); // in 4-byte units
+                    let swarSampleLength = read32LE(swarFile, sampleOffset + 8); // in 4-byte units (excluding ADPCM header if any)
+
+                    let sampleDataLength = (swarLoopOffset + swarSampleLength) * 4;
+
+                    let sampleData = createRelativeDataView(swarFile, sampleOffset + 0xC, sampleDataLength);
+
+                    let decoded;
+                    let loopPoint = 0;
+
+                    switch (wavType) {
+                        case 0: // PCM8
+                            loopPoint = swarLoopOffset * 4;
+                            decoded = decodePcm8(sampleData);
+                            // console.log(`Archive ${i}, Sample ${j}: PCM8`);
+                            break;
+                        case 1: // PCM16
+                            loopPoint = swarLoopOffset * 2;
+                            decoded = decodePcm16(sampleData);
+                            // console.log(`Archive ${i}, Sample ${j}: PCM16`);
+                            break;
+                        case 2: // IMA-ADPCM
+                            loopPoint = swarLoopOffset * 8 - 8;
+                            decoded = decodeAdpcm(sampleData);
+                            // console.log(`Archive ${i}, Sample ${j}: ADPCM`);
+                            break;
+                        default:
+                            throw new Error();
+                    }
+
+                    nSamples++;
+                    sSamples += decoded.length * 8; // Each Float64Array entry is 8 bytes
+
+                    decodedArchive[j] = new Sample(decoded, 440, sampleRate, loopFlag !== 0, loopPoint);
+                    decodedArchive[j].sampleLength = swarSampleLength * 4;
+                }
+
+                this.decodedSampleArchives[i] = decodedArchive;
+            }
+        }
+
+        console.log("Samples decoded: " + nSamples);
+        console.log(`Total in-memory size of samples: ${(sSamples / 1048576).toPrecision(4)} MiB`);
+
+        for (let i = 0; i < this.instrumentBank.instruments.length; i++) {
+            let instrument = this.instrumentBank.instruments[i];
             let typeString = "";
             switch (instrument.fRecord) {
                 case InstrumentType.Drumset:
@@ -2049,13 +2056,13 @@ class Controller {
             }
         }
 
-        let dataOffset = read32LE(file, 0x18);
+        let dataOffset = read32LE(sseqFile, 0x18);
         if (dataOffset !== 0x1C) alert("SSEQ offset is not 0x1C? it is: " + hex(dataOffset, 8));
 
         this.sdat = sdat;
         /** @type {CircularBuffer<Message>} */
         this.messageBuffer = new CircularBuffer(1024);
-        this.sequence = new Sequence(file, dataOffset, this.messageBuffer);
+        this.sequence = new Sequence(sseqFile, dataOffset, this.messageBuffer);
 
         /** @type {Uint8Array[]} */
         this.notesOn = [];
@@ -2234,13 +2241,13 @@ class Controller {
                             // refers to the archive ID referred to by the corresponding SBNK entry in the INFO block
 
                             /** @type {InstrumentRecord} */
-                            let instrument = this.bank.instruments[this.sequence.tracks[msg.trackNum].program];
+                            let instrument = this.instrumentBank.instruments[this.sequence.tracks[msg.trackNum].program];
 
                             let index = instrument.resolveEntryIndex(midiNote);
-                            let archiveId = instrument.swarInfoId[index];
+                            let archiveIndex = instrument.swarInfoId[index];
                             let sampleId = instrument.swavInfoId[index];
 
-                            let archive = this.sdat.sampleArchives.get(this.bankInfo.swarId[archiveId]);
+                            let archive = this.decodedSampleArchives[archiveIndex];
                             if (!archive) throw new Error();
                             let sample = archive[sampleId];
 
@@ -2253,7 +2260,7 @@ class Controller {
                             }
 
                             if (g_debug) {
-                                console.log(this.bank);
+                                console.log(this.instrumentBank);
                                 console.log("Program " + this.sequence.tracks[msg.trackNum].program);
                                 console.log("MIDI Note " + midiNote);
                                 console.log("Base MIDI Note: " + instrument.noteNumber[index]);
