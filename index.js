@@ -48,42 +48,24 @@ async function loadNdsRom(data) {
 
     console.log(`ROM size: ${data.length} bytes`);
 
-    let sequence = [0x53, 0x44, 0x41, 0x54, 0xFF, 0xFE, 0x00, 0x01]; // "SDAT", then byte order 0xFEFF, then version 0x0100
-    let res = searchForSequences(data, sequence);
-    if (res.length > 0) {
-        console.log(`Found SDATs at:`);
-        for (let i = 0; i < res.length; i++) {
-            console.log(hex(res[i], 8));
-        }
-    } else {
-        console.log(`Couldn't find SDAT (maybe not an NDS ROM?)`);
-    }
+    let sdats = Sdat.loadAllFromDataView(new DataView(data.buffer));
 
-    for (let i = 0; i < res.length; i++) {
-        let view = new DataView(data.buffer, res[i]);
-        let sdat = Sdat.parseFromRom(view);
-
+    for (const sdat of sdats) {
         if (sdat != null) {
-            g_loadedSdat = sdat;
-
             for (const [key, value] of sdat.sseqIdNameDict) {
                     let button = document.createElement('button');
                 button.innerText = `${value} (ID: ${key})`;
                     button.style.textAlign = 'left';
                 document.querySelector(".song-picker")?.appendChild(button);
                     button.onclick = () => {
-                        setTimeout(() => {
-                            console.log(value);
-                            if (g_loadedSdat != null)
-                                playSeq(g_loadedSdat, value);
-                        });
+                            playSeq(sdat, value);
                     };
             }
 
             console.log("Searching for STRMs");
             for (const [key, value] of sdat.fat) {
                 if (read32LE(value, 0) === 0x4D525453) {
-                    console.log(`file id:${i} is     STRM`);
+                    console.log(`file id:${key} is     STRM`);
 
                     // playStrm(sdat.fat[key);
                 }

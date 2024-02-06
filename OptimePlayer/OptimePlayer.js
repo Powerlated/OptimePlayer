@@ -10,8 +10,6 @@ let g_pureTuningTonic = 0;
 let g_instrumentsAdvanced = 0;
 let g_samplesConsidered = 0;
 
-/** @type {Sdat | null} */
-let g_loadedSdat = null;
 /** @type {Controller | null} */
 let g_currentController = null;
 /** @type {FsVisController | null} */
@@ -317,7 +315,7 @@ class AudioPlayer {
  * Creates a DataView that views an ArrayBuffer relative to another DataView.
  * @param {DataView} other
  * @param {number} offset
- * @param {number} length
+ * @param {number} [length]
  * @returns {DataView}
  */
 function createRelativeDataView(other, offset, length) {
@@ -528,10 +526,40 @@ class Sdat {
     }
 
     /**
-     *
      * @param {DataView} view
+     * @returns {Sdat[]}
      */
-    static parseFromRom(view) {
+    static loadAllFromDataView(view) {
+        let sdats = [];
+        console.log(`ROM size: ${view.byteLength} bytes`);
+
+        let sequence = [0x53, 0x44, 0x41, 0x54, 0xFF, 0xFE, 0x00, 0x01]; // "SDAT", then byte order 0xFEFF, then version 0x0100
+        let res = searchDataViewForSequence(view, sequence);
+        if (res.length > 0) {
+            console.log(`Found SDATs at:`);
+            for (let i = 0; i < res.length; i++) {
+                console.log(hex(res[i], 8));
+            }
+        } else {
+            console.log(`Couldn't find SDAT (maybe not an NDS ROM?)`);
+        }
+
+        for (let i = 0; i < res.length; i++) {
+            let sdatView = createRelativeDataView(view, res[i]);
+            let sdat = Sdat.parseFromDataView(sdatView);
+
+            if (sdat != null) {
+                sdats.push(sdat);
+            }
+        }
+
+        return sdats;
+    }
+
+    /**
+     * @param {DataView} view - Takes ownership
+     */
+    static parseFromDataView(view) {
         let sdat = new Sdat();
 
         console.log("SDAT file size: " + view.byteLength);
@@ -565,32 +593,41 @@ class Sdat {
         console.log("FILE Block Offset: " + hexN(fileOffs, 8));
         console.log("FILE Block Size: " + hexN(fileSize, 8));
 
+        let symbView = createRelativeDataView(view, symbOffs, symbSize);
+        let infoView = createRelativeDataView(view, infoOffs, infoSize);
+        let fatView = createRelativeDataView(view, fatOffs, fatSize);
+        let fileView = createRelativeDataView(view, fileOffs, fileSize);
+
         // SYMB processing
         {
             // SSEQ symbols
-            let symbSseqListOffs = read32LE(view, symbOffs + 0x8);
-            if (dataViewOutOfBounds(view, symbOffs + symbSseqListOffs)) {
+            let symbSseqListOffs = read32LE(symbView, 0x8);
+            if (dataViewOutOfBounds(symbView, symbSseqListOffs)) {
                 console.log("SSEQ num entries pointer is out of bounds, rejecting SDAT.")
                 return;
             }
-            let symbSseqListNumEntries = read32LE(view, symbOffs + symbSseqListOffs);
+            let symbSseqListNumEntries = read32LE(symbView, symbSseqListOffs);
 
             console.log("SYMB Bank List Offset: " + hexN(symbSseqListOffs, 8));
             console.log("SYMB Number of SSEQ entries: " + symbSseqListNumEntries);
 
             for (let i = 0; i < symbSseqListNumEntries; i++) {
-                let sseqNameOffs = read32LE(view, symbOffs + symbSseqListOffs + 4 + i * 4);
+                let sseqNameOffs = read32LE(symbView, symbSseqListOffs + 4 + i * 4);
 
                 let sseqNameArr = [];
                 let sseqNameCharOffs = 0;
-                while (true) {
-                    let char = read8(view, symbOffs + sseqNameOffs + sseqNameCharOffs);
-                    if (char === 0) break; // check for null terminator
-                    sseqNameCharOffs++;
-                    sseqNameArr.push(char);
-                }
 
-                // for some reason games have a ton of empty symbols
+                // Read C string from symbol
+                let char;
+                do {
+                    char = read8(symbView, sseqNameOffs + sseqNameCharOffs);
+                    sseqNameCharOffs++;
+                    if (char !== 0) {
+                        sseqNameArr.push(char);
+                    }
+                } while (char !== 0);
+
+                // for some reason games have a ton of empty symbols -- skip them
                 if (sseqNameOffs !== 0) {
                     let seqName = String.fromCharCode(...sseqNameArr);
 
@@ -602,34 +639,37 @@ class Sdat {
 
         {
             // SSAR symbols
-            let symbSsarListOffs = read32LE(view, symbOffs + 0xC);
-            let symbSsarListNumEntries = read32LE(view, symbOffs + symbSsarListOffs);
+            let symbSsarListOffs = read32LE(symbView, 0xC);
+            let symbSsarListNumEntries = read32LE(symbView, symbSsarListOffs);
 
             console.log("SYMB Number of SSAR entries: " + symbSsarListNumEntries);
         }
 
         {
             // BANK symbols
-            let symbBankListOffs = read32LE(view, symbOffs + 0x10);
-            let symbBankListNumEntries = read32LE(view, symbOffs + symbBankListOffs);
+            let symbBankListOffs = read32LE(symbView, 0x10);
+            let symbBankListNumEntries = read32LE(symbView, symbBankListOffs);
 
             console.log("SYMB Bank List Offset: " + hexN(symbBankListOffs, 8));
             console.log("SYMB Number of BANK entries: " + symbBankListNumEntries);
 
             for (let i = 0; i < symbBankListNumEntries; i++) {
-                let symbNameOffs = read32LE(view, symbOffs + symbBankListOffs + 4 + i * 4);
+                let symbNameOffs = read32LE(symbView, symbBankListOffs + 4 + i * 4);
                 if (i === 0) console.log("NDS file addr of BANK list 1st entry: " + hexN(view.byteOffset + symbOffs + symbNameOffs, 8));
 
                 let bankNameArr = [];
                 let bankNameCharOffs = 0;
-                while (true) {
-                    let char = read8(view, symbOffs + symbNameOffs + bankNameCharOffs);
-                    if (char === 0) break; // check for null terminator
+                // Read C string from symbol
+                let char;
+                do {
+                    char = read8(symbView, symbNameOffs + bankNameCharOffs);
                     bankNameCharOffs++;
-                    bankNameArr.push(char);
-                }
+                    if (char !== 0) {
+                        bankNameArr.push(char);
+                    }
+                } while (char !== 0);
 
-                // for some reason games have a ton of empty symbols
+                // for some reason games have a ton of empty symbols -- skip them
                 if (symbNameOffs !== 0) {
                     let bankName = String.fromCharCode(...bankNameArr);
 
@@ -641,8 +681,8 @@ class Sdat {
 
         {
             // SWAR symbols
-            let symbSwarListOffs = read32LE(view, symbOffs + 0x14);
-            let symbSwarListNumEntries = read32LE(view, symbOffs + symbSwarListOffs);
+            let symbSwarListOffs = read32LE(symbView, 0x14);
+            let symbSwarListNumEntries = read32LE(symbView, symbSwarListOffs);
 
             console.log("SYMB Number of SWAR entries: " + symbSwarListNumEntries);
         }
@@ -650,21 +690,21 @@ class Sdat {
         // INFO processing
         {
             // SSEQ info
-            let infoSseqListOffs = read32LE(view, infoOffs + 0x8);
-            let infoSseqListNumEntries = read32LE(view, infoOffs + infoSseqListOffs);
+            let infoSseqListOffs = read32LE(infoView, 0x8);
+            let infoSseqListNumEntries = read32LE(infoView, infoSseqListOffs);
             console.log("INFO Number of SSEQ entries: " + infoSseqListNumEntries);
 
             for (let i = 0; i < infoSseqListNumEntries; i++) {
-                let infoSseqNameOffs = read32LE(view, infoOffs + infoSseqListOffs + 4 + i * 4);
+                let infoSseqNameOffs = read32LE(infoView, infoSseqListOffs + 4 + i * 4);
 
                 if (infoSseqNameOffs !== 0) {
                     let info = new SseqInfo();
-                    info.fileId = read16LE(view, infoOffs + infoSseqNameOffs + 0);
-                    info.bank = read16LE(view, infoOffs + infoSseqNameOffs + 4);
-                    info.volume = read8(view, infoOffs + infoSseqNameOffs + 6);
-                    info.cpr = read8(view, infoOffs + infoSseqNameOffs + 7);
-                    info.ppr = read8(view, infoOffs + infoSseqNameOffs + 8);
-                    info.ply = read8(view, infoOffs + infoSseqNameOffs + 9);
+                    info.fileId = read16LE(infoView, infoSseqNameOffs + 0);
+                    info.bank = read16LE(infoView, infoSseqNameOffs + 4);
+                    info.volume = read8(infoView, infoSseqNameOffs + 6);
+                    info.cpr = read8(infoView, infoSseqNameOffs + 7);
+                    info.ppr = read8(infoView, infoSseqNameOffs + 8);
+                    info.ply = read8(infoView, infoSseqNameOffs + 9);
 
                     sdat.sseqInfos[i] = info;
                     sdat.sseqList.push(i);
@@ -676,16 +716,16 @@ class Sdat {
 
         {
             // SSAR info
-            let infoSsarListOffs = read32LE(view, infoOffs + 0xC);
-            let infoSsarListNumEntries = read32LE(view, infoOffs + infoSsarListOffs);
+            let infoSsarListOffs = read32LE(infoView, 0xC);
+            let infoSsarListNumEntries = read32LE(infoView, infoSsarListOffs);
             console.log("INFO Number of SSAR entries: " + infoSsarListNumEntries);
 
             for (let i = 0; i < infoSsarListNumEntries; i++) {
-                let infoSsarNameOffs = read32LE(view, infoOffs + infoSsarListOffs + 4 + i * 4);
+                let infoSsarNameOffs = read32LE(infoView, infoSsarListOffs + 4 + i * 4);
 
                 if (infoSsarNameOffs !== 0) {
                     let info = new SsarInfo();
-                    info.fileId = read16LE(view, infoOffs + infoSsarNameOffs + 0);
+                    info.fileId = read16LE(infoView, infoSsarNameOffs + 0);
 
                     sdat.ssarInfos[i] = info;
                 } else {
@@ -696,20 +736,20 @@ class Sdat {
 
         {
             // BANK info
-            let infoBankListOffs = read32LE(view, infoOffs + 0x10);
-            let infoBankListNumEntries = read32LE(view, infoOffs + infoBankListOffs);
+            let infoBankListOffs = read32LE(infoView, 0x10);
+            let infoBankListNumEntries = read32LE(infoView, infoBankListOffs);
             console.log("INFO Number of BANK entries: " + infoBankListNumEntries);
 
             for (let i = 0; i < infoBankListNumEntries; i++) {
-                let infoBankNameOffs = read32LE(view, infoOffs + infoBankListOffs + 4 + i * 4);
+                let infoBankNameOffs = read32LE(infoView, infoBankListOffs + 4 + i * 4);
 
                 if (infoBankNameOffs !== 0) {
                     let info = new BankInfo();
-                    info.fileId = read16LE(view, infoOffs + infoBankNameOffs + 0x0);
-                    info.swarId[0] = read16LE(view, infoOffs + infoBankNameOffs + 0x4);
-                    info.swarId[1] = read16LE(view, infoOffs + infoBankNameOffs + 0x6);
-                    info.swarId[2] = read16LE(view, infoOffs + infoBankNameOffs + 0x8);
-                    info.swarId[3] = read16LE(view, infoOffs + infoBankNameOffs + 0xA);
+                    info.fileId = read16LE(infoView, infoBankNameOffs + 0x0);
+                    info.swarId[0] = read16LE(infoView, infoBankNameOffs + 0x4);
+                    info.swarId[1] = read16LE(infoView, infoBankNameOffs + 0x6);
+                    info.swarId[2] = read16LE(infoView, infoBankNameOffs + 0x8);
+                    info.swarId[3] = read16LE(infoView, infoBankNameOffs + 0xA);
 
                     sdat.sbnkInfos[i] = info;
                 } else {
@@ -720,16 +760,16 @@ class Sdat {
 
         {
             // SWAR info
-            let infoSwarListOffs = read32LE(view, infoOffs + 0x14);
-            let infoSwarListNumEntries = read32LE(view, infoOffs + infoSwarListOffs);
+            let infoSwarListOffs = read32LE(infoView, 0x14);
+            let infoSwarListNumEntries = read32LE(infoView, infoSwarListOffs);
             console.log("INFO Number of SWAR entries: " + infoSwarListNumEntries);
 
             for (let i = 0; i < infoSwarListNumEntries; i++) {
-                let infoSwarNameOffs = read32LE(view, infoOffs + infoSwarListOffs + 4 + i * 4);
+                let infoSwarNameOffs = read32LE(infoView, infoSwarListOffs + 4 + i * 4);
 
                 if (infoSwarNameOffs) {
                     let info = new SwarInfo();
-                    info.fileId = read16LE(view, infoOffs + infoSwarNameOffs + 0x0);
+                    info.fileId = read16LE(infoView, infoSwarNameOffs + 0x0);
 
                     sdat.swarInfos[i] = info;
                 } else {
@@ -739,14 +779,14 @@ class Sdat {
         }
 
         // FAT / FILE processing
-        let fatNumFiles = read32LE(view, fatOffs + 8);
+        let fatNumFiles = read32LE(fatView,8);
         console.log("FAT Number of files: " + fatNumFiles);
 
         for (let i = 0; i < fatNumFiles; i++) {
-            let fileEntryOffs = fatOffs + 0xC + i * 0x10;
+            let fileEntryOffs = 0xC + i * 0x10;
 
-            let fileDataOffs = read32LE(view, fileEntryOffs);
-            let fileSize = read32LE(view, fileEntryOffs + 4);
+            let fileDataOffs = read32LE(fatView, fileEntryOffs);
+            let fileSize = read32LE(fatView, fileEntryOffs + 4);
 
             sdat.fat.set(i, createRelativeDataView(view, fileDataOffs, fileSize));
         }
@@ -2405,6 +2445,7 @@ async function playSeq(sdat, name) {
         for (let i = 0; i < BUFFER_SIZE; i++) {
             // nintendo DS clock speed
             timer += 33513982;
+            // tick the sequence controller every (64 * 2728) cycles
             while (timer >= 64 * 2728 * SAMPLE_RATE) {
                 timer -= 64 * 2728 * SAMPLE_RATE;
 
@@ -2757,16 +2798,16 @@ function midiNoteToHz(note) {
 }
 
 /**
- * @param {any[] | Uint8Array} data
+ * @param {DataView} view
  * @param {string | any[]} sequence
  */
-function searchForSequences(data, sequence) {
+function searchDataViewForSequence(view, sequence) {
     let seqs = [];
 
-    for (let i = 0; i < data.length; i++) {
-        if (data[i] === sequence[0]) {
+    for (let i = 0; i < view.byteLength; i++) {
+        if (view.getUint8(i) === sequence[0]) {
             for (let j = 1; j < sequence.length; j++) {
-                if (data[i + j] !== sequence[j]) {
+                if (view.getUint8(i + j) !== sequence[j]) {
                     break;
                 }
 

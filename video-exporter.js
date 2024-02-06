@@ -13,39 +13,13 @@ const canvas = createCanvas(WIDTH, HEIGHT);
 const ctx = canvas.getContext("2d");
 
 const toLoad = [
-    './OptimePlayer.js'
+    './OptimePlayer/OptimePlayer.js'
 ];
 
 for (let i = 0; i < toLoad.length; i++) {
     let data = fs.readFileSync(toLoad[i]);
     const script = new vm.Script(data.toString());
     script.runInThisContext();
-}
-
-/** @param {Uint8Array} data */
-function loadSdatsFromRom(data) {
-    let sdats = [];
-    console.log(`ROM size: ${data.length} bytes`);
-
-    let sequence = [0x53, 0x44, 0x41, 0x54, 0xFF, 0xFE, 0x00, 0x01]; // "SDAT", then byte order 0xFEFF, then version 0x0100
-    let res = searchForSequences(data, sequence);
-    if (res.length > 0) {
-        console.log(`Found SDATs at:`);
-        for (let i = 0; i < res.length; i++) {
-            console.log(hex(res[i], 8));
-        }
-    } else {
-        console.log(`Couldn't find SDAT (maybe not an NDS ROM?)`);
-    }
-
-    for (let i = 0; i < res.length; i++) {
-        let sdat = Sdat.parseFromRom(data, res[i]);
-
-        if (sdat != null) {
-            sdats.push(sdat);
-        }
-    }
-    return sdats;
 }
 
 async function renderVideoSeq(sdat, id, outFile) {
@@ -105,7 +79,7 @@ async function renderVideoSeq(sdat, id, outFile) {
             controller.jumps = 0;
             loop++;
 
-            if (loop == 2) {
+            if (loop === 2) {
                 fadeoutLength = 5;
                 controller.fadingStart = true;
             }
@@ -151,7 +125,7 @@ async function renderVideoSeq(sdat, id, outFile) {
                 }));
             }
 
-            if (++frames % FPS == 0) {
+            if (++frames % FPS === 0) {
                 console.log(frames / FPS);
             }
 
@@ -206,23 +180,23 @@ if (process.argv.length < 4) {
 const dsRomPath = process.argv[2];
 const sseqName = process.argv[3];
 let outFile = process.argv[4];
-if (outFile == undefined) {
+if (outFile === undefined) {
     outFile = sseqName;
 }
-let sdats = loadSdatsFromRom(fs.readFileSync(dsRomPath));
+let sdats = Sdat.loadAllFromDataView(new DataView(fs.readFileSync(dsRomPath).buffer));
 // console.log(sdats)
 let sseqId = null;
-let sdat = null;
-for (let i in sdats) {
-    if (sdats[i].sseqNameIdDict[sseqName]) {
-        sdat = sdats[i];
-        sseqId = sdats[i].sseqNameIdDict[sseqName];
+let sdatWithSeq = null;
+for (let sdat of sdats) {
+    if (sdat.sseqNameIdDict.has(sseqName)) {
+        sdatWithSeq = sdat;
+        sseqId = sdat.sseqNameIdDict.get(sseqName);
     }
 }
 
 
 if (sseqId) {
-    renderVideoSeq(sdat, sseqId, outFile);
+    renderVideoSeq(sdatWithSeq, sseqId, outFile);
 } else {
     console.log(`SSEQ "${sseqName}" not found in DS ROM`);
 }
