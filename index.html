@@ -65,6 +65,8 @@
             columns: 1;
 
             display: none;
+            position: sticky; /* TODO: make this proper later */
+            top: 0;
         }
 
         #fullscreen-vis-canvas {
@@ -142,9 +144,9 @@
 
     <div>
         <div id="file-picker-container">
-            <h3>Drag and drop a Nintendo DS ROM</h3>
+            <h3>Drag and drop a Nintendo DS ROM or an SDAT File</h3>
             <p>or</p>
-            <input type="file" id="file-picker" accept=".nds">
+            <input type="file" id="file-picker" accept=".nds, .sdat">
         </div>
         <div id="demos">
             <h3>Demos</h3>

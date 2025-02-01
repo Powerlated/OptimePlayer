@@ -49,17 +49,46 @@ async function loadNdsRom(data) {
     console.log(`ROM size: ${data.length} bytes`);
 
     let sdats = Sdat.loadAllFromDataView(new DataView(data.buffer));
+    console.log('SDATS', sdats);
 
-    for (const sdat of sdats) {
+    for (let i = 0; i < sdats.length; i++) {
+        const sdat = sdats[i];
+
         if (sdat != null) {
-            for (const [key, value] of sdat.sseqIdNameDict) {
-                    let button = document.createElement('button');
-                button.innerText = `${value} (ID: ${key})`;
+            if (sdats.length > 1)
+                songPicker.insertAdjacentHTML("beforeend", '<h2>SDAT ' + i + ':</h2>');
+
+            // Sequences
+            songPicker.insertAdjacentHTML("beforeend", '<h3>Sequences:</h3>');
+            for (const i of sdat.sseqList) {
+                let name = sdat.sseqIdNameDict.get(i);
+                let button = document.createElement('button');
+                    button.innerText = name ? `${name} (ID: ${i})` : `SSEQ_${i}`;
                     button.style.textAlign = 'left';
-                document.querySelector(".song-picker")?.appendChild(button);
                     button.onclick = () => {
-                            playSeq(sdat, value);
+                        playSeq(sdat, i);
                     };
+                songPicker.appendChild(button);
+            }
+
+            // Sequence Archives
+            for (const i of sdat.ssarList) {
+                let ssarName = sdat.ssarIdNameDict.get(i);
+                songPicker.insertAdjacentHTML("beforeend", ssarName ? '<h3>Sequence Archive ' + i + ' (' + ssarName + '):</h3>' : '<h3>Sequence Archive ' + i + ':</h3>');
+                let ssarSeqCount = sdat.getNumOfEntriesInSeqArc(i);
+
+                for (var ii = 0; ii < ssarSeqCount; ii++) {
+                    let sseqName = sdat.ssarSseqSymbols[i] ? sdat.ssarSseqSymbols[i].ssarSseqIdNameDict.get(ii) : null;
+                    let button = document.createElement('button');
+                        button.innerText = sseqName ? `${sseqName} (ID: ${ii})` : `SSEQ_${ii}`;;
+                        button.style.textAlign = 'left';
+                        let ssarId = i;
+                        let seqId = ii;
+                        button.onclick = () => {
+                            playSsarSeq(sdat, ssarId, seqId);
+                        };
+                    songPicker.appendChild(button);
+                }
             }
 
             console.log("Searching for STRMs");
@@ -139,13 +168,11 @@ window.onload = async () => {
     let progressModal = document.getElementById("progress-modal");
     let progressBar = document.getElementById("progress-bar");
     let progressInfo = document.getElementById("progress-info");
-    const FADEOUT_LENGTH = 10; // in seconds 
+    const FADEOUT_LENGTH = 2; // in seconds 
     const LOOP_COUNT = 2;
     const SAMPLE_RATE = 32768;
 
-    function getSseqLength(sdat, name) {
-        let id = sdat.sseqNameIdDict.get(name);
-        let controller = new Controller(SAMPLE_RATE, sdat, id);
+    function getSseqLengthFromController(controller) {
         let loop = 0;
         let playing = true;
 
@@ -180,18 +207,43 @@ window.onload = async () => {
      * @param {Sdat} sdat
      * @param {string} name
      */
-    async function renderAndDownloadSeq(sdat, name) {
+    async function renderAndDownloadSeq(sdat, id, subId, isSsar) {
         progressModal.style.display = "block";
 
         await g_currentPlayer?.ctx.close();
         g_currentController = null;
 
-        let id = sdat.sseqNameIdDict.get(name);
+        let controller = new Controller(SAMPLE_RATE);
+        let name;
+        let lengthS;
+        if (isSsar) {
+            controller.loadSsarSeq(sdat, id, subId);
 
-        let controller = new Controller(SAMPLE_RATE, sdat, id);
+            let name;
+            if (sdat.ssarSseqSymbols[id] && sdat.ssarSseqSymbols[id].ssarSseqIdNameDict.get(subId))
+                name = sdat.ssarSseqSymbols[id].ssarSseqIdNameDict.get(subId);
+            else
+                name = null;
 
-        console.log("Rendering SSEQ Id:" + id);
-        // console.log("FAT ID:" + info.fileId);
+            let tmpController = new Controller(SAMPLE_RATE);
+            tmpController.loadSsarSeq(sdat, id, subId);
+            lengthS = getSseqLengthFromController(tmpController);
+        } 
+        else {
+            controller.loadSseq(sdat, id);
+
+            let name;
+            if (sdat.sseqIdNameDict.get(id))
+                name = sdat.sseqIdNameDict.get(id);
+            else
+                name = null;
+
+            let tmpController = new Controller(SAMPLE_RATE);
+            tmpController.loadSseq(sdat, id);
+            lengthS = getSseqLengthFromController(tmpController);
+        }
+
+        console.log('Downloading sequence, name:', name);
 
         let encoder = new WavEncoder(SAMPLE_RATE, 16);
 
@@ -210,7 +262,6 @@ window.onload = async () => {
 
         // keep it under 480 seconds
 
-        const lengthS = getSseqLength(sdat, name);
         console.log(lengthS);
         const CHUNK_SIZE = Math.floor(SAMPLE_RATE);
 
@@ -253,9 +304,9 @@ window.onload = async () => {
                     if (fadeoutSample >= 0) {
                         let fadeoutTime = fadeoutSample / SAMPLE_RATE;
 
-                        let ratio = fadeoutTime / FADEOUT_LENGTH;
+                        let ratio = (fadeoutTime) / FADEOUT_LENGTH;
 
-                        fadeoutVolMul = 1 - ratio;
+                        fadeoutVolMul = (1 - ratio);
 
                         if (fadeoutVolMul <= 0) {
                             playing = false;
@@ -590,16 +641,22 @@ window.onload = async () => {
                 switch (key) {
                     case "ArrowLeft":
                     case "ArrowRight":
-                        let currentSseqListIndex = g_currentlyPlayingSdat.sseqList.indexOf(g_currentlyPlayingId);
-                        let nextSseqListIndex;
+                        let nextListIndex = g_currentlyPlayingIsSsar ? g_currentlyPlayingSubId : g_currentlyPlayingId;
+                        let listMaxIndex = g_currentlyPlayingIsSsar ? g_currentlyPlayingSdat.getNumOfEntriesInSeqArc(g_currentlyPlayingId) - 1 : g_currentlyPlayingSdat.sseqList.length - 1;
                         if (key === "ArrowLeft") {
-                            nextSseqListIndex = g_currentlyPlayingSdat.sseqList[currentSseqListIndex - 1];
+                            if (nextListIndex === 0)
+                                break;
+                            nextListIndex--;
                         } else if (key === "ArrowRight") {
-                            nextSseqListIndex = g_currentlyPlayingSdat.sseqList[currentSseqListIndex + 1];
+                            if (nextListIndex === listMaxIndex)
+                                break;
+                            nextListIndex++;
                         }
-                        if (nextSseqListIndex) {
-                            playSeqById(g_currentlyPlayingSdat, nextSseqListIndex);
-                        }
+
+                        if (g_currentlyPlayingIsSsar)
+                            playSsarSeq(g_currentlyPlayingSdat, g_currentlyPlayingId, nextListIndex);
+                        else
+                            playSeq(g_currentlyPlayingSdat, nextListIndex);
                         break;
                     default:
                         break;
@@ -706,7 +763,10 @@ window.onload = async () => {
         let restartSequenceButton = document.querySelector("#restart-sequence-button");
         restartSequenceButton.onclick = () => {
             pauseButton.innerText = "Pause Sequence Player";
-            playSeq(g_currentlyPlayingSdat, g_currentlyPlayingName);
+            if (g_currentlyPlayingIsSsar)
+                playSsarSeq(g_currentlyPlayingSdat, g_currentlyPlayingId, g_currentlyPlayingSubId);
+            else
+                playSeq(g_currentlyPlayingSdat, g_currentlyPlayingId);
         };
     });
 
@@ -747,7 +807,7 @@ window.onload = async () => {
     requestAnimationFrame(fsVisFrame);
 
     (/** @type {HTMLButtonElement} */ (document.querySelector("#download-playing-button"))).onclick = e => {
-        renderAndDownloadSeq(g_currentlyPlayingSdat, g_currentlyPlayingName);
+        renderAndDownloadSeq(g_currentlyPlayingSdat, g_currentlyPlayingId, g_currentlyPlayingSubId, g_currentlyPlayingIsSsar);
     };
 
     registerCheckbox("#stereo-separation", true, checked => {
