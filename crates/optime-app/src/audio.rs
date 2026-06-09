@@ -23,7 +23,8 @@ impl AudioEngine {
         let supported = device.default_output_config().ok()?;
         let sample_rate = supported.sample_rate().0 as f64;
         let channels = supported.channels() as usize;
-        let config: cpal::StreamConfig = supported.clone().into();
+        let mut config: cpal::StreamConfig = supported.clone().into();
+        config.buffer_size = cpal::BufferSize::Fixed(2048);
 
         let shared = new_shared();
         let cb_shared = shared.clone();

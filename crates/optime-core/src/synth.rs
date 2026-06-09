@@ -342,9 +342,7 @@ impl SampleSynthesizer {
         }
 
         if config.bass_mono {
-            // Split into a centered low band and a widened high band via a complementary
-            // crossover (high = full - low). The bass stays glued to the center; only the highs
-            // are panned and Haas-delayed.
+            // Split into a centered low band and a widened high band via crossover.
             self.ensure_crossover(config.bass_mono_freq);
             let lo = self.crossover_lp.transform(mono);
             let hi = self.crossover_hp.transform(mono);
