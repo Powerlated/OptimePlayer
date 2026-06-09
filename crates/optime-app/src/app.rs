@@ -105,7 +105,7 @@ impl OptimeApp {
             tuning_choice: 0,
             pure_tonic: 0,
             track_enables: [true; TRACK_COUNT],
-            resample_choice: 0,
+            resample_choice: 2,
             sinc_taps: 32,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
