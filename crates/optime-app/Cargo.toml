@@ -1,0 +1,42 @@
+[package]
+name = "optime-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "egui front-end (desktop + web) for the Optime Player DS sound engine."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+optime-core = { path = "../optime-core" }
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.29"
+cpal = "0.15"
+log = "0.4"
+rfd = "0.15"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+cpal = { version = "0.15", features = ["wasm-bindgen"] }
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "BlobPropertyBag",
+    "Document",
+    "Element",
+    "HtmlAnchorElement",
+    "HtmlCanvasElement",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Url",
+    "Window",
+] }
