@@ -26,6 +26,8 @@ const DEMOS: &[(&str, &str)] = &[
 /// The application state.
 pub struct OptimeApp {
     audio: Option<AudioEngine>,
+    /// Set once audio init has been attempted and failed, so we stop retrying.
+    audio_failed: bool,
     sample_rate: f64,
 
     sdats: Vec<Sdat>,
@@ -49,16 +51,18 @@ pub struct OptimeApp {
 }
 
 impl OptimeApp {
-    /// Builds the app, starting audio. Loads the first demo if available.
+    /// Builds the app and loads the first demo. Native starts audio immediately; web defers it
+    /// until the first user gesture (browser autoplay policy — see [`Self::ensure_audio`]).
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let audio = AudioEngine::new();
-        if audio.is_none() {
-            log::error!("no audio output device available; playback disabled");
-        }
+        #[cfg(target_arch = "wasm32")]
+        let audio: Option<AudioEngine> = None;
         let sample_rate = audio.as_ref().map(|a| a.sample_rate).unwrap_or(48_000.0);
 
         let mut app = Self {
             audio,
+            audio_failed: false,
             sample_rate,
             sdats: Vec::new(),
             songs: Vec::new(),
@@ -79,6 +83,42 @@ impl OptimeApp {
 
     fn try_load_first_demo(&mut self) {
         self.request_demo(DEMOS[0].1, DEMOS[0].0);
+    }
+
+    /// Lazily starts the audio engine. On the web the `AudioContext` may only begin after a user
+    /// gesture, so creation is deferred until the first interaction; once started, any
+    /// already-selected song is (re)loaded into the new engine.
+    fn ensure_audio(&mut self, ctx: &egui::Context) {
+        if self.audio.is_some() || self.audio_failed {
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let interacted = ctx.input(|i| {
+                i.pointer.any_pressed()
+                    || i.events
+                        .iter()
+                        .any(|e| matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)))
+            });
+            if !interacted {
+                return;
+            }
+        }
+        match AudioEngine::new() {
+            Some(audio) => {
+                self.sample_rate = audio.sample_rate;
+                self.audio = Some(audio);
+                if let Some(i) = self.current_song {
+                    self.play_song(i);
+                }
+            }
+            None => {
+                self.audio_failed = true;
+                self.status = "No audio output device available; playback disabled.".to_owned();
+                log::error!("no audio output device available");
+            }
+        }
+        let _ = ctx;
     }
 
     /// Loads a demo SDAT. Native reads from `demos/`; web fetches it (copied into the deploy by
@@ -279,6 +319,7 @@ impl OptimeApp {
 
 impl eframe::App for OptimeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ensure_audio(ctx);
         self.poll_pending_file();
 
         // Arrow-key song navigation (sequence switching).
