@@ -29,6 +29,8 @@ pub struct SynthConfig {
     pub tuning: TuningSystem,
     /// Which of the 16 tracks are mixed into the output.
     pub track_enables: [bool; TRACK_COUNT],
+    /// Sample interpolation / anti-aliasing mode.
+    pub resample: ResampleMode,
 }
 
 impl Default for SynthConfig {
@@ -40,6 +42,7 @@ impl Default for SynthConfig {
             bass_mono_freq: 200.0,
             tuning: TuningSystem::Equal,
             track_enables: [true; TRACK_COUNT],
+            resample: ResampleMode::NearestNeighbor,
         }
     }
 }
@@ -168,7 +171,7 @@ impl Controller {
             .iter()
             .map(|wave| {
                 let mut s = Sample::new(wave.to_vec(), 1.0, 8.0, true, 0);
-                s.resample_mode = ResampleMode::NearestNeighbor;
+                s.is_psg_square = true;
                 Arc::new(s)
             })
             .collect();

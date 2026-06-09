@@ -3,13 +3,27 @@
 use crate::tables::{ADPCM_INDEX_TABLE, ADPCM_STEP_TABLE};
 use crate::util::{read_u16, read_u32, read_u8};
 
-/// How a sample is interpolated when resampled.
+/// How a sample is interpolated during pitch-shifting / resampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResampleMode {
-    /// No interpolation; pick the nearest source sample.
+    /// No interpolation; pick the nearest source sample (the DS hardware's own behaviour).
     NearestNeighbor,
-    /// Cubic interpolation (the engine's default for PCM/ADPCM instruments).
-    Cubic,
+    /// Linear interpolation between adjacent source samples.
+    Linear,
+    /// Windowed-sinc low-pass at the **source** Nyquist rate: always removes ZOH imaging
+    /// artifacts when upsampling and aliasing when downsampling.  Clean but smooth.
+    SincSampleNyquist {
+        /// Half-width of the Blackman-windowed sinc kernel in zero-crossings (≥ 1).
+        half_taps: usize,
+    },
+    /// Windowed-sinc (BLEP-style) low-pass at the **output** Nyquist rate: preserves the
+    /// characteristic crunchy ZOH colouring below output Nyquist while removing aliasing above
+    /// it.  On upsampled voices it band-limits the ZOH stairstep edges to the output rate
+    /// (instead of point-sampling hard edges), suppressing nearest-neighbour jitter/aliasing.
+    SincOutputNyquist {
+        /// Half-width of the Blackman-windowed sinc kernel in zero-crossings (≥ 1).
+        half_taps: usize,
+    },
 }
 
 /// A decoded waveform plus the metadata needed to play it back at the correct pitch.
@@ -26,8 +40,8 @@ pub struct Sample {
     /// Sample index to loop back to. Signed because the ADPCM loop-point formula can yield a
     /// small negative value that the original engine relies on.
     pub loop_point: i64,
-    /// Preferred interpolation mode.
-    pub resample_mode: ResampleMode,
+    /// Set for the eight PSG square-wave waveforms so the resampler can special-case them.
+    pub is_psg_square: bool,
     /// Original SWAR sample length in samples (informational).
     pub sample_length: usize,
 }
@@ -47,7 +61,7 @@ impl Sample {
             sample_rate,
             looping,
             loop_point,
-            resample_mode: ResampleMode::Cubic,
+            is_psg_square: false,
             sample_length: 0,
         }
     }

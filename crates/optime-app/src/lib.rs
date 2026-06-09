@@ -3,6 +3,7 @@
 
 mod app;
 mod audio;
+mod filter_plot;
 mod player;
 mod visualizer;
 mod wav;

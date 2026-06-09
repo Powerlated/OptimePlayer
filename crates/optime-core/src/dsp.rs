@@ -147,6 +147,75 @@ impl BiquadFilter {
         f.set_peaking_eq(sample_rate, centre, q, db_gain);
         f
     }
+
+    // ─── Analysis ────────────────────────────────────────────────────────────────────────────
+
+    /// Evaluates the frequency response of the full cascade at digital frequency
+    /// `w_norm ∈ [0, π]` (0 = DC, π = Nyquist).
+    ///
+    /// Returns `(magnitude, phase_radians)`.  The cascade raises the single-section response
+    /// to the power `num_cascade`.
+    pub fn frequency_response(&self, w_norm: f64) -> (f64, f64) {
+        let cos_w = w_norm.cos();
+        let sin_w = w_norm.sin();
+        let cos_2w = (2.0 * w_norm).cos();
+        let sin_2w = (2.0 * w_norm).sin();
+
+        // One biquad section: H(z) = (a0 + a1·z⁻¹ + a2·z⁻²) / (1 + a3·z⁻¹ + a4·z⁻²).
+        // Evaluate numerator and denominator at z = e^{jw}.
+        let n_re = self.a0 + self.a1 * cos_w + self.a2 * cos_2w;
+        let n_im = -(self.a1 * sin_w + self.a2 * sin_2w);
+        let d_re = 1.0 + self.a3 * cos_w + self.a4 * cos_2w;
+        let d_im = -(self.a3 * sin_w + self.a4 * sin_2w);
+
+        let d_sq = d_re * d_re + d_im * d_im;
+        if d_sq < 1e-30 {
+            return (f64::INFINITY, 0.0);
+        }
+
+        // H_section = N / D (complex division).
+        let h_re = (n_re * d_re + n_im * d_im) / d_sq;
+        let h_im = (n_im * d_re - n_re * d_im) / d_sq;
+
+        let h_mag = (h_re * h_re + h_im * h_im).sqrt();
+        let h_phase = h_im.atan2(h_re);
+
+        // Cascade: |H^n| = |H|^n, arg(H^n) = n·arg(H).
+        let nc = self.num_cascade() as f64;
+        (h_mag.powf(nc), h_phase * nc)
+    }
+
+    /// Returns the two poles of one biquad section as `(re, im)` pairs.
+    ///
+    /// For a cascaded filter each pole has multiplicity `num_cascade`.  Roots of
+    /// `z² + a3·z + a4 = 0`.
+    pub fn poles(&self) -> [(f64, f64); 2] {
+        quadratic_roots(1.0, self.a3, self.a4)
+    }
+
+    /// Returns the two zeros of one biquad section as `(re, im)` pairs.
+    ///
+    /// Roots of `a0·z² + a1·z + a2 = 0`.
+    pub fn zeros(&self) -> [(f64, f64); 2] {
+        if self.a0.abs() < 1e-15 {
+            return [(0.0, 0.0); 2];
+        }
+        quadratic_roots(self.a0, self.a1, self.a2)
+    }
+}
+
+/// Computes the two roots of `a·z² + b·z + c = 0` as `(re, im)` pairs.
+fn quadratic_roots(a: f64, b: f64, c: f64) -> [(f64, f64); 2] {
+    let p = b / a;
+    let q = c / a;
+    let disc = p * p - 4.0 * q;
+    if disc >= 0.0 {
+        let sq = disc.sqrt();
+        [((-p + sq) / 2.0, 0.0), ((-p - sq) / 2.0, 0.0)]
+    } else {
+        let sq = (-disc).sqrt();
+        [(-p / 2.0, sq / 2.0), (-p / 2.0, -sq / 2.0)]
+    }
 }
 
 #[cfg(test)]
@@ -197,5 +266,29 @@ mod tests {
         // First sample after reset matches a fresh filter's first sample.
         let mut fresh = BiquadFilter::low_pass(2, 48000.0, 1000.0, 0.707);
         assert_eq!(f.transform(1.0), fresh.transform(1.0));
+    }
+
+    #[test]
+    fn low_pass_dc_frequency_response_is_unity() {
+        let f = BiquadFilter::low_pass(4, 48000.0, 1000.0, 0.707);
+        let (mag, _) = f.frequency_response(0.0);
+        assert!((mag - 1.0).abs() < 1e-6, "DC magnitude = {mag}");
+    }
+
+    #[test]
+    fn low_pass_poles_inside_unit_circle() {
+        let f = BiquadFilter::low_pass(4, 48000.0, 1000.0, 0.707);
+        for (re, im) in f.poles() {
+            let r = (re * re + im * im).sqrt();
+            assert!(r < 1.0, "pole |z| = {r} is outside the unit circle");
+        }
+    }
+
+    #[test]
+    fn high_pass_nyquist_response_is_unity() {
+        // A high-pass well below Nyquist should pass Nyquist unchanged.
+        let f = BiquadFilter::high_pass(2, 48000.0, 100.0, 0.707);
+        let (mag, _) = f.frequency_response(std::f64::consts::PI);
+        assert!((mag - 1.0).abs() < 1e-4, "Nyquist magnitude = {mag}");
     }
 }

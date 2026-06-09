@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use optime_core::{Controller, Sdat, SynthConfig, TuningSystem};
+use optime_core::{Controller, ResampleMode, Sdat, SynthConfig, TuningSystem};
 
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
@@ -20,6 +20,7 @@ const DEMOS: &[(&str, &str)] = &[
     ("New Super Mario Bros.", "new-super-mario-bros"),
     ("Pokémon Platinum", "pokemon-platinum"),
     ("Pokémon HeartGold", "pokemon-heartgold"),
+    ("Pokémon Black 2", "pokemon-black-2"),
     ("Ace Attorney", "ace-attorney"),
 ];
 
@@ -43,6 +44,11 @@ pub struct OptimeApp {
     pure_tonic: i32,
     track_enables: [bool; TRACK_COUNT],
 
+    /// Resampling mode index: 0=Nearest, 1=Linear, 2=SincOutputNyquist, 3=SincSampleNyquist.
+    resample_choice: usize,
+    /// Half-taps for the sinc kernel (zero-crossings).
+    sinc_half_taps: usize,
+
     paused: bool,
     status: String,
 
@@ -50,6 +56,11 @@ pub struct OptimeApp {
     pending_file: Arc<Mutex<Option<Vec<u8>>>>,
     /// Keys currently held, to debounce auto-repeat for note input.
     held_notes: [bool; 128],
+
+    /// Whether the crossover-filter analysis popup is open.
+    crossover_plot_open: bool,
+    /// Whether the sinc-resampler analysis popup is open.
+    sinc_plot_open: bool,
 }
 
 impl OptimeApp {
@@ -76,10 +87,14 @@ impl OptimeApp {
             tuning_choice: 0,
             pure_tonic: 0,
             track_enables: [true; TRACK_COUNT],
+            resample_choice: 0,
+            sinc_half_taps: 16,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
             pending_file: Arc::new(Mutex::new(None)),
             held_notes: [false; 128],
+            crossover_plot_open: false,
+            sinc_plot_open: false,
         };
         app.try_load_first_demo();
         app
@@ -159,6 +174,16 @@ impl OptimeApp {
                 tonic: self.pure_tonic,
             }
         };
+        let resample = match self.resample_choice {
+            1 => ResampleMode::Linear,
+            2 => ResampleMode::SincOutputNyquist {
+                half_taps: self.sinc_half_taps,
+            },
+            3 => ResampleMode::SincSampleNyquist {
+                half_taps: self.sinc_half_taps,
+            },
+            _ => ResampleMode::NearestNeighbor,
+        };
         SynthConfig {
             stereo_separation: self.stereo_separation,
             force_stereo_separation: self.force_stereo_separation,
@@ -166,6 +191,7 @@ impl OptimeApp {
             bass_mono_freq: self.bass_mono_freq as f64,
             tuning,
             track_enables: self.track_enables,
+            resample,
         }
     }
 
@@ -422,16 +448,73 @@ impl eframe::App for OptimeApp {
                 ui.add_enabled_ui(self.stereo_separation, |ui| {
                     ui.checkbox(&mut self.force_stereo_separation, "Force stereo separation");
                     ui.checkbox(&mut self.bass_mono, "Keep bass centered");
-                    ui.add_enabled(
-                        self.bass_mono,
-                        egui::Slider::new(&mut self.bass_mono_freq, 40.0..=800.0)
-                            .text("Bass crossover")
-                            .suffix(" Hz")
-                            .logarithmic(true),
+                    ui.horizontal(|ui| {
+                        ui.add_enabled(
+                            self.bass_mono,
+                            egui::Slider::new(&mut self.bass_mono_freq, 40.0..=800.0)
+                                .text("Bass crossover")
+                                .suffix(" Hz")
+                                .logarithmic(true),
+                        )
+                        .on_hover_text(
+                            "Frequencies below this stay glued to the center; \
+                             mids and treble are widened.",
+                        );
+                        if ui
+                            .add_enabled(self.bass_mono, egui::Button::new("📈"))
+                            .on_hover_text("Analyze crossover filter")
+                            .clicked()
+                        {
+                            self.crossover_plot_open = true;
+                        }
+                    });
+                });
+                ui.separator();
+                ui.label("Resampling");
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("resample")
+                        .selected_text(match self.resample_choice {
+                            1 => "Linear",
+                            2 => "Sinc – output Nyquist (crunch)",
+                            3 => "Sinc – sample Nyquist (clean)",
+                            _ => "Nearest (DS hardware)",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.resample_choice,
+                                0,
+                                "Nearest (DS hardware)",
+                            );
+                            ui.selectable_value(&mut self.resample_choice, 1, "Linear");
+                            ui.selectable_value(
+                                &mut self.resample_choice,
+                                2,
+                                "Sinc – output Nyquist (crunch)",
+                            );
+                            ui.selectable_value(
+                                &mut self.resample_choice,
+                                3,
+                                "Sinc – sample Nyquist (clean)",
+                            );
+                        });
+                    if ui
+                        .add_enabled(self.resample_choice >= 2, egui::Button::new("📈"))
+                        .on_hover_text("Analyze sinc kernel")
+                        .clicked()
+                    {
+                        self.sinc_plot_open = true;
+                    }
+                });
+                let is_sinc = self.resample_choice >= 2;
+                ui.add_enabled_ui(is_sinc, |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut self.sinc_half_taps, 2..=64)
+                            .text("Sinc taps (zero-crossings)")
+                            .logarithmic(false),
                     )
                     .on_hover_text(
-                        "Frequencies below this stay glued to the center; \
-                         mids and treble are widened.",
+                        "More zero-crossings → sharper cutoff and better stopband \
+                         rejection, at higher CPU cost.",
                     );
                 });
                 ui.separator();
@@ -456,6 +539,18 @@ impl eframe::App for OptimeApp {
                 ui.label("Live keyboard");
                 ui.label("Click a track row to capture, then play z–m / q–p.");
             });
+
+        // Analysis popups (shown every frame while open).
+        crate::filter_plot::show_crossover_window(
+            ctx,
+            &mut self.crossover_plot_open,
+            self.sample_rate,
+            self.bass_mono_freq as f64,
+        );
+        if self.resample_choice >= 2 {
+            let resample_mode = self.config().resample;
+            crate::filter_plot::show_sinc_window(ctx, &mut self.sinc_plot_open, resample_mode);
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::both().show(ui, |ui| {

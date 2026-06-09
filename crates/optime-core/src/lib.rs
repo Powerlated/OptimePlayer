@@ -17,6 +17,7 @@
 pub mod bank;
 pub mod controller;
 pub mod dsp;
+pub mod resample;
 pub mod sample;
 pub mod sdat;
 pub mod sequence;
@@ -28,10 +29,11 @@ pub mod util;
 pub use bank::{InstrumentBank, InstrumentRecord, InstrumentType};
 pub use controller::{Controller, FsVisController, SynthConfig};
 pub use dsp::BiquadFilter;
+pub use resample::{fir_kernel, fir_response, ResampleTables};
 pub use sample::{decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, ResampleMode, Sample};
 pub use sdat::{BankInfo, Sdat, SseqInfo, SwarInfo};
 pub use sequence::{Message, MessageType, Sequence, SequenceTrack};
-pub use synth::{DelayLine, SampleInstrument, SampleSynthesizer};
+pub use synth::{DelayLine, SampleInstrument, SampleSynthesizer, CROSSOVER_Q};
 pub use tuning::{midi_note_to_hz, TuningSystem};
 
 /// Number of sequence tracks the DS sound system exposes.
