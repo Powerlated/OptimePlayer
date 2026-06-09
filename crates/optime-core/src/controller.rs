@@ -79,6 +79,8 @@ struct ActiveNote {
     lfo_counter: i32,
     /// Shared LFO delay/phase counter (pokediamond's single `SNDLfo::delayCounter`).
     delay_counter: i32,
+    /// Volume-LFO contribution (dB) computed this tick, summed into the channel volume.
+    lfo_vol_db: i32,
     // Resolved instrument coefficients for this note's region.
     attack_coefficient: i32,
     decay_coefficient: i32,
@@ -318,6 +320,15 @@ impl Controller {
         }
     }
 
+    /// The track-level decibel attenuation pokediamond folds into `chn->userDecay`:
+    /// `DecibelSquareTable[volume] + DecibelSquareTable[expression] + DecibelSquareTable[master]`
+    /// (`TrackUpdateChannel`). Master volume is per-track here rather than player-global, which is
+    /// faithful for the common case where it stays 127 (a 0 dB no-op).
+    fn track_volume_db(&self, t: usize) -> i32 {
+        let tr = &self.sequence.tracks[t];
+        decibel_db(tr.volume) + decibel_db(tr.expression) + decibel_db(tr.master_volume)
+    }
+
     /// LFO update for one note, ported faithfully (including the DS fixed-point math).
     fn apply_lfo(&mut self, entry: &mut ActiveNote, config: &SynthConfig) {
         let t = entry.track_num;
@@ -342,8 +353,16 @@ impl Controller {
         };
         let lfo_value = lfo_tick(&params, &mut entry.lfo_counter, &mut entry.delay_counter);
 
-        // Pitch modulation is applied only on ticks where the phase advances (delay elapsed),
-        // matching the original; the value is in 1/64ths of a semitone.
+        // pokediamond adds the LFO into whichever target it modulates. Pitch modulation is applied
+        // only on ticks where the phase advances (delay elapsed); the value is in 1/64ths of a
+        // semitone. Volume modulation is summed (in dB) into the channel volume by `apply_adsr`
+        // via `lfo_vol_db`; it is naturally 0 during the LFO delay. (Pan LFO is not represented —
+        // pan is a per-track stereo stage here, not per-voice.)
+        entry.lfo_vol_db = if lfo_type == lfo_type::VOLUME {
+            lfo_value as i32
+        } else {
+            0
+        };
         if delay_elapsed && lfo_value != 0 && lfo_type == lfo_type::PITCH {
             self.synthesizers[t]
                 .instr_mut(entry.synth_instr_index)
@@ -360,12 +379,16 @@ impl Controller {
     ) {
         let t = entry.track_num;
         let si = entry.synth_instr_index;
+        // pokediamond sums every contribution in the decibel domain before one conversion
+        // (`SND_ExChannelMain`): velocity + envelope + userDecay (track volume + expression +
+        // master) + volume-LFO. We fold the non-envelope terms into `extra_db` here.
+        let extra_db = self.track_volume_db(t) + entry.lfo_vol_db;
         match entry.adsr_state {
             AdsrState::Attack => {
                 entry.adsr_timer =
                     -(((-entry.attack_coefficient).wrapping_mul(entry.adsr_timer)) >> 8);
                 self.synthesizers[t].instr_mut(si).volume =
-                    calc_channel_volume(entry.velocity, entry.adsr_timer);
+                    calc_channel_volume(entry.velocity, entry.adsr_timer, extra_db);
                 if entry.adsr_timer == 0 {
                     entry.adsr_state = AdsrState::Decay;
                 }
@@ -377,11 +400,11 @@ impl Controller {
                     entry.adsr_state = AdsrState::Sustain;
                 }
                 self.synthesizers[t].instr_mut(si).volume =
-                    calc_channel_volume(entry.velocity, entry.adsr_timer);
+                    calc_channel_volume(entry.velocity, entry.adsr_timer, extra_db);
             }
             AdsrState::Sustain => {
                 self.synthesizers[t].instr_mut(si).volume =
-                    calc_channel_volume(entry.velocity, entry.adsr_timer);
+                    calc_channel_volume(entry.velocity, entry.adsr_timer, extra_db);
             }
             AdsrState::Release => {
                 // pokediamond cuts a channel only once its release envelope reaches the floor
@@ -396,7 +419,7 @@ impl Controller {
                 } else {
                     entry.adsr_timer -= entry.release_coefficient;
                     self.synthesizers[t].instr_mut(si).volume =
-                        calc_channel_volume(entry.velocity, entry.adsr_timer);
+                        calc_channel_volume(entry.velocity, entry.adsr_timer, extra_db);
                 }
             }
         }
@@ -414,7 +437,9 @@ impl Controller {
                 }
             }
             MessageType::VolumeChange => {
-                self.synthesizers[msg.track_num].volume = msg.param0 as f64 / 127.0;
+                // No-op: track volume (with expression and master) is now summed in the decibel
+                // domain per tick by `track_volume_db`, matching pokediamond, rather than applied
+                // as a separate linear mixer gain. The synth's `volume` field stays at unity.
             }
             MessageType::PanChange => {
                 self.synthesizers[msg.track_num].set_pan(msg.param0 as f64 / 128.0, config);
@@ -481,7 +506,7 @@ impl Controller {
         };
 
         let initial_volume = if attack_coefficient == 0 {
-            calc_channel_volume(velocity, 0)
+            calc_channel_volume(velocity, 0, self.track_volume_db(t))
         } else {
             0.0
         };
@@ -508,6 +533,7 @@ impl Controller {
             from_keyboard: msg.from_keyboard,
             lfo_counter: 0,
             delay_counter: 0,
+            lfo_vol_db: 0,
             attack_coefficient,
             decay_coefficient,
             sustain_level,
@@ -555,14 +581,22 @@ impl Controller {
     }
 }
 
-/// Computes a channel's linear volume from velocity and ADSR timer.
-///
-/// Based on `SND_CalcChannelVolume` from `pret/pokediamond`.
-pub fn calc_channel_volume(velocity: i32, adsr_timer: i32) -> f64 {
+/// Decibel-square-table lookup for a 0..127 volume/expression/velocity level (clamped).
+#[inline]
+fn decibel_db(level: i32) -> i32 {
+    DECIBEL_SQUARE_TABLE[level.clamp(0, 127) as usize]
+}
+
+/// Computes a channel's linear volume the way pokediamond's `SND_ExChannelMain` does:
+/// it sums every attenuation contribution in the decibel domain — velocity, the ADSR envelope
+/// (`adsr_timer >> 7`), and `extra_db` (track volume + expression + master + volume-LFO) — then
+/// runs the combined value through `SND_CalcChannelVolume`.
+pub fn calc_channel_volume(velocity: i32, adsr_timer: i32, extra_db: i32) -> f64 {
     const SND_VOL_DB_MIN: i32 = -723;
 
-    let mut vol = DECIBEL_SQUARE_TABLE[velocity as usize];
+    let mut vol = decibel_db(velocity);
     vol += adsr_timer >> 7;
+    vol += extra_db;
     vol = vol.clamp(SND_VOL_DB_MIN, 0);
 
     let mut result = f64::from(GET_VOL_TABLE[(vol - SND_VOL_DB_MIN) as usize]);
@@ -867,5 +901,76 @@ mod tests {
         for _ in 0..32 {
             assert_eq!(lfo_tick(&p, &mut counter, &mut delay_counter), 0);
         }
+    }
+
+    /// Reference transcription of pokediamond's channel-volume chain: the `SND_ExChannelMain`
+    /// decibel accumulation (`vol = DecibelSquareTable[velocity] + (envAttenuation >> 7) +
+    /// userDecay`) followed by `SND_CalcChannelVolume` (`SND_util.c`), with the DS volume divider
+    /// (shift 0..3 → ÷1, ÷2, ÷4, ÷16) and our 0..1 normalization.
+    fn pokediamond_channel_volume(velocity: i32, env_att: i32, user_decay: i32) -> f64 {
+        let mut value =
+            DECIBEL_SQUARE_TABLE[velocity.clamp(0, 127) as usize] + (env_att >> 7) + user_decay;
+        // SND_CalcChannelVolume clamps the summed attenuation to [SND_VOL_DB_MIN, 0].
+        value = value.clamp(-723, 0);
+        let mut result = f64::from(GET_VOL_TABLE[(value + 723) as usize]);
+        if value < -240 {
+            result /= 16.0;
+        } else if value < -120 {
+            result /= 4.0;
+        } else if value < -60 {
+            result /= 2.0;
+        }
+        result / 127.0
+    }
+
+    #[test]
+    fn calc_channel_volume_matches_pokediamond() {
+        // Velocity + envelope + (track volume + expression + master) must all combine in the
+        // decibel domain, exactly as `SND_ExChannelMain` accumulates them.
+        for &velocity in &[0, 1, 50, 100, 127] {
+            for &env_att in &[-92544, -46272, -10000, -1000, -128, 0] {
+                for &volume in &[0usize, 32, 64, 100, 127] {
+                    for &expression in &[64usize, 100, 127] {
+                        for &master in &[100usize, 127] {
+                            let user_decay = DECIBEL_SQUARE_TABLE[volume]
+                                + DECIBEL_SQUARE_TABLE[expression]
+                                + DECIBEL_SQUARE_TABLE[master];
+                            let want = pokediamond_channel_volume(velocity, env_att, user_decay);
+                            let got = calc_channel_volume(velocity, env_att, user_decay);
+                            assert!(
+                                (got - want).abs() < 1e-12,
+                                "vel={velocity} env={env_att} vol={volume} expr={expression} \
+                                 master={master}: got {got}, want {want}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn track_volume_attenuates_in_decibel_domain() {
+        // Full velocity + envelope, volume swept down. Track volume must reduce the channel
+        // volume through the decibel table — not as a linear `volume/127` multiply (the old,
+        // pokediamond-inaccurate behavior).
+        let full = calc_channel_volume(127, 0, DECIBEL_SQUARE_TABLE[127] * 3);
+        let half = calc_channel_volume(
+            127,
+            0,
+            DECIBEL_SQUARE_TABLE[64] + DECIBEL_SQUARE_TABLE[127] * 2,
+        );
+        let quiet = calc_channel_volume(
+            127,
+            0,
+            DECIBEL_SQUARE_TABLE[16] + DECIBEL_SQUARE_TABLE[127] * 2,
+        );
+        assert!(half < full && quiet < half, "volume must attenuate monotonically");
+        // The decibel curve is steeper near the bottom than a linear law: volume 64 sits well
+        // below half amplitude (a linear `64/127` would give ≈0.50).
+        assert!(half < 0.5 * full, "dB volume 64 should be quieter than a 0.5 linear multiply");
+        // Expression and master fold in identically (a 0 dB / 127 term is a no-op).
+        let only_expr = calc_channel_volume(127, 0, DECIBEL_SQUARE_TABLE[64]);
+        assert!((only_expr - half).abs() < 1e-12);
     }
 }
