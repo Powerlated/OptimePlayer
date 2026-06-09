@@ -62,14 +62,18 @@ fn blackman(x: f64) -> f64 {
 
 /// Process-wide oversampled kernel tables. None of these depend on `fc` or `P`, so they are built
 /// exactly once and shared across every voice.
+///
+/// Values are stored as `f32`: at `OVERSAMPLE` resolution the linear-interp error already dwarfs
+/// the `~6e-8` `f32` rounding, so the narrower type halves the cache footprint (each table ~128 KB)
+/// and the load cost in the strided gather, while sums still accumulate in `f64`.
 struct Kernels {
     /// `sinc[k] = sinc(k / OVERSAMPLE)` for `k` in `0..=TAU_MAX * OVERSAMPLE` (symmetric).
-    sinc: Vec<f64>,
+    sinc: Vec<f32>,
     /// `sinc_int[k] = ∫₀^{k/OVERSAMPLE} sinc(t) dt = (1/π)·Si(π·τ)`, the cumulative integral of the
     /// bare sinc (the BLEP step), odd in `τ` with asymptote `0.5` as `τ → ∞`.
-    sinc_int: Vec<f64>,
+    sinc_int: Vec<f32>,
     /// `win[k] = blackman(k / WIN_OVERSAMPLE)` for `k` in `0..=WIN_OVERSAMPLE`.
-    win: Vec<f64>,
+    win: Vec<f32>,
 }
 
 fn kernels() -> &'static Kernels {
@@ -77,17 +81,16 @@ fn kernels() -> &'static Kernels {
     K.get_or_init(|| {
         let len = TAU_MAX * OVERSAMPLE;
 
-        // Bare sinc, sampled at τ = k / OVERSAMPLE.
-        let mut sinc_tab = Vec::with_capacity(len + 1);
-        for k in 0..=len {
-            sinc_tab.push(sinc(k as f64 / OVERSAMPLE as f64));
-        }
+        // Bare sinc, sampled at τ = k / OVERSAMPLE (computed in f64 for the integral below).
+        let sinc_f64: Vec<f64> = (0..=len)
+            .map(|k| sinc(k as f64 / OVERSAMPLE as f64))
+            .collect();
 
         // Cumulative trapezoidal integral of the sinc from 0 (the BLEP step, before normalization).
         let step = 1.0 / OVERSAMPLE as f64;
         let mut sinc_int = vec![0.0f64; len + 1];
         for k in 1..=len {
-            let trap = (sinc_tab[k - 1] + sinc_tab[k]) * 0.5 * step;
+            let trap = (sinc_f64[k - 1] + sinc_f64[k]) * 0.5 * step;
             sinc_int[k] = sinc_int[k - 1] + trap;
         }
         // Normalize so the right-half integral equals 0.5 (∫₀^∞ sinc = 0.5), absorbing the tiny
@@ -99,63 +102,67 @@ fn kernels() -> &'static Kernels {
             }
         }
 
-        // Blackman window over the normalized half-support.
-        let mut win = Vec::with_capacity(WIN_OVERSAMPLE + 1);
-        for k in 0..=WIN_OVERSAMPLE {
-            win.push(blackman(k as f64 / WIN_OVERSAMPLE as f64));
-        }
-
         Kernels {
-            sinc: sinc_tab,
-            sinc_int,
-            win,
+            sinc: sinc_f64.iter().map(|&v| v as f32).collect(),
+            sinc_int: sinc_int.iter().map(|&v| v as f32).collect(),
+            // Blackman window over the normalized half-support.
+            win: (0..=WIN_OVERSAMPLE)
+                .map(|k| blackman(k as f64 / WIN_OVERSAMPLE as f64) as f32)
+                .collect(),
         }
     })
 }
 
-/// Linear interpolation into a table at floating index `idx` (clamped at the top edge).
+/// Linear interpolation into an `f32` table at floating index `idx` (clamped at the top edge),
+/// widening to `f64` for the gather accumulation.
 #[inline]
-fn lerp(tab: &[f64], idx: f64) -> f64 {
+fn lerp(tab: &[f32], idx: f64) -> f64 {
     let i = idx as usize;
     let frac = idx - i as f64;
     let hi = (i + 1).min(tab.len() - 1);
-    tab[i] + (tab[hi] - tab[i]) * frac
+    let lo = f64::from(tab[i]);
+    lo + (f64::from(tab[hi]) - lo) * frac
 }
 
-/// `sinc(τ)` via the table for `τ ≥ 0`; falls back to a direct evaluation beyond `TAU_MAX`
-/// (only reached on step-mode upsampling, where the tap count is already tiny).
+/// The BLEP step `S(τ) = ∫₀^τ sinc`, looked up at the **pre-scaled signed index** `idx = τ·OVERSAMPLE`.
+/// Odd in `τ` (`S(−τ) = −S(τ)`), asymptote `±0.5`; beyond the table the ripple is negligible so the
+/// asymptote is returned directly. (Step mode may push `|τ| > TAU_MAX` on upsampling.)
 #[inline]
-fn sinc_lookup(k: &Kernels, tau: f64) -> f64 {
-    let idx = tau * OVERSAMPLE as f64;
+fn sinc_int_at(k: &Kernels, idx: f64) -> f64 {
+    let mag = idx.abs();
+    let v = if mag >= (k.sinc_int.len() - 1) as f64 {
+        0.5
+    } else {
+        lerp(&k.sinc_int, mag)
+    };
+    if idx < 0.0 {
+        -v
+    } else {
+        v
+    }
+}
+
+/// Blackman window looked up at the **pre-scaled index** `idx = (|d|/P)·WIN_OVERSAMPLE` (0 past the
+/// support edge).
+#[inline]
+fn win_at(k: &Kernels, idx: f64) -> f64 {
+    if idx >= WIN_OVERSAMPLE as f64 {
+        0.0
+    } else {
+        lerp(&k.win, idx)
+    }
+}
+
+/// Bare sinc looked up at the non-negative pre-scaled index `idx = τ·OVERSAMPLE`, returning 0 past
+/// the table. Safe because in impulse mode (`fc ≤ 0.5`, `P ≤ TAU_MAX`) the window already vanishes
+/// wherever `idx` would run off the end, so the 0 is only ever multiplied by a 0 window.
+#[inline]
+fn sinc_at(k: &Kernels, idx: f64) -> f64 {
     if idx >= (k.sinc.len() - 1) as f64 {
-        sinc(tau)
+        0.0
     } else {
         lerp(&k.sinc, idx)
     }
-}
-
-/// The BLEP step `S(τ) = ∫₀^τ sinc`, odd in `τ`, asymptote `±0.5`. Beyond `TAU_MAX` the ripple is
-/// negligible, so the asymptote is returned directly.
-#[inline]
-fn sinc_int_lookup(k: &Kernels, tau: f64) -> f64 {
-    if tau < 0.0 {
-        return -sinc_int_lookup(k, -tau);
-    }
-    let idx = tau * OVERSAMPLE as f64;
-    if idx >= (k.sinc_int.len() - 1) as f64 {
-        0.5
-    } else {
-        lerp(&k.sinc_int, idx)
-    }
-}
-
-/// Blackman window value at normalized half-support position `x = |d| / P` (0 for `x ≥ 1`).
-#[inline]
-fn win_lookup(k: &Kernels, x: f64) -> f64 {
-    if x >= 1.0 {
-        return 0.0;
-    }
-    lerp(&k.win, x * WIN_OVERSAMPLE as f64)
 }
 
 /// Pre-built resampler configuration. Holds only the support half-width `P`; the heavy kernel
@@ -167,13 +174,15 @@ pub struct ResampleTables {
 }
 
 impl ResampleTables {
-    /// Builds a resampler with a `half_taps`-source-sample half-width support (`≥ 1`).
+    /// Builds a resampler with a `half_taps`-source-sample half-width support, clamped to
+    /// `1..=TAU_MAX` so the impulse-mode sinc index can never run past the table (the hot gather
+    /// then needs no per-tap bounds branch). `TAU_MAX` (64) is also the UI's maximum.
     pub fn new(half_taps: usize) -> Self {
         // Touch the shared tables so the one-time build happens here rather than on the audio
         // thread's first gather.
         let _ = kernels();
         Self {
-            half_taps: half_taps.max(1),
+            half_taps: half_taps.clamp(1, TAU_MAX),
         }
     }
 }
@@ -204,6 +213,10 @@ pub fn resample_sinc(
         fc.clamp(1e-6, 0.5)
     };
     let two_fc = 2.0 * fc;
+    // Table-index steps: fold the per-tap `·OVERSAMPLE` / `·WIN_OVERSAMPLE` scaling into the walk so
+    // each tap advances the indices by a constant add instead of recomputing scaled products.
+    let sinc_idx_step = two_fc * OVERSAMPLE as f64; // Δ index per unit τ-step (one source sample)
+    let win_idx_step = inv_p * WIN_OVERSAMPLE as f64; // Δ window index per source sample
 
     // Fixed source-sample support: |pos − k| ≤ P, i.e. ≈ 2P taps regardless of fc.
     let k_lo = (pos - p).floor() as i64;
@@ -218,15 +231,18 @@ pub fn resample_sinc(
         // Normalizing by the weight sum forces exact DC unity (and absorbs the window).
         let mut out = 0.0;
         let mut wsum = 0.0;
-        let mut si_hi = sinc_int_lookup(k, two_fc * (pos - k_lo as f64));
+        let d_hi0 = pos - k_lo as f64;
+        let mut si_hi = sinc_int_at(k, sinc_idx_step * d_hi0);
+        let mut lo_idx = sinc_idx_step * (d_hi0 - 1.0); // S index of the bin's lower edge
+        let mut mid_idx = win_idx_step * (d_hi0 - 0.5); // window index of the bin centre (signed)
         for kk in k_lo..=k_hi {
-            let d_lo = pos - kk as f64 - 1.0;
-            let si_lo = sinc_int_lookup(k, two_fc * d_lo);
-            let mid = (pos - kk as f64 - 0.5).abs();
-            let w = win_lookup(k, mid * inv_p) * (si_hi - si_lo);
+            let si_lo = sinc_int_at(k, lo_idx);
+            let w = win_at(k, mid_idx.abs()) * (si_hi - si_lo);
             out += get(kk) * w;
             wsum += w;
             si_hi = si_lo;
+            lo_idx -= sinc_idx_step;
+            mid_idx -= win_idx_step;
         }
         if wsum.abs() > 1e-12 {
             out / wsum
@@ -234,18 +250,34 @@ pub fn resample_sinc(
             get(pos.round() as i64)
         }
     } else {
-        // Impulse gather: out = Σ_k data(k) · sinc(2fc·d) · blackman(|d|/P), DC-normalized.
+        // Impulse gather: out = Σ_k data(k) · sinc(2fc·|d|) · blackman(|d|/P), DC-normalized.
+        // The kernel is even in `d = pos − k`, so we split at `d = 0` into two monotonic runs and
+        // walk `|d|`'s table indices by a constant add each tap — no per-tap `abs`/multiply. Taps
+        // past the support contribute a zero window, so no in-loop bounds test is needed.
         let mut out = 0.0;
         let mut wsum = 0.0;
-        for kk in k_lo..=k_hi {
-            let d = pos - kk as f64;
-            let ad = d.abs();
-            if ad >= p {
-                continue;
-            }
-            let w = sinc_lookup(k, two_fc * ad) * win_lookup(k, ad * inv_p);
+        let mid = pos.floor() as i64; // largest k with d = pos − k ≥ 0
+
+        // Right run: k = k_lo..=mid, descending |d| = pos − k.
+        let mut sinc_idx = (pos - k_lo as f64) * sinc_idx_step;
+        let mut win_idx = (pos - k_lo as f64) * win_idx_step;
+        for kk in k_lo..=mid {
+            let w = sinc_at(k, sinc_idx) * win_at(k, win_idx);
             out += get(kk) * w;
             wsum += w;
+            sinc_idx -= sinc_idx_step;
+            win_idx -= win_idx_step;
+        }
+        // Left run: k = mid+1..=k_hi, ascending |d| = k − pos.
+        let d0 = mid as f64 + 1.0 - pos;
+        let mut sinc_idx = d0 * sinc_idx_step;
+        let mut win_idx = d0 * win_idx_step;
+        for kk in (mid + 1)..=k_hi {
+            let w = sinc_at(k, sinc_idx) * win_at(k, win_idx);
+            out += get(kk) * w;
+            wsum += w;
+            sinc_idx += sinc_idx_step;
+            win_idx += win_idx_step;
         }
         if wsum > 1e-10 {
             out / wsum
@@ -306,25 +338,16 @@ mod tests {
     #[test]
     fn sinc_int_boundary_and_symmetry() {
         let k = kernels();
+        // `sinc_int_at` takes the pre-scaled index τ·OVERSAMPLE.
+        let si = |tau: f64| sinc_int_at(k, tau * OVERSAMPLE as f64);
         // S(0) = 0, and S saturates to ±0.5 outside the tabulated range.
-        assert!(close(sinc_int_lookup(k, 0.0), 0.0, 1e-12));
-        assert!(close(sinc_int_lookup(k, TAU_MAX as f64 + 5.0), 0.5, 1e-6));
-        assert!(close(
-            sinc_int_lookup(k, -(TAU_MAX as f64) - 5.0),
-            -0.5,
-            1e-6
-        ));
+        assert!(close(si(0.0), 0.0, 1e-12));
+        assert!(close(si(TAU_MAX as f64 + 5.0), 0.5, 1e-6));
+        assert!(close(si(-(TAU_MAX as f64) - 5.0), -0.5, 1e-6));
         // Odd symmetry: S(−τ) = −S(τ).
         for i in 1..=20 {
             let tau = TAU_MAX as f64 * i as f64 / 20.0;
-            assert!(
-                close(
-                    sinc_int_lookup(k, tau) + sinc_int_lookup(k, -tau),
-                    0.0,
-                    1e-12
-                ),
-                "S({tau}) not odd"
-            );
+            assert!(close(si(tau) + si(-tau), 0.0, 1e-12), "S({tau}) not odd");
         }
     }
 
@@ -335,7 +358,7 @@ mod tests {
         let k = kernels();
         for i in 0..=2000 {
             let tau = -(TAU_MAX as f64) + 2.0 * TAU_MAX as f64 * i as f64 / 2000.0;
-            let s = sinc_int_lookup(k, tau);
+            let s = sinc_int_at(k, tau * OVERSAMPLE as f64);
             assert!((-0.6..=0.6).contains(&s), "S({tau}) = {s} out of band");
         }
     }
