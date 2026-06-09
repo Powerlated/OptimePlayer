@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/optime-core", "crates/optime-app"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "ISC"
+repository = "https://github.com/Powerlated/OptimePlayer"
+
+[profile.release]
+opt-level = 3
+lto = true
