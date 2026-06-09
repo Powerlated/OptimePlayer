@@ -1,139 +1,188 @@
-//! Variable-ratio windowed-sinc / BLEP resampler.
+//! Variable-ratio windowed-sinc / BLEP resampler with a **fixed source-tap support**.
 //!
-//! Both sinc modes share a single oversampled Blackman-windowed sinc table.  The cutoff is
-//! applied at lookup time by scaling the table index, so no per-voice kernel recomputation
-//! occurs — each tap costs one table lerp.
+//! Both sinc modes share a single decoupled kernel
 //!
-//! * **SampleNyquist (clean)**: impulse-mode gather, `fc = min(0.5, 0.5/r)`.
-//! * **OutputNyquist (crunch)**: BLEP step-difference gather at `fc = 0.5/r` (the *output*
-//!   Nyquist) for every ratio. For `r > 1` this anti-aliases; for `r ≤ 1` (upsampling) it rises
-//!   above source Nyquist (`fc > 0.5`), band-limiting the ZOH stairstep edges to the output rate
-//!   while keeping the crunch images that fall below output Nyquist.
+//! ```text
+//!     k(d) = sinc(2·fc·d) · blackman(d / P)        for |d| ≤ P,   0 otherwise
+//! ```
+//!
+//! where `d = pos − k` is the offset (in source samples) of source tap `k` from the fractional
+//! read position, `fc` is the anti-alias cutoff in cycles/source-sample, and `P` (`half_taps`) is
+//! the half-width of the support **in source samples**. The two factors are looked up from
+//! separate oversampled tables — a bare-sinc table indexed by `τ = 2·fc·d` and a Blackman-window
+//! table indexed by `d / P` — so neither table depends on `fc` or `P` and both are built exactly
+//! once for the whole process.
+//!
+//! Crucially the support is `±P` source samples **regardless of the resampling ratio** `r`, so the
+//! gather is always `≈ 2P` taps: `O(P)`, not `O(P·r)`. (The previous design keyed the kernel to
+//! zero-crossings, which made the tap count grow as `half_taps / fc = 2·half_taps·r` when
+//! downsampling — the cause of the real-time underruns at high tap counts.)
+//!
+//! At heavy downsampling a fixed `P` taps spans fewer sinc periods (`2·fc·P = P/r` zero-crossings),
+//! so the anti-aliasing softens gracefully — the intended cost/quality trade.
+//!
+//! * **SampleNyquist (clean)**: impulse-mode gather, `fc = min(0.5, 0.5/r)`, DC-normalized.
+//! * **OutputNyquist (crunch)**: BLEP-style gather of the *boxcar-integrated* kernel at
+//!   `fc = 0.5/r` (the *output* Nyquist). For `r > 1` this anti-aliases; for `r ≤ 1` (upsampling)
+//!   it rises above source Nyquist (`fc > 0.5`), band-limiting the ZOH stairstep edges to the
+//!   output rate while keeping the crunch images that fall below output Nyquist.
 
 use core::f64::consts::PI;
+use std::sync::OnceLock;
 
-/// Resolution of the oversampled table (samples per zero-crossing interval).
+/// Samples per unit `τ` in the oversampled sinc tables.
 const OVERSAMPLE: usize = 4096;
+/// Maximum tabulated `τ = 2·fc·d`. For the hot path (`fc ≤ 0.5`, `d ≤ P ≤ 64`) this bounds `τ`.
+/// Beyond it (only reachable on cheap step-mode upsampling) the kernel is evaluated directly.
+const TAU_MAX: usize = 64;
+/// Samples in the Blackman window table over the normalized half-support `x = d/P ∈ [0, 1]`.
+const WIN_OVERSAMPLE: usize = 4096;
 
-/// Oversampled Blackman-windowed sinc tables shared across all voices.
-///
-/// Built once per unique `half_taps` value and cached by [`crate::synth::SampleSynthesizer`].
-#[derive(Clone)]
-pub struct ResampleTables {
-    /// Half-width of the kernel in zero-crossings.
-    pub half_taps: usize,
-    /// `h_table[k]` = `windowed_sinc(k / OVERSAMPLE)` for `k` in `0..=half_taps * OVERSAMPLE`.
-    /// The kernel is symmetric: `h(-τ) = h(τ)`.
-    h_table: Vec<f64>,
-    /// `s_table[k]` = `∫_0^{k/OVERSAMPLE} h(t) dt` (partial integral from zero, trap rule).
-    /// Normalized so that `s_table[half_taps * OVERSAMPLE] == 0.5`.
-    /// Full BLEP: `S(u) = 0.5 + s_at(u)` for `u ≥ 0`; `S(u) = 0.5 - s_at(-u)` for `u < 0`.
-    s_table: Vec<f64>,
+/// `sinc(x) = sin(πx)/(πx)` (the normalized cardinal sine, unit zero-crossings).
+fn sinc(x: f64) -> f64 {
+    if x.abs() < 1e-15 {
+        1.0
+    } else {
+        let px = PI * x;
+        px.sin() / px
+    }
 }
 
-impl ResampleTables {
-    /// Builds the oversampled table for a kernel with `half_taps` zero-crossings.
-    pub fn new(half_taps: usize) -> Self {
-        let half_taps = half_taps.max(1);
-        let len = half_taps * OVERSAMPLE;
+/// Blackman window over the normalized half-support `x = |d| / P ∈ [0, 1]` (and 0 outside).
+///
+/// `w(x) = 0.42 + 0.5·cos(πx) + 0.08·cos(2πx)`; `w(0) = 1`, `w(1) = 0`.
+fn blackman(x: f64) -> f64 {
+    if x >= 1.0 {
+        return 0.0;
+    }
+    0.42 + 0.5 * (PI * x).cos() + 0.08 * (2.0 * PI * x).cos()
+}
 
-        // h_table: windowed sinc at τ = k / OVERSAMPLE for k in 0..=len.
-        let mut h_table = Vec::with_capacity(len + 1);
+/// Process-wide oversampled kernel tables. None of these depend on `fc` or `P`, so they are built
+/// exactly once and shared across every voice.
+struct Kernels {
+    /// `sinc[k] = sinc(k / OVERSAMPLE)` for `k` in `0..=TAU_MAX * OVERSAMPLE` (symmetric).
+    sinc: Vec<f64>,
+    /// `sinc_int[k] = ∫₀^{k/OVERSAMPLE} sinc(t) dt = (1/π)·Si(π·τ)`, the cumulative integral of the
+    /// bare sinc (the BLEP step), odd in `τ` with asymptote `0.5` as `τ → ∞`.
+    sinc_int: Vec<f64>,
+    /// `win[k] = blackman(k / WIN_OVERSAMPLE)` for `k` in `0..=WIN_OVERSAMPLE`.
+    win: Vec<f64>,
+}
+
+fn kernels() -> &'static Kernels {
+    static K: OnceLock<Kernels> = OnceLock::new();
+    K.get_or_init(|| {
+        let len = TAU_MAX * OVERSAMPLE;
+
+        // Bare sinc, sampled at τ = k / OVERSAMPLE.
+        let mut sinc_tab = Vec::with_capacity(len + 1);
         for k in 0..=len {
-            let t = k as f64 / OVERSAMPLE as f64; // τ in [0, half_taps]
-            h_table.push(windowed_sinc_unit(t, half_taps));
+            sinc_tab.push(sinc(k as f64 / OVERSAMPLE as f64));
         }
 
-        // s_table: cumulative trapezoidal integral of h from 0, normalized to end at 0.5.
+        // Cumulative trapezoidal integral of the sinc from 0 (the BLEP step, before normalization).
         let step = 1.0 / OVERSAMPLE as f64;
-        let mut s_table = vec![0.0f64; len + 1];
+        let mut sinc_int = vec![0.0f64; len + 1];
         for k in 1..=len {
-            let trap = (h_table[k - 1] + h_table[k]) * 0.5 * step;
-            s_table[k] = s_table[k - 1] + trap;
+            let trap = (sinc_tab[k - 1] + sinc_tab[k]) * 0.5 * step;
+            sinc_int[k] = sinc_int[k - 1] + trap;
         }
-        // Normalize: the full right-half integral should equal 0.5 (by symmetry of sinc).
-        let right_half = s_table[len];
-        if right_half > 1e-15 {
-            for v in &mut s_table {
-                *v *= 0.5 / right_half;
+        // Normalize so the right-half integral equals 0.5 (∫₀^∞ sinc = 0.5), absorbing the tiny
+        // truncation error so the table lands cleanly on the 0.5 asymptote.
+        let tail = sinc_int[len];
+        if tail > 1e-15 {
+            for v in &mut sinc_int {
+                *v *= 0.5 / tail;
             }
         }
 
-        Self {
-            half_taps,
-            h_table,
-            s_table,
+        // Blackman window over the normalized half-support.
+        let mut win = Vec::with_capacity(WIN_OVERSAMPLE + 1);
+        for k in 0..=WIN_OVERSAMPLE {
+            win.push(blackman(k as f64 / WIN_OVERSAMPLE as f64));
         }
-    }
 
-    /// Evaluates the windowed-sinc kernel `h(u)` at any real `u` via linear interpolation.
-    ///
-    /// Zero outside `[-half_taps, half_taps]`; symmetric.
-    fn h_at(&self, u: f64) -> f64 {
-        let au = u.abs();
-        let n = self.half_taps as f64;
-        if au >= n {
-            return 0.0;
+        Kernels {
+            sinc: sinc_tab,
+            sinc_int,
+            win,
         }
-        let idx = au * OVERSAMPLE as f64;
-        let i = idx as usize;
-        let frac = idx - i as f64;
-        let hi = (i + 1).min(self.h_table.len() - 1);
-        self.h_table[i] + (self.h_table[hi] - self.h_table[i]) * frac
-    }
+    })
+}
 
-    /// Evaluates the cumulative integral `S(u)` (the BLEP step function) at any real `u`.
-    ///
-    /// `S(-∞) = 0`, `S(0) = 0.5`, `S(+∞) = 1`.  Exploits symmetry: `S(-u) = 1 − S(u)`.
-    /// The result is clamped to `[0, 1]` to absorb floating-point rounding near the boundary.
-    fn s_at(&self, u: f64) -> f64 {
-        let n = self.half_taps as f64;
-        if u >= n {
-            return 1.0;
-        }
-        if u <= -n {
-            return 0.0;
-        }
-        let raw = if u >= 0.0 {
-            let idx = u * OVERSAMPLE as f64;
-            let i = idx as usize;
-            let frac = idx - i as f64;
-            let hi = (i + 1).min(self.s_table.len() - 1);
-            0.5 + self.s_table[i] + (self.s_table[hi] - self.s_table[i]) * frac
-        } else {
-            1.0 - self.s_at(-u)
-        };
-        raw.clamp(0.0, 1.0)
+/// Linear interpolation into a table at floating index `idx` (clamped at the top edge).
+#[inline]
+fn lerp(tab: &[f64], idx: f64) -> f64 {
+    let i = idx as usize;
+    let frac = idx - i as f64;
+    let hi = (i + 1).min(tab.len() - 1);
+    tab[i] + (tab[hi] - tab[i]) * frac
+}
+
+/// `sinc(τ)` via the table for `τ ≥ 0`; falls back to a direct evaluation beyond `TAU_MAX`
+/// (only reached on step-mode upsampling, where the tap count is already tiny).
+#[inline]
+fn sinc_lookup(k: &Kernels, tau: f64) -> f64 {
+    let idx = tau * OVERSAMPLE as f64;
+    if idx >= (k.sinc.len() - 1) as f64 {
+        sinc(tau)
+    } else {
+        lerp(&k.sinc, idx)
     }
 }
 
-/// The Blackman-windowed sinc at `τ ∈ [0, N]` with unit cutoff (zero-crossings at integers).
-///
-/// `h(τ) = sinc(τ) · blackman(τ / N)` where `sinc(x) = sin(πx)/(πx)`.
-fn windowed_sinc_unit(t: f64, half_taps: usize) -> f64 {
-    let n = half_taps as f64;
-    if t >= n {
+/// The BLEP step `S(τ) = ∫₀^τ sinc`, odd in `τ`, asymptote `±0.5`. Beyond `TAU_MAX` the ripple is
+/// negligible, so the asymptote is returned directly.
+#[inline]
+fn sinc_int_lookup(k: &Kernels, tau: f64) -> f64 {
+    if tau < 0.0 {
+        return -sinc_int_lookup(k, -tau);
+    }
+    let idx = tau * OVERSAMPLE as f64;
+    if idx >= (k.sinc_int.len() - 1) as f64 {
+        0.5
+    } else {
+        lerp(&k.sinc_int, idx)
+    }
+}
+
+/// Blackman window value at normalized half-support position `x = |d| / P` (0 for `x ≥ 1`).
+#[inline]
+fn win_lookup(k: &Kernels, x: f64) -> f64 {
+    if x >= 1.0 {
         return 0.0;
     }
-    let sinc = if t < 1e-15 {
-        1.0
-    } else {
-        (PI * t).sin() / (PI * t)
-    };
-    // Blackman window centered at 0, half-width N:
-    // w(τ) = 0.42 + 0.5·cos(π·τ/N) + 0.08·cos(2π·τ/N)
-    let x = t / n;
-    let window = 0.42 + 0.5 * (PI * x).cos() + 0.08 * (2.0 * PI * x).cos();
-    sinc * window
+    lerp(&k.win, x * WIN_OVERSAMPLE as f64)
+}
+
+/// Pre-built resampler configuration. Holds only the support half-width `P`; the heavy kernel
+/// tables live in a process-wide [`OnceLock`] and are shared (so building this is essentially free).
+#[derive(Clone)]
+pub struct ResampleTables {
+    /// Half-width of the kernel support, in **source samples**.
+    pub half_taps: usize,
+}
+
+impl ResampleTables {
+    /// Builds a resampler with a `half_taps`-source-sample half-width support (`≥ 1`).
+    pub fn new(half_taps: usize) -> Self {
+        // Touch the shared tables so the one-time build happens here rather than on the audio
+        // thread's first gather.
+        let _ = kernels();
+        Self {
+            half_taps: half_taps.max(1),
+        }
+    }
 }
 
 /// Windowed-sinc polyphase gather — the single shared resampler for both sinc modes.
 ///
 /// # Parameters
-/// - `tables`:    pre-built oversampled kernel tables.
-/// - `get`:       sample accessor function (loop-aware, returns `f64`).
+/// - `tables`:    the support width (the kernel tables are global).
+/// - `get`:       loop-aware sample accessor, returns `f64`.
 /// - `pos`:       fractional read position in source samples.
-/// - `fc`:        cutoff in cycles/source-sample (≤ 0.5).
+/// - `fc`:        cutoff in cycles/source-sample.
 /// - `step_mode`: `false` → impulse-mode (SampleNyquist); `true` → BLEP step-mode (OutputNyquist).
 pub fn resample_sinc(
     tables: &ResampleTables,
@@ -142,47 +191,63 @@ pub fn resample_sinc(
     fc: f64,
     step_mode: bool,
 ) -> f64 {
-    // Impulse (reconstruction) mode never wants a cutoff above source Nyquist. Step (BLEP) mode
-    // may: when upsampling we band-limit the stairstep edges at the *output* Nyquist, which is
-    // above source Nyquist (fc = 0.5/r > 0.5), so only the lower bound is enforced there.
+    let k = kernels();
+    let p = tables.half_taps as f64;
+    let inv_p = 1.0 / p;
+    // Impulse (reconstruction) mode never wants a cutoff above source Nyquist; step (BLEP) mode may
+    // (output Nyquist sits above source Nyquist when upsampling).
     let fc = if step_mode {
-        fc.clamp(1e-6, 1e6)
+        fc.max(1e-6)
     } else {
         fc.clamp(1e-6, 0.5)
     };
-    // Tap range: |pos − k| ≤ N/(2·fc) in source-sample coordinates.
-    let half_width = tables.half_taps as f64 / (2.0 * fc);
-    let k_lo = (pos - half_width).floor() as i64;
-    let k_hi = (pos + half_width).ceil() as i64;
+    let two_fc = 2.0 * fc;
+
+    // Fixed source-sample support: |pos − k| ≤ P, i.e. ≈ 2P taps regardless of fc.
+    let k_lo = (pos - p).floor() as i64;
+    let k_hi = (pos + p).ceil() as i64;
 
     if step_mode {
-        // BLEP step-difference gather:
-        // out = Σ_k data(k) · [S(2fc·(pos−k)) − S(2fc·(pos−k−1))]
-        // The differences telescope to exactly 1 — no normalization needed.
-        let mut out = 0.0;
-        for k in k_lo..=k_hi {
-            let u_curr = 2.0 * fc * (pos - k as f64);
-            let u_prev = 2.0 * fc * (pos - k as f64 - 1.0);
-            let w = tables.s_at(u_curr) - tables.s_at(u_prev);
-            out += get(k) * w;
-        }
-        out
-    } else {
-        // Impulse gather:
-        // out = Σ_k data(k) · 2fc · h(2fc·(pos−k))
-        // Normalized by the actual weight sum (handles windowing imprecision).
+        // BLEP gather of the boxcar-integrated windowed kernel: tap `k` weighs its source-sample
+        // bin `[pos−k−1, pos−k]` by the band-limited step rise across it,
+        //     [S(2fc·(pos−k)) − S(2fc·(pos−k−1))] · blackman(|bin-center| / P),
+        // where `S` is the cumulative sinc integral. The bin's upper-edge `S` value is the next
+        // bin's lower edge, so it is carried across iterations (one `sinc_int` lookup per tap).
+        // Normalizing by the weight sum forces exact DC unity (and absorbs the window).
         let mut out = 0.0;
         let mut wsum = 0.0;
-        for k in k_lo..=k_hi {
-            let u = 2.0 * fc * (pos - k as f64);
-            let w = 2.0 * fc * tables.h_at(u);
-            out += get(k) * w;
+        let mut si_hi = sinc_int_lookup(k, two_fc * (pos - k_lo as f64));
+        for kk in k_lo..=k_hi {
+            let d_lo = pos - kk as f64 - 1.0;
+            let si_lo = sinc_int_lookup(k, two_fc * d_lo);
+            let mid = (pos - kk as f64 - 0.5).abs();
+            let w = win_lookup(k, mid * inv_p) * (si_hi - si_lo);
+            out += get(kk) * w;
+            wsum += w;
+            si_hi = si_lo;
+        }
+        if wsum.abs() > 1e-12 {
+            out / wsum
+        } else {
+            get(pos.round() as i64)
+        }
+    } else {
+        // Impulse gather: out = Σ_k data(k) · sinc(2fc·d) · blackman(|d|/P), DC-normalized.
+        let mut out = 0.0;
+        let mut wsum = 0.0;
+        for kk in k_lo..=k_hi {
+            let d = pos - kk as f64;
+            let ad = d.abs();
+            if ad >= p {
+                continue;
+            }
+            let w = sinc_lookup(k, two_fc * ad) * win_lookup(k, ad * inv_p);
+            out += get(kk) * w;
             wsum += w;
         }
         if wsum > 1e-10 {
             out / wsum
         } else {
-            // Degenerate (pos outside sample data entirely).
             get(pos.round() as i64)
         }
     }
@@ -190,18 +255,16 @@ pub fn resample_sinc(
 
 // ─── Analysis helpers (used by the filter-plot popup in optime-app) ──────────────────────────
 
-/// Returns the normalized kernel taps `h_fc[k]` for integer source offsets
-/// `k = −(N−1)..=(N−1)`, suitable for drawing as a stem plot.
-///
-/// The taps are scaled so the cutoff is at `fc` (cycles/source-sample) and normalized
-/// to unit DC gain.
+/// Returns the normalized kernel taps `k(d)` for integer source offsets `d = −(P−1)..=(P−1)`,
+/// suitable for drawing as a stem plot. Scaled to the cutoff `fc` and normalized to unit DC gain.
 pub fn fir_kernel(half_taps: usize, fc: f64) -> Vec<f64> {
-    let n = half_taps.max(1) as i64;
+    let p = half_taps.max(1);
+    let pf = p as f64;
     let fc = fc.clamp(1e-6, 0.5);
-    let taps: Vec<f64> = (-(n - 1)..=(n - 1))
-        .map(|k| {
-            let t = 2.0 * fc * k.abs() as f64; // |τ| in table coordinates
-            2.0 * fc * windowed_sinc_unit(t, half_taps)
+    let taps: Vec<f64> = (-(p as i64 - 1)..=(p as i64 - 1))
+        .map(|d| {
+            let ad = d.unsigned_abs() as f64;
+            sinc(2.0 * fc * ad) * blackman(ad / pf)
         })
         .collect();
     let sum: f64 = taps.iter().sum();
@@ -213,16 +276,13 @@ pub fn fir_kernel(half_taps: usize, fc: f64) -> Vec<f64> {
 }
 
 /// Evaluates the frequency response of `fir_kernel(half_taps, fc)` at digital frequency
-/// `w_norm ∈ [0, π]`.  Returns `(magnitude, phase_radians)`.
-///
-/// The kernel is linear-phase (symmetric), so the phase is exactly linear in `w_norm`.
+/// `w_norm ∈ [0, π]`. Returns `(magnitude, phase_radians)`. The kernel is linear-phase (symmetric).
 pub fn fir_response(half_taps: usize, fc: f64, w_norm: f64) -> (f64, f64) {
     let kernel = fir_kernel(half_taps, fc);
     let center = kernel.len() / 2; // index of the zero-lag tap
     let (mut re, mut im) = (0.0f64, 0.0f64);
     for (i, &h) in kernel.iter().enumerate() {
         let delay = i as f64 - center as f64;
-        // z^{-delay} = e^{−jw·delay}
         re += h * (w_norm * delay).cos();
         im -= h * (w_norm * delay).sin();
     }
@@ -242,96 +302,132 @@ mod tests {
     }
 
     #[test]
-    fn blep_boundary_and_symmetry() {
-        // Boundary conditions: S must approach 0 and 1 outside the kernel support.
-        let tables = ResampleTables::new(8);
-        let n = tables.half_taps as f64;
-        assert!(
-            close(tables.s_at(-n - 1.0), 0.0, 1e-10),
-            "S(-N-1) should be 0"
-        );
-        assert!(
-            close(tables.s_at(n + 1.0), 1.0, 1e-10),
-            "S(N+1) should be 1"
-        );
-        // Anti-symmetry: S(-u) = 1 - S(u).
+    fn sinc_int_boundary_and_symmetry() {
+        let k = kernels();
+        // S(0) = 0, and S saturates to ±0.5 outside the tabulated range.
+        assert!(close(sinc_int_lookup(k, 0.0), 0.0, 1e-12));
+        assert!(close(sinc_int_lookup(k, TAU_MAX as f64 + 5.0), 0.5, 1e-6));
+        assert!(close(
+            sinc_int_lookup(k, -(TAU_MAX as f64) - 5.0),
+            -0.5,
+            1e-6
+        ));
+        // Odd symmetry: S(−τ) = −S(τ).
         for i in 1..=20 {
-            let u = n * i as f64 / 20.0;
-            let s_pos = tables.s_at(u);
-            let s_neg = tables.s_at(-u);
+            let tau = TAU_MAX as f64 * i as f64 / 20.0;
             assert!(
-                close(s_pos + s_neg, 1.0, 1e-10),
-                "S({u}) + S(-{u}) = {} (should be 1)",
-                s_pos + s_neg
-            );
-        }
-        // S must be bounded in [0, 1] — the windowed sinc has small negative lobes so its
-        // integral is not strictly monotone, but it must stay within a physically reasonable
-        // range (the Blackman window keeps overshoot < 1%).
-        for i in 0..=1000 {
-            let u = -n + 2.0 * n * i as f64 / 1000.0;
-            let s = tables.s_at(u);
-            assert!(
-                (-0.01..=1.01).contains(&s),
-                "S({u}) = {s} is outside [-0.01, 1.01]"
+                close(
+                    sinc_int_lookup(k, tau) + sinc_int_lookup(k, -tau),
+                    0.0,
+                    1e-12
+                ),
+                "S({tau}) not odd"
             );
         }
     }
 
     #[test]
-    fn blep_midpoint_is_half() {
-        let tables = ResampleTables::new(8);
-        assert!(close(tables.s_at(0.0), 0.5, 1e-6));
+    fn sinc_int_is_bounded() {
+        // The sinc has negative lobes, so its integral overshoots slightly past 0.5, but it must
+        // stay within a physically reasonable band.
+        let k = kernels();
+        for i in 0..=2000 {
+            let tau = -(TAU_MAX as f64) + 2.0 * TAU_MAX as f64 * i as f64 / 2000.0;
+            let s = sinc_int_lookup(k, tau);
+            assert!((-0.6..=0.6).contains(&s), "S({tau}) = {s} out of band");
+        }
     }
 
     #[test]
-    fn step_mode_weights_sum_to_one() {
-        // For any position, the BLEP step-difference weights must telescope to 1.
-        let tables = ResampleTables::new(8);
-        let fc = 0.3;
-        let pos = 7.35_f64;
+    fn step_mode_preserves_dc() {
+        // The normalized BLEP gather must pass a constant signal through unchanged at any position.
+        let tables = ResampleTables::new(16);
+        let get = |_: i64| 1.0;
+        for fc in [0.1, 0.25, 0.5, 1.5] {
+            for pos in [3.0, 7.35, 20.7] {
+                let out = resample_sinc(&tables, get, pos, fc, true);
+                assert!(close(out, 1.0, 1e-9), "DC at fc={fc}, pos={pos}: {out}");
+            }
+        }
+    }
+
+    #[test]
+    fn step_mode_is_a_bandlimited_step() {
+        // A unit source step must produce a monotone-ish band-limited rise: ≈0 far below the edge,
+        // ≈0.5 at the edge, ≈1 far above.
+        let tables = ResampleTables::new(32);
+        let fc = 0.5 / 4.0; // 4× downsampling
+        let step = |k: i64| if k >= 0 { 1.0_f64 } else { 0.0 };
+
+        assert!(close(
+            resample_sinc(&tables, step, 0.0, fc, true),
+            0.5,
+            0.02
+        ));
         let half_width = tables.half_taps as f64 / (2.0 * fc);
-        let k_lo = (pos - half_width).floor() as i64;
-        let k_hi = (pos + half_width).ceil() as i64;
-        let weight_sum: f64 = (k_lo..=k_hi)
-            .map(|k| {
-                tables.s_at(2.0 * fc * (pos - k as f64))
-                    - tables.s_at(2.0 * fc * (pos - k as f64 - 1.0))
-            })
-            .sum();
-        assert!(
-            close(weight_sum, 1.0, 1e-10),
-            "step weights sum = {weight_sum}"
-        );
+        assert!(close(
+            resample_sinc(&tables, step, -(half_width + 10.0), fc, true),
+            0.0,
+            1e-6
+        ));
+        assert!(close(
+            resample_sinc(&tables, step, half_width + 10.0, fc, true),
+            1.0,
+            1e-6
+        ));
+        // Monotone non-decreasing through the transition.
+        let mut prev = -1.0;
+        for i in 0..=200 {
+            let pos = -40.0 + 80.0 * i as f64 / 200.0;
+            let v = resample_sinc(&tables, step, pos, fc, true);
+            assert!(
+                v > prev - 0.05,
+                "non-monotone at pos={pos}: {v} after {prev}"
+            );
+            prev = v;
+        }
     }
 
     #[test]
     fn impulse_mode_dc_gain() {
-        // A constant source signal should pass through unchanged (DC gain ≈ 1).
         let tables = ResampleTables::new(16);
-        let fc = 0.4;
         let get = |_: i64| 1.0;
-        let out = resample_sinc(&tables, get, 12.37, fc, false);
+        let out = resample_sinc(&tables, get, 12.37, 0.4, false);
         assert!(close(out, 1.0, 1e-6), "DC gain = {out}");
     }
 
     #[test]
     fn impulse_mode_passband_signal_reconstructed() {
-        // A signal well within the passband (freq << fc) should be reconstructed faithfully at
-        // any fractional position.  We use a cosine at 0.1 × Nyquist (fc = 0.45 → well inside).
+        // A signal well within the passband (freq << fc) is reconstructed at any fractional pos.
         let tables = ResampleTables::new(16);
         let fc = 0.45;
-        let f0 = 0.05; // signal frequency (cycles/source-sample)
-        let get = |k: i64| (2.0 * core::f64::consts::PI * f0 * k as f64).cos();
-        // Test at a few non-integer positions; the reconstructed value should be close to the
-        // ideal continuous-time cos.
+        let f0 = 0.05;
+        let get = |k: i64| (2.0 * PI * f0 * k as f64).cos();
         for frac in [0.0, 0.25, 0.5, 0.75] {
             let pos = 32.0 + frac;
-            let ideal = (2.0 * core::f64::consts::PI * f0 * pos).cos();
+            let ideal = (2.0 * PI * f0 * pos).cos();
             let out = resample_sinc(&tables, get, pos, fc, false);
             assert!(
                 close(out, ideal, 1e-3),
                 "at pos={pos}: reconstructed={out}, ideal={ideal}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_tap_count_independent_of_ratio() {
+        // The whole point: the gather spans ≈2P taps whether we up- or down-sample. We count the
+        // taps the kernel actually touches (nonzero window) at a couple of cutoffs.
+        let p = 16usize;
+        for fc in [0.5, 0.5 / 4.0, 0.5 / 8.0] {
+            let pos = 100.37_f64;
+            let k_lo = (pos - p as f64).floor() as i64;
+            let k_hi = (pos + p as f64).ceil() as i64;
+            let n = (k_lo..=k_hi).count();
+            assert!(
+                (2 * p..=2 * p + 2).contains(&n),
+                "fc={fc}: {n} taps (expected ≈{})",
+                2 * p
             );
         }
     }
@@ -348,12 +444,7 @@ mod tests {
         let k = fir_kernel(8, 0.4);
         let n = k.len();
         for i in 0..n / 2 {
-            assert!(
-                close(k[i], k[n - 1 - i], 1e-15),
-                "asymmetry at {i}: {} vs {}",
-                k[i],
-                k[n - 1 - i]
-            );
+            assert!(close(k[i], k[n - 1 - i], 1e-15), "asymmetry at {i}");
         }
     }
 
@@ -365,10 +456,8 @@ mod tests {
 
     #[test]
     fn stopband_suppression_improves_with_taps() {
-        // Frequency-domain twin of the synth-level alias test, with no resampling/DFT noise:
-        // for a fixed cutoff, a deeper kernel sharpens the transition and pushes a stopband tone
-        // further down. Cutoff fc = 0.25 (w_cut = π/2); probe at 0.4 cyc/sample (w = 0.8π), well
-        // inside the stopband.
+        // For a fixed cutoff, a wider support sharpens the transition and pushes a stopband tone
+        // further down. Cutoff fc = 0.25; probe at 0.4 cyc/sample (deep in the stopband).
         let w_stop = 2.0 * PI * 0.4;
         let taps = [2usize, 4, 8, 16, 32];
         let mags: Vec<f64> = taps
@@ -378,111 +467,17 @@ mod tests {
         for w in mags.windows(2) {
             assert!(
                 w[1] < w[0],
-                "stopband magnitude should fall with more taps, got {mags:?} for {taps:?}"
+                "stopband magnitude should fall with more taps, got {mags:?}"
             );
         }
-        // The largest kernel should land deep in the stopband (< −40 dB).
         assert!(
             *mags.last().unwrap() < 0.01,
-            "32-tap stopband magnitude = {} (expected < 0.01)",
+            "widest-kernel stopband magnitude = {}",
             mags.last().unwrap()
         );
-        // Meanwhile the passband stays flat (≈ unity) for every tap count, so the suppression
-        // gain isn't coming from a collapsing passband.
         for &t in &taps {
             let (pass, _) = fir_response(t, 0.25, 2.0 * PI * 0.05);
             assert!(pass > 0.95, "passband magnitude at {t} taps = {pass}");
         }
-    }
-
-    // ── Crunch-mode (OutputNyquist / step_mode=true) band-limiting tests ──────────────────
-
-    /// The BLEP step-difference gather of a unit source step telescopes exactly to S(2·fc·pos).
-    ///
-    /// Mathematically:
-    ///   Σ_{k≥0} [S(2fc(pos−k)) − S(2fc(pos−k−1))]  =  S(2fc·pos) − S(−∞)  =  S(2fc·pos)
-    ///
-    /// This is the defining property of the BLEP resampler: source step edges become the
-    /// band-limited step function at output Nyquist, not a hard discontinuity.
-    #[test]
-    fn step_mode_reproduces_bandlimited_step_shape() {
-        let tables = ResampleTables::new(32);
-        let r = 4.0_f64;
-        let fc = 0.5 / r; // = 0.125  (output Nyquist for 4× downsampling)
-        let step = |k: i64| if k >= 0 { 1.0_f64 } else { 0.0 };
-
-        // Positions within the kernel support: resampler output must equal S(2fc·pos).
-        let positions = [-25.0_f64, -8.3, -1.0, 0.0, 2.7, 9.0, 25.0];
-        for pos in positions {
-            let out = resample_sinc(&tables, step, pos, fc, true);
-            let expected = tables.s_at(2.0 * fc * pos);
-            assert!(
-                close(out, expected, 1e-9),
-                "at pos={pos}: got {out}, expected S(2·fc·pos) = {expected}"
-            );
-        }
-
-        // Far outside kernel support: must settle to 0 and 1.
-        let half_width = tables.half_taps as f64 / (2.0 * fc);
-        let far_below = -(half_width + 10.0);
-        let far_above = half_width + 10.0;
-        assert!(
-            close(resample_sinc(&tables, step, far_below, fc, true), 0.0, 1e-6),
-            "far below edge should be 0"
-        );
-        assert!(
-            close(resample_sinc(&tables, step, far_above, fc, true), 1.0, 1e-6),
-            "far above edge should be 1"
-        );
-    }
-
-    /// Sinusoidal passband / stopband test: crunch mode acts as a lowpass at output Nyquist `fc`.
-    ///
-    /// The BLEP step-difference gather is equivalent to first ZOH-ing the source and then
-    /// convolving with the windowed-sinc lowpass at `fc`.  A source sinusoid *below* `fc`
-    /// must pass through at near-unity amplitude; one *well above* `fc` must be strongly
-    /// suppressed.
-    ///
-    /// Choosing the stopband frequency 2.8× above `fc` (0.35 vs 0.125) places it comfortably
-    /// inside the Blackman stopband (−58 dB sidelobes → amplitude < 0.002), so the 0.05
-    /// threshold is conservatively loose.
-    #[test]
-    fn step_mode_sinusoidal_bandlimiting() {
-        use core::f64::consts::PI;
-
-        let tables = ResampleTables::new(16);
-        let r = 4.0_f64; // 4× downsampling
-        let fc = 0.5 / r; // = 0.125 (output Nyquist)
-
-        // Measure peak output amplitude for a sinusoidal source at frequency `f`
-        // (cycles/source-sample), advancing `r` source samples per output step.
-        // We skip the first 50 output positions so any transient from the kernel
-        // boundary has settled, then observe 100 output samples.
-        let peak_amp = |f: f64| -> f64 {
-            (50..150_usize)
-                .map(|n| {
-                    let pos = n as f64 * r;
-                    let get = |k: i64| (2.0 * PI * f * k as f64).sin();
-                    resample_sinc(&tables, get, pos, fc, true).abs()
-                })
-                .fold(0.0f64, f64::max)
-        };
-
-        // Passband (f = 0.02 << fc = 0.125): ZOH sinc factor ≈ 1, lowpass gain ≈ 1.
-        // The observed amplitude at positions n·r cycles at output freq 0.08 cycles/step,
-        // so 100 samples span 8 complete cycles — the peak is well within the window.
-        let amp_pass = peak_amp(0.02);
-        assert!(
-            amp_pass > 0.7,
-            "passband sinusoid (f=0.02, fc=0.125): amplitude = {amp_pass:.4} (expected > 0.7)"
-        );
-
-        // Stopband (f = 0.35 >> fc = 0.125): no ZOH image falls below fc, so the
-        // Blackman lowpass suppresses all content.  −58 dB → amplitude ≈ 0.002 << 0.05.
-        let amp_stop = peak_amp(0.35);
-        assert!(
-            amp_stop < 0.05,
-            "stopband sinusoid (f=0.35 >> output Nyquist {fc}): amplitude = {amp_stop:.4} (expected < 0.05)"
-        );
     }
 }

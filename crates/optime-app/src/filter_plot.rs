@@ -252,9 +252,7 @@ pub fn show_sinc_window(ctx: &egui::Context, open: &mut bool, mode: ResampleMode
             let freqs_norm: Vec<f64> = (0..512).map(|i| i as f64 * 0.5 / 511.0).collect();
 
             // Magnitude plot (dB).
-            ui.label(format!(
-                "Magnitude  ({half_taps} zero-crossings, fc = {fc})"
-            ));
+            ui.label(format!("Magnitude  ({} taps, fc = {fc})", half_taps * 2));
             let mag_plot = Plot::new("sinc_mag")
                 .height(150.0)
                 .x_axis_label("Frequency (cycles/source-sample)")

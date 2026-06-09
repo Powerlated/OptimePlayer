@@ -46,8 +46,9 @@ pub struct OptimeApp {
 
     /// Resampling mode index: 0=Nearest, 1=Linear, 2=SincOutputNyquist, 3=SincSampleNyquist.
     resample_choice: usize,
-    /// Half-taps for the sinc kernel (zero-crossings).
-    sinc_half_taps: usize,
+    /// Total source-tap count for the sinc kernel (the kernel spans `sinc_taps` source samples,
+    /// i.e. `sinc_taps / 2` per side, regardless of the resampling ratio).
+    sinc_taps: usize,
 
     paused: bool,
     status: String,
@@ -88,7 +89,7 @@ impl OptimeApp {
             pure_tonic: 0,
             track_enables: [true; TRACK_COUNT],
             resample_choice: 0,
-            sinc_half_taps: 16,
+            sinc_taps: 32,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
             pending_file: Arc::new(Mutex::new(None)),
@@ -177,10 +178,10 @@ impl OptimeApp {
         let resample = match self.resample_choice {
             1 => ResampleMode::Linear,
             2 => ResampleMode::SincOutputNyquist {
-                half_taps: self.sinc_half_taps,
+                half_taps: (self.sinc_taps / 2).max(1),
             },
             3 => ResampleMode::SincSampleNyquist {
-                half_taps: self.sinc_half_taps,
+                half_taps: (self.sinc_taps / 2).max(1),
             },
             _ => ResampleMode::NearestNeighbor,
         };
@@ -508,13 +509,15 @@ impl eframe::App for OptimeApp {
                 let is_sinc = self.resample_choice >= 2;
                 ui.add_enabled_ui(is_sinc, |ui| {
                     ui.add(
-                        egui::Slider::new(&mut self.sinc_half_taps, 2..=64)
-                            .text("Sinc taps (zero-crossings)")
+                        egui::Slider::new(&mut self.sinc_taps, 4..=128)
+                            .step_by(2.0)
+                            .text("Sinc taps")
                             .logarithmic(false),
                     )
                     .on_hover_text(
-                        "More zero-crossings → sharper cutoff and better stopband \
-                         rejection, at higher CPU cost.",
+                        "Number of source samples the kernel spans — fixed regardless of pitch, \
+                         so CPU cost is constant per voice. More taps → sharper cutoff and better \
+                         stopband rejection, at higher CPU cost.",
                     );
                 });
                 ui.separator();
