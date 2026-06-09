@@ -4,8 +4,12 @@
 use std::sync::Arc;
 
 use crate::controller::SynthConfig;
+use crate::dsp::BiquadFilter;
 use crate::sample::Sample;
 use crate::tuning::{midi_note_to_hz, TuningSystem};
+
+/// Q for the bass-mono crossover low-pass (Butterworth).
+const CROSSOVER_Q: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
 /// A fixed-length delay line used to widen the stereo image (Haas effect).
 #[derive(Debug, Clone)]
@@ -158,6 +162,10 @@ pub struct SampleSynthesizer {
     pan: f64,
     delay_line_l: DelayLine,
     delay_line_r: DelayLine,
+    /// Low-pass that extracts the centered ("mono") bass band for the crossover.
+    crossover_lp: BiquadFilter,
+    /// The cutoff the crossover is currently configured for (so we only recompute on change).
+    crossover_freq: f64,
     finetune: f64,
 }
 
@@ -169,6 +177,7 @@ impl SampleSynthesizer {
             .map(|_| SampleInstrument::new(sample_rate, empty.clone()))
             .collect();
         let delay_len = (sample_rate * 0.1).round() as usize;
+        let crossover_freq = 200.0;
         Self {
             sample_rate,
             instrs,
@@ -180,6 +189,8 @@ impl SampleSynthesizer {
             pan: 0.5,
             delay_line_l: DelayLine::new(delay_len),
             delay_line_r: DelayLine::new(delay_len),
+            crossover_lp: BiquadFilter::low_pass(2, sample_rate, crossover_freq, CROSSOVER_Q),
+            crossover_freq,
             finetune: 0.0,
         }
     }
@@ -245,21 +256,42 @@ impl SampleSynthesizer {
 
     /// Advances all active voices by one sample and mixes them into `val_l`/`val_r`.
     pub fn next_sample(&mut self, config: &SynthConfig) {
-        let mut val_l = 0.0;
-        let mut val_r = 0.0;
+        let mut mono = 0.0;
         for &i in &self.active_instrs {
             self.instrs[i].advance();
-            let output = self.instrs[i].output;
-            val_l += output * (1.0 - self.pan);
-            val_r += output * self.pan;
+            mono += self.instrs[i].output;
         }
 
-        if config.stereo_separation {
-            self.val_l = self.delay_line_l.process(val_l) * self.volume;
-            self.val_r = self.delay_line_r.process(val_r) * self.volume;
+        if !config.stereo_separation {
+            self.val_l = mono * (1.0 - self.pan) * self.volume;
+            self.val_r = mono * self.pan * self.volume;
+            return;
+        }
+
+        if config.bass_mono {
+            // Split into a centered low band and a widened high band via a complementary
+            // crossover (high = full - low). The bass stays glued to the center; only the highs
+            // are panned and Haas-delayed.
+            self.ensure_crossover(config.bass_mono_freq);
+            let lo = self.crossover_lp.transform(mono);
+            let hi = mono - lo;
+            let center = lo * 0.5;
+            let hi_l = self.delay_line_l.process(hi * (1.0 - self.pan));
+            let hi_r = self.delay_line_r.process(hi * self.pan);
+            self.val_l = (hi_l + center) * self.volume;
+            self.val_r = (hi_r + center) * self.volume;
         } else {
-            self.val_l = val_l * self.volume;
-            self.val_r = val_r * self.volume;
+            self.val_l = self.delay_line_l.process(mono * (1.0 - self.pan)) * self.volume;
+            self.val_r = self.delay_line_r.process(mono * self.pan) * self.volume;
+        }
+    }
+
+    /// Reconfigures the crossover low-pass if the cutoff changed.
+    fn ensure_crossover(&mut self, cutoff: f64) {
+        if cutoff != self.crossover_freq {
+            self.crossover_lp
+                .set_low_pass(self.sample_rate, cutoff, CROSSOVER_Q);
+            self.crossover_freq = cutoff;
         }
     }
 
@@ -293,5 +325,57 @@ impl SampleSynthesizer {
         self.delay_line_r.set_delay(delay_r);
         self.delay_line_r.gain = gain_r;
         self.pan = pan;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plays a constant-amplitude looping sample hard-left, settles, and returns `(val_l, val_r)`.
+    fn run_dc(config: &SynthConfig) -> (f64, f64) {
+        let sample_rate = 32768.0;
+        let mut synth = SampleSynthesizer::new(sample_rate, 16);
+        // DC sample so essentially all energy is in the low (bass) band.
+        let sample = Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
+        synth.play(sample, 69.0, 440.0, 1.0, 0, TuningSystem::Equal);
+        // Pan hard left.
+        synth.set_pan(0.0, config);
+        let mut last = (0.0, 0.0);
+        for _ in 0..8000 {
+            synth.next_sample(config);
+            last = (synth.val_l, synth.val_r);
+        }
+        last
+    }
+
+    #[test]
+    fn bass_mono_centers_low_frequencies() {
+        // With plain separation, a hard-left DC tone barely reaches the right channel.
+        let separated = SynthConfig {
+            stereo_separation: true,
+            bass_mono: false,
+            ..SynthConfig::default()
+        };
+        let (l, r) = run_dc(&separated);
+        assert!(
+            l.abs() > 0.1,
+            "left should carry the panned signal, got {l}"
+        );
+        assert!(r.abs() < 1e-3, "right should be nearly silent, got {r}");
+
+        // With bass-mono on, the (low-frequency) DC tone is glued to the center: equal L/R.
+        let glued = SynthConfig {
+            stereo_separation: true,
+            bass_mono: true,
+            bass_mono_freq: 200.0,
+            ..SynthConfig::default()
+        };
+        let (l, r) = run_dc(&glued);
+        assert!(
+            r.abs() > 0.1,
+            "right should now carry centered bass, got {r}"
+        );
+        assert!((l - r).abs() < 1e-6, "bass should be centered: {l} vs {r}");
     }
 }

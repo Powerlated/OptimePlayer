@@ -37,6 +37,8 @@ pub struct OptimeApp {
     // UI mirrors of [`SynthConfig`].
     stereo_separation: bool,
     force_stereo_separation: bool,
+    bass_mono: bool,
+    bass_mono_freq: f32,
     tuning_choice: usize,
     pure_tonic: i32,
     track_enables: [bool; TRACK_COUNT],
@@ -69,6 +71,8 @@ impl OptimeApp {
             current_song: None,
             stereo_separation: true,
             force_stereo_separation: true,
+            bass_mono: true,
+            bass_mono_freq: 200.0,
             tuning_choice: 0,
             pure_tonic: 0,
             track_enables: [true; TRACK_COUNT],
@@ -158,6 +162,8 @@ impl OptimeApp {
         SynthConfig {
             stereo_separation: self.stereo_separation,
             force_stereo_separation: self.force_stereo_separation,
+            bass_mono: self.bass_mono,
+            bass_mono_freq: self.bass_mono_freq as f64,
             tuning,
             track_enables: self.track_enables,
         }
@@ -413,7 +419,21 @@ impl eframe::App for OptimeApp {
             .show(ctx, |ui| {
                 ui.heading("Settings");
                 ui.checkbox(&mut self.stereo_separation, "Stereo separation");
-                ui.checkbox(&mut self.force_stereo_separation, "Force stereo separation");
+                ui.add_enabled_ui(self.stereo_separation, |ui| {
+                    ui.checkbox(&mut self.force_stereo_separation, "Force stereo separation");
+                    ui.checkbox(&mut self.bass_mono, "Keep bass centered");
+                    ui.add_enabled(
+                        self.bass_mono,
+                        egui::Slider::new(&mut self.bass_mono_freq, 40.0..=800.0)
+                            .text("Bass crossover")
+                            .suffix(" Hz")
+                            .logarithmic(true),
+                    )
+                    .on_hover_text(
+                        "Frequencies below this stay glued to the center; \
+                         mids and treble are widened.",
+                    );
+                });
                 ui.separator();
                 ui.label("Tuning system");
                 egui::ComboBox::from_id_salt("tuning")
