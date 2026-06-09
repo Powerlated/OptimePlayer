@@ -569,7 +569,13 @@ impl eframe::App for OptimeApp {
             });
         });
 
-        // Keep animating the visualizer.
+        // Keep animating the visualizer. On the web, cpal generates audio on the *main thread*
+        // (ScriptProcessorNode), so an unthrottled full-rate repaint starves the audio callback
+        // and causes dropouts. Cap the visualizer to ~30 fps there to leave the main thread for
+        // audio; native keeps the audio callback on its own thread, so repaint as fast as it can.
+        #[cfg(target_arch = "wasm32")]
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        #[cfg(not(target_arch = "wasm32"))]
         ctx.request_repaint();
     }
 }

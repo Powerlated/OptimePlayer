@@ -77,7 +77,7 @@ struct ActiveNote {
     adsr_timer: i32,
     from_keyboard: bool,
     lfo_counter: i32,
-    lfo_delay_counter: i32,
+    /// Shared LFO delay/phase counter (pokediamond's single `SNDLfo::delayCounter`).
     delay_counter: i32,
     // Resolved instrument coefficients for this note's region.
     f_record: u8,
@@ -249,7 +249,16 @@ impl Controller {
         self.bpm_timer += self.sequence.tracks[0].bpm;
         while self.bpm_timer >= 240 {
             self.bpm_timer -= 240;
-            self.sequence.tick();
+
+            // Report which tracks still have sounding/releasing channels, so the sequence can
+            // honor pokediamond's `noteFinishWait` (stall after a zero-duration note).
+            let mut track_has_channels = [false; TRACK_COUNT];
+            for note in &self.active_notes {
+                if let Some(slot) = track_has_channels.get_mut(note.track_num) {
+                    *slot = true;
+                }
+            }
+            self.sequence.tick(&track_has_channels);
 
             while let Some(msg) = self.sequence.message_buffer.pop() {
                 self.handle_message(msg, config);
@@ -322,42 +331,24 @@ impl Controller {
             track.lfo_range,
         );
 
-        let mut lfo_value: i64 = if lfo_depth == 0 || entry.lfo_delay_counter < lfo_delay {
-            0
-        } else {
-            i64::from(snd_sin_idx(entry.lfo_counter >> 8))
-                * i64::from(lfo_depth)
-                * i64::from(lfo_range)
+        // Whether the LFO delay has elapsed (the phase advances this tick). pokediamond gates both
+        // the value and the phase on a single `delayCounter`; see [`lfo_tick`].
+        let delay_elapsed = entry.delay_counter >= lfo_delay;
+        let params = LfoParams {
+            depth: lfo_depth,
+            delay: lfo_delay,
+            lfo_type,
+            speed: lfo_speed,
+            range: lfo_range,
         };
+        let lfo_value = lfo_tick(&params, &mut entry.lfo_counter, &mut entry.delay_counter);
 
-        if lfo_value != 0 {
-            match lfo_type {
-                lfo_type::VOLUME => lfo_value *= 60,
-                lfo_type::PITCH | lfo_type::PAN => lfo_value <<= 6,
-                _ => {}
-            }
-            lfo_value >>= 14;
-        }
-
-        if entry.delay_counter < lfo_delay {
-            entry.delay_counter += 1;
-        } else {
-            let mut tmp = entry.lfo_counter;
-            tmp += lfo_speed << 6;
-            tmp >>= 8;
-            while tmp >= 0x80 {
-                tmp -= 0x80;
-            }
-            entry.lfo_counter += lfo_speed << 6;
-            entry.lfo_counter &= 0xFF;
-            entry.lfo_counter |= tmp << 8;
-
-            if lfo_value != 0 && lfo_type == lfo_type::PITCH {
-                // LFO value is in 1/64ths of a semitone.
-                self.synthesizers[t]
-                    .instr_mut(entry.synth_instr_index)
-                    .set_finetune_lfo(lfo_value as f64 / 64.0, config.tuning);
-            }
+        // Pitch modulation is applied only on ticks where the phase advances (delay elapsed),
+        // matching the original; the value is in 1/64ths of a semitone.
+        if delay_elapsed && lfo_value != 0 && lfo_type == lfo_type::PITCH {
+            self.synthesizers[t]
+                .instr_mut(entry.synth_instr_index)
+                .set_finetune_lfo(lfo_value as f64 / 64.0, config.tuning);
         }
     }
 
@@ -425,8 +416,9 @@ impl Controller {
             }
             MessageType::PitchBend => {
                 let track = &self.sequence.tracks[msg.track_num];
-                // Sign-extend the low 7 bits, scale by half the bend range, in 1/64 semitones.
-                let pitch_bend = track.pitch_bend.wrapping_shl(25) >> 25;
+                // `pitch_bend` is already a signed byte (pokediamond `par._s8`, set by `0xC4`);
+                // scale by half the bend range, in 1/64 semitones.
+                let pitch_bend = track.pitch_bend;
                 let finetune = (pitch_bend as f64) * (track.pitch_bend_range as f64 / 2.0) / 64.0;
                 self.synthesizers[msg.track_num].set_finetune(finetune, config.tuning);
             }
@@ -511,7 +503,6 @@ impl Controller {
             adsr_timer: -92544,
             from_keyboard: msg.from_keyboard,
             lfo_counter: 0,
-            lfo_delay_counter: 0,
             delay_counter: 0,
             f_record,
             attack_coefficient,
@@ -583,6 +574,56 @@ pub fn calc_channel_volume(velocity: i32, adsr_timer: i32) -> f64 {
     result / 127.0
 }
 
+/// LFO parameters for one tick (mirrors the relevant fields of pokediamond's `SNDLfoParam`).
+#[derive(Debug)]
+struct LfoParams {
+    depth: i32,
+    delay: i32,
+    lfo_type: i32,
+    speed: i32,
+    range: i32,
+}
+
+/// Advances one LFO tick exactly as pokediamond's `SND_GetLfoValue` + `SND_UpdateLfo`.
+///
+/// A single `delay_counter` gates both the value and the phase: while it is below `delay` the
+/// returned value is 0 and the phase (`counter`) is frozen while `delay_counter` counts up; once
+/// the delay elapses the value engages and `counter` advances by `speed << 6` per tick. Returns
+/// the modulation value after the per-target scaling (`*60` for volume, `<<6` for pitch/pan) and
+/// the final `>> 14`.
+fn lfo_tick(p: &LfoParams, counter: &mut i32, delay_counter: &mut i32) -> i64 {
+    let mut value: i64 = if p.depth == 0 || *delay_counter < p.delay {
+        0
+    } else {
+        i64::from(snd_sin_idx(*counter >> 8)) * i64::from(p.depth) * i64::from(p.range)
+    };
+
+    if value != 0 {
+        match p.lfo_type {
+            lfo_type::VOLUME => value *= 60,
+            lfo_type::PITCH | lfo_type::PAN => value <<= 6,
+            _ => {}
+        }
+        value >>= 14;
+    }
+
+    if *delay_counter < p.delay {
+        *delay_counter += 1;
+    } else {
+        let mut tmp = *counter;
+        tmp += p.speed << 6;
+        tmp >>= 8;
+        while tmp >= 0x80 {
+            tmp -= 0x80;
+        }
+        *counter += p.speed << 6;
+        *counter &= 0xFF;
+        *counter |= tmp << 8;
+    }
+
+    value
+}
+
 /// A parallel sequence runner used to drive look-ahead visualizers without producing audio.
 ///
 /// It runs the same SSEQ as [`Controller`] but only tracks which notes are on, and is advanced
@@ -619,7 +660,9 @@ impl FsVisController {
         self.bpm_timer += self.sequence.tracks[0].bpm;
         while self.bpm_timer >= 240 {
             self.bpm_timer -= 240;
-            self.sequence.tick();
+            // The look-ahead visualizer has no channel state; pass all-false so zero-duration
+            // notes advance immediately rather than stalling.
+            self.sequence.tick(&[false; TRACK_COUNT]);
 
             while let Some(mut msg) = self.sequence.message_buffer.pop() {
                 if msg.msg_type == MessageType::PlayNote {
@@ -630,6 +673,164 @@ impl FsVisController {
                     self.active_notes.insert(msg);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reference implementation of pokediamond's `SND_GetLfoValue` + `SND_UpdateLfo` for one
+    /// tick, used as the oracle for [`lfo_tick`]. Transcribed directly from `SND_exChannel.c`.
+    fn pokediamond_lfo(
+        p: &LfoParams,
+        counter: &mut i32,
+        delay_counter: &mut i32,
+        target_scale: bool,
+    ) -> i64 {
+        // SND_GetLfoValue
+        let mut value: i64 = if p.depth == 0 || *delay_counter < p.delay {
+            0
+        } else {
+            i64::from(snd_sin_idx((*counter as u32 >> 8) as i32))
+                * i64::from(p.depth)
+                * i64::from(p.range)
+        };
+        if target_scale && value != 0 {
+            match p.lfo_type {
+                lfo_type::VOLUME => value *= 60,
+                lfo_type::PITCH | lfo_type::PAN => value <<= 6,
+                _ => {}
+            }
+            value >>= 14;
+        }
+        // SND_UpdateLfo
+        if *delay_counter < p.delay {
+            *delay_counter += 1;
+        } else {
+            let mut tmp = *counter;
+            tmp += p.speed << 6;
+            tmp >>= 8;
+            while tmp >= 0x80 {
+                tmp -= 0x80;
+            }
+            *counter += p.speed << 6;
+            *counter &= 0xFF;
+            *counter |= tmp << 8;
+        }
+        value
+    }
+
+    #[test]
+    fn lfo_tick_matches_pokediamond_reference() {
+        // Sweep a representative parameter grid and assert lfo_tick tracks the reference
+        // SND_GetLfoValue/SND_UpdateLfo pair tick-for-tick (value, phase, and delay counter).
+        for &lfo_type in &[lfo_type::VOLUME, lfo_type::PITCH, lfo_type::PAN] {
+            for &depth in &[0, 1, 64, 127] {
+                for &delay in &[0, 1, 5] {
+                    for &speed in &[1, 16, 64] {
+                        let p = LfoParams {
+                            depth,
+                            delay,
+                            lfo_type,
+                            speed,
+                            range: 1,
+                        };
+                        let (mut c1, mut d1) = (0i32, 0i32);
+                        let (mut c2, mut d2) = (0i32, 0i32);
+                        for _ in 0..40 {
+                            let got = lfo_tick(&p, &mut c1, &mut d1);
+                            let want = pokediamond_lfo(&p, &mut c2, &mut d2, true);
+                            assert_eq!(got, want, "value mismatch ({p:?})");
+                            assert_eq!(c1, c2, "phase counter mismatch");
+                            assert_eq!(d1, d2, "delay counter mismatch");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_lfo_engages_after_delay() {
+        // The bug this fixes: a non-zero LFO delay must suppress modulation for exactly `delay`
+        // ticks and then engage (rather than being suppressed forever).
+        let p = LfoParams {
+            depth: 127,
+            delay: 4,
+            lfo_type: lfo_type::PITCH,
+            speed: 16,
+            range: 1,
+        };
+        let (mut counter, mut delay_counter) = (0i32, 0i32);
+        // Advance the phase a bit so a sine value is available once the delay elapses. With the
+        // phase frozen during the delay, snd_sin_idx(0) == 0, so we seed a non-zero phase to make
+        // the "engages" assertion meaningful: instead, check the counter actually advances only
+        // after the delay, and that values are zero throughout the delay window.
+        for tick in 0..p.delay {
+            let v = lfo_tick(&p, &mut counter, &mut delay_counter);
+            assert_eq!(v, 0, "tick {tick}: value must be 0 during the delay window");
+            assert_eq!(
+                counter, 0,
+                "tick {tick}: phase must stay frozen during the delay"
+            );
+            assert_eq!(
+                delay_counter,
+                tick + 1,
+                "tick {tick}: delay counter must count up"
+            );
+        }
+        // Delay has now elapsed: the phase begins advancing.
+        assert_eq!(delay_counter, p.delay);
+        lfo_tick(&p, &mut counter, &mut delay_counter);
+        assert_ne!(counter, 0, "phase must advance once the delay has elapsed");
+        // After enough ticks for the phase to leave the sin(0)=0 point, a non-zero modulation
+        // value must appear — i.e. the LFO actually engages rather than staying silent forever.
+        let mut saw_nonzero = false;
+        for _ in 0..64 {
+            if lfo_tick(&p, &mut counter, &mut delay_counter) != 0 {
+                saw_nonzero = true;
+                break;
+            }
+        }
+        assert!(saw_nonzero, "delayed LFO never produced a non-zero value");
+    }
+
+    #[test]
+    #[ignore = "diagnostic: prints opcodes used by the golden song"]
+    fn scan_golden_opcodes() {
+        use std::sync::atomic::Ordering;
+        let rom = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../demos/super-mario-64-ds.sdat"),
+        )
+        .unwrap();
+        let sdats = crate::Sdat::load_all(&rom);
+        let mut c = Controller::new(32768.0, &sdats[0], 0).unwrap();
+        let cfg = SynthConfig::default();
+        for _ in 0..(32768 * 8) {
+            c.next_sample(&cfg);
+        }
+        let seen: Vec<String> = (0u16..256)
+            .filter(|&op| crate::sequence::OPCODE_SEEN[op as usize].load(Ordering::Relaxed))
+            .map(|op| format!("{op:#04X}"))
+            .collect();
+        println!("opcodes used: {}", seen.join(" "));
+    }
+
+    #[test]
+    fn zero_depth_lfo_is_always_silent() {
+        let p = LfoParams {
+            depth: 0,
+            delay: 0,
+            lfo_type: lfo_type::PITCH,
+            speed: 16,
+            range: 1,
+        };
+        let (mut counter, mut delay_counter) = (0i32, 0i32);
+        for _ in 0..32 {
+            assert_eq!(lfo_tick(&p, &mut counter, &mut delay_counter), 0);
         }
     }
 }
