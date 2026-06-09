@@ -80,7 +80,6 @@ struct ActiveNote {
     /// Shared LFO delay/phase counter (pokediamond's single `SNDLfo::delayCounter`).
     delay_counter: i32,
     // Resolved instrument coefficients for this note's region.
-    f_record: u8,
     attack_coefficient: i32,
     decay_coefficient: i32,
     sustain_level: i32,
@@ -385,9 +384,12 @@ impl Controller {
                     calc_channel_volume(entry.velocity, entry.adsr_timer);
             }
             AdsrState::Release => {
-                if entry.adsr_timer <= -92544 || entry.f_record == 0x2
-                /* PSG pulse */
-                {
+                // pokediamond cuts a channel only once its release envelope reaches the floor
+                // (`SND_ChannelMain`: `envStatus == RELEASE && vol <= -723`, i.e. attenuation
+                // <= -92544), uniformly for every channel type. The original OptimePlayer also
+                // force-cut PSG-pulse voices immediately on release, which has no basis in
+                // `SND_exChannel.c` and robs them of their release tail — so we don't.
+                if entry.adsr_timer <= -92544 {
                     self.synthesizers[t].cut_instrument(si);
                     *index_to_delete = Some(index);
                     self.notes_on[t][entry.midi_note as usize] = 0;
@@ -454,7 +456,6 @@ impl Controller {
         let archive_index = region.swar_info_id as usize;
         let sample_id = region.swav_info_id as usize;
         let note_number = region.note_number;
-        let f_record = instrument.f_record;
         let attack_coefficient = region.attack_coefficient;
         let decay_coefficient = region.decay_coefficient;
         let sustain_level = region.sustain_level;
@@ -507,7 +508,6 @@ impl Controller {
             from_keyboard: msg.from_keyboard,
             lfo_counter: 0,
             delay_counter: 0,
-            f_record,
             attack_coefficient,
             decay_coefficient,
             sustain_level,
