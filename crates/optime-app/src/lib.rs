@@ -4,6 +4,7 @@
 mod app;
 mod audio;
 mod filter_plot;
+mod piano_roll;
 mod player;
 mod visualizer;
 mod wav;

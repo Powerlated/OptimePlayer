@@ -2,8 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use optime_core::{Controller, ResampleMode, Sdat, SynthConfig, TuningSystem};
+use optime_core::{Controller, FsVisController, ResampleMode, Sdat, SynthConfig, TuningSystem};
 
+use crate::piano_roll::PianoRoll;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
 
@@ -12,6 +13,15 @@ struct Song {
     sdat_index: usize,
     sseq_id: u32,
     label: String,
+}
+
+/// Which visualizer the central panel shows.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum VisTab {
+    /// The streaming FL-Studio-style piano roll.
+    PianoRoll,
+    /// The legacy per-track keyboard grid (track enables + live-input selection).
+    Tracks,
 }
 
 /// Demo SDATs available to load. Native reads from `demos/`; web fetches them at runtime.
@@ -62,6 +72,13 @@ pub struct OptimeApp {
     crossover_plot_open: bool,
     /// Whether the sinc-resampler analysis popup is open.
     sinc_plot_open: bool,
+
+    /// Which visualizer tab is active.
+    vis_tab: VisTab,
+    /// Streaming piano-roll state (note timeline, smoothed scroll clock).
+    piano_roll: PianoRoll,
+    /// Parallel look-ahead sequence runner feeding upcoming notes to the piano roll.
+    look_ahead: Option<FsVisController>,
 }
 
 impl OptimeApp {
@@ -96,6 +113,9 @@ impl OptimeApp {
             held_notes: [false; 128],
             crossover_plot_open: false,
             sinc_plot_open: false,
+            vis_tab: VisTab::PianoRoll,
+            piano_roll: PianoRoll::default(),
+            look_ahead: None,
         };
         app.try_load_first_demo();
         app
@@ -233,6 +253,9 @@ impl OptimeApp {
             Some(controller) => {
                 self.current_song = Some(index);
                 self.paused = false;
+                self.piano_roll.clear();
+                // Parallel look-ahead runner; we drive it forward ourselves each frame.
+                self.look_ahead = FsVisController::new(sdat, song.sseq_id, 0);
                 self.status = format!("Playing: {}", song.label);
                 if let Some(audio) = &self.audio {
                     if let Ok(mut st) = audio.shared.lock() {
@@ -338,6 +361,8 @@ impl OptimeApp {
         if let Some(controller) = &mut st.controller {
             snap.active = true;
             snap.active_track = controller.active_keyboard_track_num;
+            snap.ticks = controller.sequence.ticks_elapsed;
+            snap.bpm = controller.sequence.tracks[0].bpm;
             for t in 0..TRACK_COUNT {
                 for n in 0..128 {
                     snap.notes_on[t][n] = controller.notes_on[t][n] != 0;
@@ -555,21 +580,53 @@ impl eframe::App for OptimeApp {
             crate::filter_plot::show_sinc_window(ctx, &mut self.sinc_plot_open, resample_mode);
         }
 
+        // Advance the piano roll's smoothed playhead (frozen when paused / no song), then drive
+        // the look-ahead runner so it stays buffered ahead of the playhead, and pull its notes.
+        let playing = snap.active && !self.paused;
+        let dt = ctx.input(|i| i.stable_dt) as f64;
+        self.piano_roll.advance(&snap, dt, playing);
+        if let Some(look) = &mut self.look_ahead {
+            if playing {
+                let target = self.piano_roll.display_tick().ceil() as u32
+                    + crate::piano_roll::RUN_AHEAD_TICKS;
+                // Bounded catch-up so a stalled/zero-BPM sequence can't spin forever.
+                let mut guard = 0u32;
+                while look.sequence.ticks_elapsed < target && guard < 200_000 {
+                    look.tick();
+                    guard += 1;
+                }
+            }
+            self.piano_roll.ingest(look);
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::both().show(ui, |ui| {
-                let mut active_track = snap.active_track;
-                visualizer::draw(ui, &snap, &mut self.track_enables, &mut active_track);
-                // Apply any track-selection change back to the controller.
-                if active_track != snap.active_track {
-                    if let Some(audio) = &self.audio {
-                        if let Ok(mut st) = audio.shared.lock() {
-                            if let Some(c) = &mut st.controller {
-                                c.active_keyboard_track_num = active_track;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.vis_tab, VisTab::PianoRoll, "🎹 Piano Roll");
+                ui.selectable_value(&mut self.vis_tab, VisTab::Tracks, "🎚 Tracks");
+            });
+            ui.separator();
+
+            match self.vis_tab {
+                VisTab::PianoRoll => {
+                    self.piano_roll.draw(ui, snap.active);
+                }
+                VisTab::Tracks => {
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        let mut active_track = snap.active_track;
+                        visualizer::draw(ui, &snap, &mut self.track_enables, &mut active_track);
+                        // Apply any track-selection change back to the controller.
+                        if active_track != snap.active_track {
+                            if let Some(audio) = &self.audio {
+                                if let Ok(mut st) = audio.shared.lock() {
+                                    if let Some(c) = &mut st.controller {
+                                        c.active_keyboard_track_num = active_track;
+                                    }
+                                }
                             }
                         }
-                    }
+                    });
                 }
-            });
+            }
         });
 
         // Keep animating the visualizer. On the web, cpal generates audio on the *main thread*
