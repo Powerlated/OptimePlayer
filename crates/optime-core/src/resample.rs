@@ -30,8 +30,10 @@
 use core::f64::consts::PI;
 use std::sync::OnceLock;
 
-/// Samples per unit `τ` in the oversampled sinc tables.
-const OVERSAMPLE: usize = 4096;
+/// Samples per unit `τ` in the oversampled sinc tables. 512 keeps the (linearly interpolated)
+/// kernel error near 5e-6 while shrinking each table to ~256 KB so the strided gather stays cache-
+/// resident — far cheaper than the original 4096 (which spilled L2 and cost ~40% in crunch mode).
+const OVERSAMPLE: usize = 512;
 /// Maximum tabulated `τ = 2·fc·d`. For the hot path (`fc ≤ 0.5`, `d ≤ P ≤ 64`) this bounds `τ`.
 /// Beyond it (only reachable on cheap step-mode upsampling) the kernel is evaluated directly.
 const TAU_MAX: usize = 64;
