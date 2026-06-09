@@ -3,19 +3,17 @@
 //! The 88-key piano keyboard is fixed on the **left**; pitch increases upward, one semitone per
 //! lane. A stationary **playhead cursor** sits a fixed fraction in from the keyboard. Notes are
 //! laid out along a tick timeline and scroll right→left *through* the cursor: notes to the right
-//! of the cursor are upcoming, notes to the left have already played. A note's key lights as it
-//! crosses the cursor — exactly when it sounds.
+//! of the cursor are upcoming, notes to the left have already played. A note's key lights and the
+//! bar flares as it crosses the cursor — exactly when it sounds.
 //!
-//! Each note is drawn as a **ribbon** whose vertical thickness tracks its volume envelope
-//! (velocity-scaled attack / sustain / release) and whose centerline bends with pitch-bend over
-//! time. Both the note timeline and the pitch-bend timeline come from the engine's look-ahead
-//! [`FsVisController`]. The horizontal scale is in sequence *ticks*, so scroll speed tracks tempo.
+//! Future notes come from the engine's look-ahead [`FsVisController`], whose note buffer this
+//! module ingests each frame. The horizontal scale is in sequence *ticks*, so the scroll speed
+//! tracks tempo automatically.
 //!
 //! All rendering is isolated here so the draw layer can later be swapped for a `wgpu` paint
-//! callback without touching the app.
+//! callback (true shader bloom / particles) without touching the app.
 
-use egui::epaint::{Vertex, WHITE_UV};
-use egui::{Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke};
+use egui::{Color32, Pos2, Rect, Sense, Stroke};
 
 use optime_core::FsVisController;
 
@@ -35,20 +33,13 @@ const CURSOR_FRAC: f32 = 0.22;
 pub const RUN_AHEAD_TICKS: u32 = 560;
 /// Spacing of the scrolling vertical time grid, in ticks.
 const GRID_TICKS: f64 = 96.0;
-/// Minimum gate length so zero/short-duration notes are still visible.
+/// Minimum bar length so zero/short-duration notes are still visible as they cross.
 const MIN_NOTE_TICKS: f64 = 24.0;
 /// Width of the vertical keyboard, in points.
 const KEYBOARD_W: f32 = 40.0;
 
-/// Stylized volume-envelope shape, in ticks. (Per-instrument ADSR isn't available to the
-/// look-ahead, so this is a generic illustrative envelope scaled by note velocity.)
-const ATTACK_TICKS: f64 = 5.0;
-const RELEASE_TICKS: f64 = 40.0;
-
-/// Pixel step when tessellating a note ribbon along its length.
-const RIBBON_STEP: f32 = 4.0;
-
-/// Sequence ticks per second per unit BPM: `(33_513_982 / (64 * 2728)) / 240`.
+/// Sequence ticks per second per unit BPM: `DS_CLOCK_RATE / CYCLES_PER_TICK / 240`.
+/// `(33_513_982 / (64 * 2728)) / 240`.
 const TICK_RATE_PER_BPM: f64 = 0.799_837;
 
 /// `midi % 12` is a black key. Index 0 == C.
@@ -56,25 +47,21 @@ const IS_BLACK: [bool; 12] = [
     false, true, false, true, false, false, true, false, true, false, true, false,
 ];
 
-/// One note on the timeline (start/end in sequence ticks; velocity 0..1).
+/// One note on the timeline (start/end in sequence ticks).
 struct NoteEvent {
     track: usize,
     pitch: u8,
     start: f64,
-    /// Gate end (note-off); the ribbon extends a release tail past this.
     end: f64,
-    velocity: f32,
 }
 
-/// Piano-roll renderer: owns the visible note + pitch-bend timelines and a smoothed playhead.
+/// Piano-roll renderer: owns the visible note list and a smoothed playhead clock.
 #[derive(Default)]
 pub struct PianoRoll {
     notes: Vec<NoteEvent>,
-    /// Per-track pitch-bend timeline, `(tick, semitones)`, chronological.
-    bends: Vec<Vec<(f64, f32)>>,
     /// Wall-clock-smoothed playhead position, in ticks (drives the scroll).
     display_tick: f64,
-    /// Whether anything has been ingested yet (first frame snaps to the audio position).
+    /// Whether anything has been ingested yet (so the first frame snaps to the audio position).
     primed: bool,
 }
 
@@ -82,7 +69,6 @@ impl PianoRoll {
     /// Resets the roll for a new song.
     pub fn clear(&mut self) {
         self.notes.clear();
-        self.bends.clear();
         self.display_tick = 0.0;
         self.primed = false;
     }
@@ -118,7 +104,7 @@ impl PianoRoll {
         }
     }
 
-    /// Rebuilds the note and pitch-bend timelines from the look-ahead controller's buffers.
+    /// Rebuilds the note list from the look-ahead controller's buffer.
     pub fn ingest(&mut self, look: &FsVisController) {
         self.notes.clear();
         let buf = &look.active_notes;
@@ -135,35 +121,7 @@ impl PianoRoll {
                 pitch: pitch as u8,
                 start,
                 end,
-                velocity: (m.param1.clamp(0, 127) as f32) / 127.0,
             });
-        }
-
-        // Pitch-bend timeline, bucketed per track (events arrive chronologically).
-        self.bends.clear();
-        self.bends.resize_with(TRACK_COUNT, Vec::new);
-        let pb = &look.pitch_bends;
-        for i in 0..pb.entries() {
-            let Some(e) = pb.peek(i) else { continue };
-            if let Some(v) = self.bends.get_mut(e.track) {
-                v.push((e.timestamp as f64, e.semitones));
-            }
-        }
-    }
-
-    /// Bend in semitones for `track` at `tick` (the most recent event at or before `tick`).
-    fn bend_at(&self, track: usize, tick: f64) -> f32 {
-        let Some(v) = self.bends.get(track) else {
-            return 0.0;
-        };
-        if v.is_empty() {
-            return 0.0;
-        }
-        let idx = v.partition_point(|&(t, _)| t <= tick);
-        if idx == 0 {
-            0.0
-        } else {
-            v[idx - 1].1
         }
     }
 
@@ -175,7 +133,10 @@ impl PianoRoll {
 
         painter.rect_filled(rect, 0.0, Color32::from_rgb(0x0c, 0x0e, 0x14));
 
-        let roll = Rect::from_min_max(Pos2::new(rect.min.x + KEYBOARD_W, rect.min.y), rect.max);
+        let roll = Rect::from_min_max(
+            Pos2::new(rect.min.x + KEYBOARD_W, rect.min.y),
+            rect.max,
+        );
         let lane_h = roll.height() / LANES as f32;
         let cursor_x = roll.min.x + roll.width() * CURSOR_FRAC;
         let ppt = roll.width() as f64 / WINDOW_TICKS; // points per tick
@@ -187,15 +148,15 @@ impl PianoRoll {
         self.draw_lanes(&painter, roll, lane_h);
         self.draw_grid(&painter, roll, &xt);
 
-        // Which pitches are under the cursor (for key lighting).
+        // Which pitches are currently under the cursor (for key lighting + lane glow).
         let mut lit: [Option<usize>; 128] = [None; 128];
         for n in &self.notes {
             if n.start <= self.display_tick && self.display_tick <= n.end {
                 lit[n.pitch as usize] = Some(n.track);
             }
         }
-
-        self.draw_notes(&painter, roll, lane_h, cursor_x, ppt, dim);
+        self.draw_playing_lanes(&painter, roll, lane_h, cursor_x, &lit, dim);
+        self.draw_notes(&painter, roll, lane_h, cursor_x, &xt, dim);
         self.draw_cursor(&painter, roll, cursor_x);
         self.draw_keyboard(&painter, rect, roll, lane_h, &lit, dim);
     }
@@ -241,90 +202,97 @@ impl PianoRoll {
         }
     }
 
-    /// The note ribbons: thickness from the volume envelope, centerline bent by pitch-bend.
+    /// Faint full-lane glow from keyboard to cursor for pitches currently sounding.
+    fn draw_playing_lanes(
+        &self,
+        painter: &egui::Painter,
+        roll: Rect,
+        lane_h: f32,
+        cursor_x: f32,
+        lit: &[Option<usize>; 128],
+        dim: f32,
+    ) {
+        for midi in MIDI_LO..=MIDI_HI {
+            if let Some(track) = lit[midi as usize] {
+                let (top, bot) = Self::lane_y(roll, lane_h, midi);
+                let r = Rect::from_min_max(Pos2::new(roll.min.x, top), Pos2::new(cursor_x, bot));
+                painter.rect_filled(r, 0.0, scale_alpha(track_color(track), 0.12 * dim));
+            }
+        }
+    }
+
+    /// The note bars, with layered glow and a flare while crossing the cursor.
     fn draw_notes(
         &self,
         painter: &egui::Painter,
         roll: Rect,
         lane_h: f32,
         cursor_x: f32,
-        ppt: f64,
+        xt: &impl Fn(f64) -> f32,
         dim: f32,
     ) {
-        let xt = |tick: f64| cursor_x + ((tick - self.display_tick) * ppt) as f32;
-        let half_max = lane_h * 0.5; // a full-velocity sustain spans ~one lane.
-        let half_min = (lane_h * 0.12).max(0.6);
-
-        let mut mesh = Mesh::default();
         for n in &self.notes {
-            let gate = n.end - n.start;
-            let tail = n.end + RELEASE_TICKS;
             let x_start = xt(n.start);
-            let x_end = xt(tail);
+            let x_end = xt(n.end);
             if x_end < roll.min.x || x_start > roll.max.x {
                 continue;
             }
-            let lo = x_start.max(roll.min.x);
-            let hi = x_end.min(roll.max.x);
-            if hi <= lo {
+            let x0 = x_start.max(roll.min.x);
+            let x1 = x_end.min(roll.max.x);
+            if x1 <= x0 {
                 continue;
             }
 
+            let (top, bot) = Self::lane_y(roll, lane_h, n.pitch);
+            let pad = (lane_h * 0.12).clamp(0.5, 2.0);
+            let bar = Rect::from_min_max(Pos2::new(x0, top + pad), Pos2::new(x1, bot - pad));
+
+            let playing = n.start <= self.display_tick && self.display_tick <= n.end;
             let base = track_color(n.track);
-            let (_, bot0) = Self::lane_y(roll, lane_h, n.pitch);
-            let lane_center = bot0 - lane_h * 0.5;
+            // Upcoming notes (fully right of the cursor) are slightly dimmer.
+            let a = if x_start > cursor_x { 0.7 } else { 1.0 } * dim;
+            let rounding = (bar.height() * 0.4).min(4.0);
 
-            // Sample the ribbon's centerline + half-thickness across its visible span.
-            let mut pts: Vec<(f32, f32, f32, bool)> = Vec::new(); // (x, center_y, half, playing)
-            let mut x = lo;
-            loop {
-                let sx = x.min(hi);
-                let tick = self.display_tick + (sx - cursor_x) as f64 / ppt;
-                let progress = tick - n.start;
-                let env = envelope(progress, gate);
-                let half = (half_min + (half_max - half_min) * n.velocity * env).max(0.4);
-                let bend = self.bend_at(n.track, tick);
-                let center = lane_center - bend * lane_h;
-                let playing = tick >= n.start && tick <= n.end;
-                pts.push((sx, center, half, playing));
-                if sx >= hi {
-                    break;
-                }
-                x += RIBBON_STEP;
-            }
+            // Glow halos.
+            painter.rect_filled(bar.expand(lane_h * 0.4), rounding + 3.0, scale_alpha(base, 0.10 * a));
+            painter.rect_filled(bar.expand(lane_h * 0.16), rounding + 2.0, scale_alpha(base, 0.22 * a));
 
-            // Emit quads between consecutive samples.
-            for w in pts.windows(2) {
-                let (x0, c0, h0, p0) = w[0];
-                let (x1, c1, h1, p1) = w[1];
-                let alpha = if (x0 + x1) * 0.5 > cursor_x { 0.72 } else { 1.0 } * dim;
-                let col = if p0 || p1 { lighten(base, 0.25) } else { base };
-                let col = scale_alpha(col, alpha);
-                push_quad(
-                    &mut mesh,
-                    Pos2::new(x0, c0 - h0),
-                    Pos2::new(x1, c1 - h1),
-                    Pos2::new(x1, c1 + h1),
-                    Pos2::new(x0, c0 + h0),
-                    col,
+            // Core bar.
+            let core = if playing { lighten(base, 0.35) } else { base };
+            painter.rect_filled(bar, rounding, scale_alpha(core, a));
+            // Glossy top highlight.
+            painter.rect_filled(
+                Rect::from_min_max(bar.min, Pos2::new(bar.max.x, bar.min.y + bar.height() * 0.4)),
+                rounding,
+                scale_alpha(lighten(core, 0.6), 0.5 * a),
+            );
+
+            // Bright flare at the cursor crossing.
+            if playing {
+                let fx = cursor_x.clamp(x0, x1);
+                let flare = Rect::from_min_max(
+                    Pos2::new((fx - 2.0).max(x0), top + pad),
+                    Pos2::new((fx + 2.0).min(x1), bot - pad),
                 );
+                painter.rect_filled(flare, 0.0, scale_alpha(Color32::WHITE, 0.85 * dim));
             }
-        }
-        if !mesh.is_empty() {
-            painter.add(Shape::mesh(mesh));
         }
     }
 
-    /// The stationary playhead cursor.
+    /// The stationary playhead cursor with a soft glow.
     fn draw_cursor(&self, painter: &egui::Painter, roll: Rect, cursor_x: f32) {
+        let glow = Rect::from_min_max(
+            Pos2::new(cursor_x - 3.0, roll.min.y),
+            Pos2::new(cursor_x + 3.0, roll.max.y),
+        );
+        painter.rect_filled(glow, 0.0, Color32::from_rgba_unmultiplied(0x6c, 0x7a, 0xff, 40));
         painter.line_segment(
             [Pos2::new(cursor_x, roll.min.y), Pos2::new(cursor_x, roll.max.y)],
-            Stroke::new(1.0, Color32::from_rgb(0x8a, 0x96, 0xff)),
+            Stroke::new(1.5, Color32::from_rgb(0x9a, 0xa6, 0xff)),
         );
     }
 
-    /// The vertical keyboard down the left edge: a solid white column with black keys overlaid,
-    /// lit per the cursor crossing.
+    /// The vertical keyboard down the left edge, lit per the cursor crossing.
     fn draw_keyboard(
         &self,
         painter: &egui::Painter,
@@ -335,70 +303,35 @@ impl PianoRoll {
         dim: f32,
     ) {
         let kb = Rect::from_min_max(rect.min, Pos2::new(rect.min.x + KEYBOARD_W, rect.max.y));
-        // Solid white column (the white keys), then per-key tint/black-key overlay.
-        painter.rect_filled(kb, 0.0, scale_alpha(Color32::from_rgb(0xd2, 0xd7, 0xe2), dim));
+        painter.rect_filled(kb, 0.0, Color32::from_rgb(0x05, 0x06, 0x0a));
 
-        let black_w = KEYBOARD_W * 0.62;
         for midi in MIDI_LO..=MIDI_HI {
             let (top, bot) = Self::lane_y(roll, lane_h, midi);
             let pc = (midi % 12) as usize;
             let black = IS_BLACK[pc];
             let on = lit[midi as usize].map(track_color);
 
-            if black {
-                // Black key: short bar anchored at the inner (right) edge facing the roll.
-                let key = Rect::from_min_max(Pos2::new(kb.max.x - black_w, top), Pos2::new(kb.max.x, bot));
-                let fill = match on {
-                    Some(c) => lighten(c, 0.1),
-                    None => Color32::from_rgb(0x12, 0x14, 0x1c),
-                };
-                painter.rect_filled(key, 0.0, scale_alpha(fill, dim));
+            // White keys span the full width; black keys are shorter, anchored at the inner
+            // (right) edge nearest the roll.
+            let w = if black { KEYBOARD_W * 0.62 } else { KEYBOARD_W };
+            let key = if black {
+                Rect::from_min_max(Pos2::new(kb.max.x - w, top), Pos2::new(kb.max.x, bot))
             } else {
-                // White key: tint the whole lane if lit; always draw a faint separator line.
-                if let Some(c) = on {
-                    let key = Rect::from_min_max(Pos2::new(kb.min.x, top), Pos2::new(kb.max.x, bot));
-                    painter.rect_filled(key, 0.0, scale_alpha(lighten(c, 0.25), dim));
-                }
-                painter.line_segment(
-                    [Pos2::new(kb.min.x, bot), Pos2::new(kb.max.x, bot)],
-                    Stroke::new(0.5, Color32::from_rgb(0x9a, 0x9f, 0xab)),
-                );
-            }
+                Rect::from_min_max(Pos2::new(kb.min.x, top), Pos2::new(kb.min.x + w, bot))
+            };
+            let rest = if black {
+                Color32::from_rgb(0x12, 0x14, 0x1c)
+            } else {
+                Color32::from_rgb(0xcf, 0xd4, 0xe0)
+            };
+            let fill = match on {
+                Some(c) => scale_alpha(lighten(c, 0.2), dim),
+                None => scale_alpha(rest, dim),
+            };
+            painter.rect_filled(key, 0.0, fill);
+            painter.rect_stroke(key, 0.0, Stroke::new(0.5, Color32::from_rgb(0x05, 0x06, 0x0a)));
         }
-        // Edge between keyboard and roll.
-        painter.line_segment(
-            [Pos2::new(kb.max.x, kb.min.y), Pos2::new(kb.max.x, kb.max.y)],
-            Stroke::new(1.0, Color32::from_rgb(0x05, 0x06, 0x0a)),
-        );
     }
-}
-
-/// Stylized volume envelope in 0..1: quick attack, full sustain through the gate, release tail.
-fn envelope(progress: f64, gate: f64) -> f32 {
-    if progress < 0.0 {
-        return 0.0;
-    }
-    let v = if progress < ATTACK_TICKS {
-        progress / ATTACK_TICKS
-    } else if progress <= gate {
-        1.0
-    } else {
-        1.0 - (progress - gate) / RELEASE_TICKS
-    };
-    v.clamp(0.0, 1.0) as f32
-}
-
-/// Appends a colored quad (p0→p1→p2→p3) to `mesh`.
-fn push_quad(mesh: &mut Mesh, p0: Pos2, p1: Pos2, p2: Pos2, p3: Pos2, color: Color32) {
-    let base = mesh.vertices.len() as u32;
-    for p in [p0, p1, p2, p3] {
-        mesh.vertices.push(Vertex {
-            pos: p,
-            uv: WHITE_UV,
-            color,
-        });
-    }
-    mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// A vivid per-track colour spread around the hue wheel.
