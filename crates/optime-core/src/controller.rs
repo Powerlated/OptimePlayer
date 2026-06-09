@@ -380,7 +380,10 @@ impl Controller {
                 self.synthesizers[t].instr_mut(si).volume =
                     calc_channel_volume(entry.velocity, entry.adsr_timer);
             }
-            AdsrState::Sustain => {}
+            AdsrState::Sustain => {
+                self.synthesizers[t].instr_mut(si).volume =
+                    calc_channel_volume(entry.velocity, entry.adsr_timer);
+            }
             AdsrState::Release => {
                 if entry.adsr_timer <= -92544 || entry.f_record == 0x2
                 /* PSG pulse */
@@ -624,6 +627,17 @@ fn lfo_tick(p: &LfoParams, counter: &mut i32, delay_counter: &mut i32) -> i64 {
     value
 }
 
+/// A pitch-bend change observed by the look-ahead, in resolved semitones at a given tick.
+#[derive(Debug, Clone, Copy)]
+pub struct PitchBendEvent {
+    /// Tick at which the bend took effect.
+    pub timestamp: u32,
+    /// Track the bend applies to.
+    pub track: usize,
+    /// Bend amount in semitones (`pitch_bend * range/2 / 64`).
+    pub semitones: f32,
+}
+
 /// A parallel sequence runner used to drive look-ahead visualizers without producing audio.
 ///
 /// It runs the same SSEQ as [`Controller`] but only tracks which notes are on, and is advanced
@@ -633,6 +647,8 @@ pub struct FsVisController {
     pub sequence: Sequence,
     /// Recently triggered notes, newest last (capacity-bounded).
     pub active_notes: crate::util::CircularBuffer<Message>,
+    /// Recently observed pitch-bend changes, newest last (capacity-bounded).
+    pub pitch_bends: crate::util::CircularBuffer<PitchBendEvent>,
     bpm_timer: u32,
 }
 
@@ -647,6 +663,7 @@ impl FsVisController {
         let mut ctrl = FsVisController {
             sequence: Sequence::new(arc, data_offset, 512),
             active_notes: crate::util::CircularBuffer::new(2048),
+            pitch_bends: crate::util::CircularBuffer::new(2048),
             bpm_timer: 0,
         };
         for _ in 0..run_ahead_ticks {
@@ -665,12 +682,30 @@ impl FsVisController {
             self.sequence.tick(&[false; TRACK_COUNT]);
 
             while let Some(mut msg) = self.sequence.message_buffer.pop() {
-                if msg.msg_type == MessageType::PlayNote {
-                    if self.active_notes.is_full() {
-                        self.active_notes.pop();
+                match msg.msg_type {
+                    MessageType::PlayNote => {
+                        if self.active_notes.is_full() {
+                            self.active_notes.pop();
+                        }
+                        msg.timestamp = self.sequence.ticks_elapsed;
+                        self.active_notes.insert(msg);
                     }
-                    msg.timestamp = self.sequence.ticks_elapsed;
-                    self.active_notes.insert(msg);
+                    MessageType::PitchBend => {
+                        // Resolve the current bend in semitones from the track's live state,
+                        // matching the audio controller's `set_finetune` math.
+                        let tr = &self.sequence.tracks[msg.track_num];
+                        let semitones =
+                            tr.pitch_bend as f32 * (tr.pitch_bend_range as f32 / 2.0) / 64.0;
+                        if self.pitch_bends.is_full() {
+                            self.pitch_bends.pop();
+                        }
+                        self.pitch_bends.insert(PitchBendEvent {
+                            timestamp: self.sequence.ticks_elapsed,
+                            track: msg.track_num,
+                            semitones,
+                        });
+                    }
+                    _ => {}
                 }
             }
         }

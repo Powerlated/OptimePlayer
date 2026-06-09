@@ -27,7 +27,7 @@ pub mod tuning;
 pub mod util;
 
 pub use bank::{InstrumentBank, InstrumentRecord, InstrumentType};
-pub use controller::{Controller, FsVisController, SynthConfig};
+pub use controller::{Controller, FsVisController, PitchBendEvent, SynthConfig};
 pub use dsp::BiquadFilter;
 pub use resample::{fir_kernel, fir_response, ResampleTables};
 pub use sample::{decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, ResampleMode, Sample};
