@@ -58,54 +58,37 @@ fn gather_sinc(
     if !periodic && k_lo >= 0 && k_hi < data_len {
         // Fast path: the whole window is in-bounds one-shot data.
         let src = &data[k_lo as usize..=k_hi as usize];
-        resample_sinc(
-            tbl,
-            |t| f64::from(src[(t - k_lo) as usize]),
-            pos,
-            fc,
-            step_mode,
-        )
-    } else {
-        // Edge path: stage the window into a stack buffer so the gather still reads a plain
-        // slice.
-        let n = (k_hi - k_lo + 1) as usize;
-        let mut buf = [0.0f32; 2 * MAX_HALF_TAPS + 2];
-        if periodic {
-            // The voice has wrapped: every tap maps into the loop body. One division to place
-            // the first tap, then an increment-and-wrap walk.
-            let mut idx = (k_lo - loop_point).rem_euclid(loop_len) + loop_point;
-            for slot in buf[..n].iter_mut() {
-                *slot = data[idx as usize];
-                idx += 1;
-                if idx == data_len {
-                    idx = loop_point;
-                }
-            }
-        } else {
-            // Window crosses the sample start/end before any wrap: zeros outside, direct reads
-            // inside, and (for looping voices) the right tail peeks into the first loop pass.
-            for (j, slot) in buf[..n].iter_mut().enumerate() {
-                let t = k_lo + j as i64;
-                *slot = if t < 0 {
-                    0.0
-                } else if t < data_len {
-                    data[t as usize]
-                } else if looping && loop_len > 0 {
-                    data[((t - loop_point).rem_euclid(loop_len) + loop_point) as usize]
-                } else {
-                    0.0
-                };
+        return resample_sinc(tbl, src, pos, fc, step_mode);
+    }
+
+    // Edge path: stage the window into a stack buffer so the gather still reads a plain slice.
+    let n = (k_hi - k_lo + 1) as usize;
+    let mut buf = [0.0f32; 2 * MAX_HALF_TAPS + 2];
+    if periodic {
+        // The voice has wrapped: every tap maps into the loop body. One division to place the
+        // first tap, then an increment-and-wrap walk.
+        let mut idx = (k_lo - loop_point).rem_euclid(loop_len) + loop_point;
+        for slot in &mut buf[..n] {
+            *slot = data[idx as usize];
+            idx += 1;
+            if idx == data_len {
+                idx = loop_point;
             }
         }
-        let src = &buf[..n];
-        resample_sinc(
-            tbl,
-            |t| f64::from(src[(t - k_lo) as usize]),
-            pos,
-            fc,
-            step_mode,
-        )
+    } else {
+        // Window crosses the sample start/end before any wrap: zeros outside, direct reads
+        // inside, and (for looping voices) the right tail peeks into the first loop pass.
+        for (t, slot) in (k_lo..).zip(&mut buf[..n]) {
+            *slot = if (0..data_len).contains(&t) {
+                data[t as usize]
+            } else if t >= data_len && looping && loop_len > 0 {
+                data[((t - loop_point).rem_euclid(loop_len) + loop_point) as usize]
+            } else {
+                0.0
+            };
+        }
     }
+    resample_sinc(tbl, &buf[..n], pos, fc, step_mode)
 }
 
 /// A fixed-length delay line used to widen the stereo image (Haas effect).
@@ -576,11 +559,11 @@ impl SampleSynthesizer {
             self.instrs[i].advance_block(config.resample, tables, &mut mono[..n]);
         }
 
-        for (j, &m) in mono[..n].iter().enumerate() {
+        for ((&m, l), r) in mono[..n].iter().zip(&mut acc_l[..n]).zip(&mut acc_r[..n]) {
             self.apply_stereo(m, config);
             if mix {
-                acc_l[j] += self.val_l;
-                acc_r[j] += self.val_r;
+                *l += self.val_l;
+                *r += self.val_r;
             }
         }
     }

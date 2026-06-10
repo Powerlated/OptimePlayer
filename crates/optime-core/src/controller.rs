@@ -223,11 +223,11 @@ impl Controller {
 
         let mut val_l = 0.0;
         let mut val_r = 0.0;
-        for i in 0..TRACK_COUNT {
-            self.synthesizers[i].next_sample(config);
-            if config.track_enables[i] {
-                val_l += self.synthesizers[i].val_l;
-                val_r += self.synthesizers[i].val_r;
+        for (synth, &enabled) in self.synthesizers.iter_mut().zip(&config.track_enables) {
+            synth.next_sample(config);
+            if enabled {
+                val_l += synth.val_l;
+                val_r += synth.val_r;
             }
         }
         (val_l as f32, val_r as f32)
@@ -265,18 +265,16 @@ impl Controller {
 
             acc_l[..n].fill(0.0);
             acc_r[..n].fill(0.0);
-            for i in 0..TRACK_COUNT {
-                self.synthesizers[i].render_block(
-                    config,
-                    n,
-                    &mut acc_l,
-                    &mut acc_r,
-                    config.track_enables[i],
-                );
+            for (synth, &enabled) in self.synthesizers.iter_mut().zip(&config.track_enables) {
+                synth.render_block(config, n, &mut acc_l, &mut acc_r, enabled);
             }
-            for j in 0..n {
-                out[2 * (frame + j)] = acc_l[j] as f32;
-                out[2 * (frame + j) + 1] = acc_r[j] as f32;
+            let block_out = &mut out[2 * frame..2 * (frame + n)];
+            for (frame_out, (&l, &r)) in block_out
+                .chunks_exact_mut(2)
+                .zip(acc_l[..n].iter().zip(&acc_r[..n]))
+            {
+                frame_out[0] = l as f32;
+                frame_out[1] = r as f32;
             }
             frame += n;
         }

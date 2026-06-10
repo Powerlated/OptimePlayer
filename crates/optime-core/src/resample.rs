@@ -203,20 +203,27 @@ pub fn tap_window(tables: &ResampleTables, pos: f64) -> (i64, i64) {
 ///
 /// # Parameters
 /// - `tables`:    the support width (the kernel tables are global).
-/// - `get`:       loop-aware sample accessor, returns `f64`.
+/// - `src`:       the staged source taps for the window returned by [`tap_window`]: `src[j]`
+///   holds the source sample at index `k_lo + j`, and `src.len()` must be `k_hi − k_lo + 1`.
 /// - `pos`:       fractional read position in source samples.
 /// - `fc`:        cutoff in cycles/source-sample.
 /// - `step_mode`: `false` → impulse-mode (SampleNyquist); `true` → BLEP step-mode (OutputNyquist).
 pub fn resample_sinc(
     tables: &ResampleTables,
-    get: impl Fn(i64) -> f64,
+    src: &[f32],
     pos: f64,
     fc: f64,
     step_mode: bool,
 ) -> f64 {
     let k = kernels();
-    let p = tables.half_taps as f64;
-    let inv_p = 1.0 / p;
+    // Fixed source-sample support: |pos − k| ≤ P, i.e. ≈ 2P taps regardless of fc.
+    let (k_lo, k_hi) = tap_window(tables, pos);
+    debug_assert_eq!(
+        src.len() as i64,
+        k_hi - k_lo + 1,
+        "src must cover the tap window"
+    );
+
     // Impulse (reconstruction) mode never wants a cutoff above source Nyquist; step (BLEP) mode may
     // (output Nyquist sits above source Nyquist when upsampling).
     let fc = if step_mode {
@@ -224,16 +231,12 @@ pub fn resample_sinc(
     } else {
         fc.clamp(1e-6, 0.5)
     };
-    let two_fc = 2.0 * fc;
     // Table-index steps: fold the per-tap `·OVERSAMPLE` / `·WIN_OVERSAMPLE` scaling into the walk so
     // each tap advances the indices by a constant add instead of recomputing scaled products.
-    let sinc_idx_step = two_fc * OVERSAMPLE as f64; // Δ index per unit τ-step (one source sample)
-    let win_idx_step = inv_p * WIN_OVERSAMPLE as f64; // Δ window index per source sample
+    let sinc_idx_step = 2.0 * fc * OVERSAMPLE as f64; // Δ index per unit τ-step (one source sample)
+    let win_idx_step = WIN_OVERSAMPLE as f64 / tables.half_taps as f64; // Δ window index per source sample
 
-    // Fixed source-sample support: |pos − k| ≤ P, i.e. ≈ 2P taps regardless of fc.
-    let (k_lo, k_hi) = tap_window(tables, pos);
-
-    if step_mode {
+    let (out, wsum) = if step_mode {
         // BLEP gather of the boxcar-integrated windowed kernel: tap `k` weighs its source-sample
         // bin `[pos−k−1, pos−k]` by the band-limited step rise across it,
         //     [S(2fc·(pos−k)) − S(2fc·(pos−k−1))] · blackman(|bin-center| / P),
@@ -246,55 +249,55 @@ pub fn resample_sinc(
         let mut si_hi = sinc_int_at(k, sinc_idx_step * d_hi0);
         let mut lo_idx = sinc_idx_step * (d_hi0 - 1.0); // S index of the bin's lower edge
         let mut mid_idx = win_idx_step * (d_hi0 - 0.5); // window index of the bin centre (signed)
-        for kk in k_lo..=k_hi {
+        for &s in src {
             let si_lo = sinc_int_at(k, lo_idx);
             let w = win_at(k, mid_idx.abs()) * (si_hi - si_lo);
-            out += get(kk) * w;
+            out += f64::from(s) * w;
             wsum += w;
             si_hi = si_lo;
             lo_idx -= sinc_idx_step;
             mid_idx -= win_idx_step;
         }
-        if wsum.abs() > 1e-12 {
-            out / wsum
-        } else {
-            get(pos.round() as i64)
-        }
+        (out, wsum.abs())
     } else {
-        // Impulse gather: out = Σ_k data(k) · sinc(2fc·|d|) · blackman(|d|/P), DC-normalized.
+        // Impulse gather: out = Σ_k src(k) · sinc(2fc·|d|) · blackman(|d|/P), DC-normalized.
         // The kernel is even in `d = pos − k`, so we split at `d = 0` into two monotonic runs and
         // walk `|d|`'s table indices by a constant add each tap — no per-tap `abs`/multiply. Taps
         // past the support contribute a zero window, so no in-loop bounds test is needed.
         let mut out = 0.0;
         let mut wsum = 0.0;
-        let mid = pos.floor() as i64; // largest k with d = pos − k ≥ 0
+        let mid_j = (pos.floor() as i64 - k_lo) as usize; // last tap with d = pos − k ≥ 0
+        let (right, left) = src.split_at(mid_j + 1);
 
-        // Right run: k = k_lo..=mid, descending |d| = pos − k.
+        // Right run: descending |d| = pos − k.
         let mut sinc_idx = (pos - k_lo as f64) * sinc_idx_step;
         let mut win_idx = (pos - k_lo as f64) * win_idx_step;
-        for kk in k_lo..=mid {
+        for &s in right {
             let w = sinc_at(k, sinc_idx) * win_at(k, win_idx);
-            out += get(kk) * w;
+            out += f64::from(s) * w;
             wsum += w;
             sinc_idx -= sinc_idx_step;
             win_idx -= win_idx_step;
         }
-        // Left run: k = mid+1..=k_hi, ascending |d| = k − pos.
-        let d0 = mid as f64 + 1.0 - pos;
+        // Left run: ascending |d| = k − pos.
+        let d0 = (k_lo + mid_j as i64 + 1) as f64 - pos;
         let mut sinc_idx = d0 * sinc_idx_step;
         let mut win_idx = d0 * win_idx_step;
-        for kk in (mid + 1)..=k_hi {
+        for &s in left {
             let w = sinc_at(k, sinc_idx) * win_at(k, win_idx);
-            out += get(kk) * w;
+            out += f64::from(s) * w;
             wsum += w;
             sinc_idx += sinc_idx_step;
             win_idx += win_idx_step;
         }
-        if wsum > 1e-10 {
-            out / wsum
-        } else {
-            get(pos.round() as i64)
-        }
+        (out, wsum)
+    };
+
+    if wsum > 1e-12 {
+        out / wsum
+    } else {
+        // Degenerate weights (pathological fc): fall back to the nearest staged tap.
+        f64::from(src[(pos.round() as i64 - k_lo) as usize])
     }
 }
 
@@ -346,6 +349,13 @@ mod tests {
         (a - b).abs() < tol
     }
 
+    /// Stages the tap window for `pos` by sampling `f` at each source index (what the synth's
+    /// gather staging does for real sample data).
+    fn staged(tables: &ResampleTables, pos: f64, f: impl Fn(i64) -> f64) -> Vec<f32> {
+        let (k_lo, k_hi) = tap_window(tables, pos);
+        (k_lo..=k_hi).map(|t| f(t) as f32).collect()
+    }
+
     #[test]
     fn sinc_int_boundary_and_symmetry() {
         let k = kernels();
@@ -378,10 +388,10 @@ mod tests {
     fn step_mode_preserves_dc() {
         // The normalized BLEP gather must pass a constant signal through unchanged at any position.
         let tables = ResampleTables::new(16);
-        let get = |_: i64| 1.0;
         for fc in [0.1, 0.25, 0.5, 1.5] {
             for pos in [3.0, 7.35, 20.7] {
-                let out = resample_sinc(&tables, get, pos, fc, true);
+                let src = staged(&tables, pos, |_| 1.0);
+                let out = resample_sinc(&tables, &src, pos, fc, true);
                 assert!(close(out, 1.0, 1e-9), "DC at fc={fc}, pos={pos}: {out}");
             }
         }
@@ -394,28 +404,17 @@ mod tests {
         let tables = ResampleTables::new(32);
         let fc = 0.5 / 4.0; // 4× downsampling
         let step = |k: i64| if k >= 0 { 1.0_f64 } else { 0.0 };
+        let at = |pos: f64| resample_sinc(&tables, &staged(&tables, pos, step), pos, fc, true);
 
-        assert!(close(
-            resample_sinc(&tables, step, 0.0, fc, true),
-            0.5,
-            0.02
-        ));
+        assert!(close(at(0.0), 0.5, 0.02));
         let half_width = tables.half_taps as f64 / (2.0 * fc);
-        assert!(close(
-            resample_sinc(&tables, step, -(half_width + 10.0), fc, true),
-            0.0,
-            1e-6
-        ));
-        assert!(close(
-            resample_sinc(&tables, step, half_width + 10.0, fc, true),
-            1.0,
-            1e-6
-        ));
+        assert!(close(at(-(half_width + 10.0)), 0.0, 1e-6));
+        assert!(close(at(half_width + 10.0), 1.0, 1e-6));
         // Monotone non-decreasing through the transition.
         let mut prev = -1.0;
         for i in 0..=200 {
             let pos = -40.0 + 80.0 * i as f64 / 200.0;
-            let v = resample_sinc(&tables, step, pos, fc, true);
+            let v = at(pos);
             assert!(
                 v > prev - 0.05,
                 "non-monotone at pos={pos}: {v} after {prev}"
@@ -427,8 +426,9 @@ mod tests {
     #[test]
     fn impulse_mode_dc_gain() {
         let tables = ResampleTables::new(16);
-        let get = |_: i64| 1.0;
-        let out = resample_sinc(&tables, get, 12.37, 0.4, false);
+        let pos = 12.37;
+        let src = staged(&tables, pos, |_| 1.0);
+        let out = resample_sinc(&tables, &src, pos, 0.4, false);
         assert!(close(out, 1.0, 1e-6), "DC gain = {out}");
     }
 
@@ -442,7 +442,7 @@ mod tests {
         for frac in [0.0, 0.25, 0.5, 0.75] {
             let pos = 32.0 + frac;
             let ideal = (2.0 * PI * f0 * pos).cos();
-            let out = resample_sinc(&tables, get, pos, fc, false);
+            let out = resample_sinc(&tables, &staged(&tables, pos, get), pos, fc, false);
             assert!(
                 close(out, ideal, 1e-3),
                 "at pos={pos}: reconstructed={out}, ideal={ideal}"
