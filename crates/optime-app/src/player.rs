@@ -55,12 +55,16 @@ pub fn render_to_samples(sdat: &Sdat, sseq_id: u32, config: &SynthConfig) -> Vec
     let mut fadeout_start_sample = 0u64;
     let max_samples = (sr * 480.0) as u64;
 
-    loop {
-        if sample >= max_samples {
-            break;
-        }
+    // Render through the block path in device-buffer-sized chunks. The loop/fade flags only
+    // change on sequencer ticks, so checking them once per chunk shifts the fade start by at
+    // most one chunk — negligible against the two-second pre-fade grace below.
+    const CHUNK_FRAMES: usize = 512;
+    let mut buf = vec![0.0f32; 2 * CHUNK_FRAMES];
 
-        let (l, r) = controller.next_sample(config);
+    'render: while sample < max_samples {
+        let n = CHUNK_FRAMES.min((max_samples - sample) as usize);
+        let chunk = &mut buf[..2 * n];
+        controller.fill(chunk, config);
 
         if controller.jumps > 0 {
             controller.jumps = 0;
@@ -76,18 +80,19 @@ pub fn render_to_samples(sdat: &Sdat, sseq_id: u32, config: &SynthConfig) -> Vec
             fadeout_start_sample = sample + (sr * 2.0) as u64;
         }
 
-        let mut fadeout_mul = 1.0f32;
-        if fading_out && sample >= fadeout_start_sample {
-            let fadeout_time = (sample - fadeout_start_sample) as f64 / sr;
-            let ratio = fadeout_time / FADEOUT_LENGTH;
-            fadeout_mul = (1.0 - ratio) as f32;
-            if fadeout_mul <= 0.0 {
-                break;
+        for frame in chunk.chunks_exact(2) {
+            let mut fadeout_mul = 1.0f32;
+            if fading_out && sample >= fadeout_start_sample {
+                let fadeout_time = (sample - fadeout_start_sample) as f64 / sr;
+                let ratio = fadeout_time / FADEOUT_LENGTH;
+                fadeout_mul = (1.0 - ratio) as f32;
+                if fadeout_mul <= 0.0 {
+                    break 'render;
+                }
             }
+            out.push((frame[0] * 0.5 * fadeout_mul, frame[1] * 0.5 * fadeout_mul));
+            sample += 1;
         }
-
-        out.push((l * 0.5 * fadeout_mul, r * 0.5 * fadeout_mul));
-        sample += 1;
     }
 
     out

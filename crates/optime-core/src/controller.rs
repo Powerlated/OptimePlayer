@@ -7,6 +7,7 @@ use crate::bank::{InstrumentBank, InstrumentType};
 use crate::sample::{decode_adpcm, decode_pcm16, decode_pcm8, ResampleMode, Sample};
 use crate::sdat::Sdat;
 use crate::sequence::{Message, MessageType, Sequence};
+use crate::synth::MAX_BLOCK;
 use crate::tables::{snd_sin_idx, DECIBEL_SQUARE_TABLE, GET_VOL_TABLE, SQUARE_WAVES};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
 use crate::util::{read_u16, read_u32, read_u8};
@@ -233,13 +234,57 @@ impl Controller {
     }
 
     /// Fills `out` with interleaved stereo (L, R, L, R, …) samples.
+    ///
+    /// Renders in blocks between sequencer ticks (voice parameters only change on ticks), so each
+    /// voice runs one tight loop per block instead of re-deriving its setup per sample. The clock
+    /// is advanced with the same per-sample additions as [`Self::next_sample`], so the output is
+    /// bit-identical to calling that in a loop.
     pub fn fill(&mut self, out: &mut [f32], config: &SynthConfig) {
-        for frame in out.chunks_mut(2) {
-            let (l, r) = self.next_sample(config);
-            frame[0] = l;
-            if frame.len() > 1 {
-                frame[1] = r;
+        let threshold = CYCLES_PER_TICK as f64 * self.sample_rate;
+        let clock = DS_CLOCK_RATE as f64;
+        let frames = out.len() / 2;
+        let mut acc_l = [0.0f64; MAX_BLOCK];
+        let mut acc_r = [0.0f64; MAX_BLOCK];
+
+        let mut frame = 0;
+        while frame < frames {
+            // First sample of the block: advance the clock and run any due ticks (mirroring
+            // `next_sample`'s ordering: the tick fires before the sample is synthesized).
+            self.timer += clock;
+            while self.timer >= threshold {
+                self.timer -= threshold;
+                self.tick(config);
             }
+            // Extend the block with tick-free samples, advancing the clock identically.
+            let max_n = (frames - frame).min(MAX_BLOCK);
+            let mut n = 1;
+            while n < max_n && self.timer + clock < threshold {
+                self.timer += clock;
+                n += 1;
+            }
+
+            acc_l[..n].fill(0.0);
+            acc_r[..n].fill(0.0);
+            for i in 0..TRACK_COUNT {
+                self.synthesizers[i].render_block(
+                    config,
+                    n,
+                    &mut acc_l,
+                    &mut acc_r,
+                    config.track_enables[i],
+                );
+            }
+            for j in 0..n {
+                out[2 * (frame + j)] = acc_l[j] as f32;
+                out[2 * (frame + j) + 1] = acc_r[j] as f32;
+            }
+            frame += n;
+        }
+
+        // Odd trailing f32 (half a frame): render one more stereo sample, keep its left channel.
+        if out.len() % 2 == 1 {
+            let (l, _) = self.next_sample(config);
+            out[out.len() - 1] = l;
         }
     }
 
@@ -965,10 +1010,16 @@ mod tests {
             0,
             DECIBEL_SQUARE_TABLE[16] + DECIBEL_SQUARE_TABLE[127] * 2,
         );
-        assert!(half < full && quiet < half, "volume must attenuate monotonically");
+        assert!(
+            half < full && quiet < half,
+            "volume must attenuate monotonically"
+        );
         // The decibel curve is steeper near the bottom than a linear law: volume 64 sits well
         // below half amplitude (a linear `64/127` would give ≈0.50).
-        assert!(half < 0.5 * full, "dB volume 64 should be quieter than a 0.5 linear multiply");
+        assert!(
+            half < 0.5 * full,
+            "dB volume 64 should be quieter than a 0.5 linear multiply"
+        );
         // Expression and master fold in identically (a 0 dB / 127 term is a no-op).
         let only_expr = calc_channel_volume(127, 0, DECIBEL_SQUARE_TABLE[64]);
         assert!((only_expr - half).abs() < 1e-12);

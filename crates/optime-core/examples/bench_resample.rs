@@ -50,16 +50,21 @@ fn main() {
             eprintln!("SSEQ {sseq_id} not found");
             return;
         };
+        // Render through `fill` (the block path the app's audio callback uses), in chunks the
+        // size of a typical device buffer.
+        let mut buf = vec![0.0f32; 2 * 1024];
+        let chunks = |samples: u64| samples.div_ceil(1024);
+
         // Warm up the tables / steady-state polyphony before timing.
-        for _ in 0..(sr as u64) {
-            controller.next_sample(&config);
+        for _ in 0..chunks(sr as u64) {
+            controller.fill(&mut buf, &config);
         }
 
         let start = Instant::now();
         let mut acc = 0.0f64;
-        for _ in 0..total {
-            let (l, r) = controller.next_sample(&config);
-            acc += f64::from(l) + f64::from(r);
+        for _ in 0..chunks(total) {
+            controller.fill(&mut buf, &config);
+            acc += buf.iter().map(|&v| f64::from(v)).sum::<f64>();
         }
         let wall = start.elapsed().as_secs_f64();
         let rtf = render_secs / wall;

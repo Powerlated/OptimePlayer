@@ -71,6 +71,14 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
     }
     let config = &st.config;
     let controller = st.controller.as_mut().unwrap();
+    if channels == 2 {
+        // The common case: render the whole device buffer through the block path.
+        controller.fill(data, config);
+        for s in data.iter_mut() {
+            *s *= 0.5;
+        }
+        return;
+    }
     for frame in data.chunks_mut(channels.max(1)) {
         let (l, r) = controller.next_sample(config);
         let (l, r) = (l * 0.5, r * 0.5);

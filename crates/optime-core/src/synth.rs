@@ -13,6 +13,101 @@ use crate::tuning::{midi_note_to_hz, TuningSystem};
 /// filters for the analysis popup without duplicating the constant.
 pub const CROSSOVER_Q: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
+/// Maximum block length (in output samples) accepted by [`SampleSynthesizer::render_block`] and
+/// [`Controller::fill`]'s internal blocking. Sized to cover one full sequencer tick at common
+/// output rates (≈251 samples at 48 kHz) so a block rarely splits.
+///
+/// [`Controller::fill`]: crate::controller::Controller::fill
+pub const MAX_BLOCK: usize = 256;
+
+/// The source-sample view a sinc gather reads from: the decoded data plus its loop layout and
+/// whether the reading voice has already wrapped (see [`gather_sinc`]).
+struct GatherSource<'a> {
+    data: &'a [f32],
+    looping: bool,
+    loop_point: i64,
+    loop_len: i64,
+    wrapped: bool,
+}
+
+/// One windowed-sinc gather at fractional source position `pos`, staging the exact tap window
+/// (`resample::tap_window`) so the inner gather reads a plain slice — branch-free, with no
+/// per-tap loop-mapping division (the loop mapping costs one division per *sample* at most).
+///
+/// `src.wrapped` selects the fully periodic mapping for looping voices that have wrapped at
+/// least once (the signal under the window is then periodic in the loop); before the first wrap
+/// the one-shot data is read directly and only right-side taps peek into the first loop pass.
+#[inline]
+fn gather_sinc(
+    src: &GatherSource,
+    tbl: &ResampleTables,
+    pos: f64,
+    fc: f64,
+    step_mode: bool,
+) -> f64 {
+    let &GatherSource {
+        data,
+        looping,
+        loop_point,
+        loop_len,
+        wrapped,
+    } = src;
+    let data_len = data.len() as i64;
+    let (k_lo, k_hi) = tap_window(tbl, pos);
+    let periodic = looping && wrapped && loop_len > 0;
+    if !periodic && k_lo >= 0 && k_hi < data_len {
+        // Fast path: the whole window is in-bounds one-shot data.
+        let src = &data[k_lo as usize..=k_hi as usize];
+        resample_sinc(
+            tbl,
+            |t| f64::from(src[(t - k_lo) as usize]),
+            pos,
+            fc,
+            step_mode,
+        )
+    } else {
+        // Edge path: stage the window into a stack buffer so the gather still reads a plain
+        // slice.
+        let n = (k_hi - k_lo + 1) as usize;
+        let mut buf = [0.0f32; 2 * MAX_HALF_TAPS + 2];
+        if periodic {
+            // The voice has wrapped: every tap maps into the loop body. One division to place
+            // the first tap, then an increment-and-wrap walk.
+            let mut idx = (k_lo - loop_point).rem_euclid(loop_len) + loop_point;
+            for slot in buf[..n].iter_mut() {
+                *slot = data[idx as usize];
+                idx += 1;
+                if idx == data_len {
+                    idx = loop_point;
+                }
+            }
+        } else {
+            // Window crosses the sample start/end before any wrap: zeros outside, direct reads
+            // inside, and (for looping voices) the right tail peeks into the first loop pass.
+            for (j, slot) in buf[..n].iter_mut().enumerate() {
+                let t = k_lo + j as i64;
+                *slot = if t < 0 {
+                    0.0
+                } else if t < data_len {
+                    data[t as usize]
+                } else if looping && loop_len > 0 {
+                    data[((t - loop_point).rem_euclid(loop_len) + loop_point) as usize]
+                } else {
+                    0.0
+                };
+            }
+        }
+        let src = &buf[..n];
+        resample_sinc(
+            tbl,
+            |t| f64::from(src[(t - k_lo) as usize]),
+            pos,
+            fc,
+            step_mode,
+        )
+    }
+}
+
 /// A fixed-length delay line used to widen the stereo image (Haas effect).
 #[derive(Debug, Clone)]
 pub struct DelayLine {
@@ -182,66 +277,14 @@ impl SampleInstrument {
                     //   crunch images that sit below output Nyquist while still band-limiting the
                     //   hard edges (no nearest-neighbour jitter).
                     let fc = if step_mode || r > 1.0 { 0.5 / r } else { 0.5 };
-
-                    // Pre-stage the exact tap window the gather will read so its accessor is a
-                    // branch-free slice index instead of a per-tap loop-mapping with a division
-                    // (the gather is the synth's hot loop: ~2P taps per voice per output sample).
-                    let (k_lo, k_hi) = tap_window(tbl, pos);
-                    let periodic = looping && self.wrapped && loop_len > 0;
-                    if !periodic && k_lo >= 0 && k_hi < data_len {
-                        // Fast path: the whole window is in-bounds one-shot data.
-                        let src = &data[k_lo as usize..=k_hi as usize];
-                        resample_sinc(
-                            tbl,
-                            |t| f64::from(src[(t - k_lo) as usize]),
-                            pos,
-                            fc,
-                            step_mode,
-                        )
-                    } else {
-                        // Edge path: stage the window into a stack buffer so the gather still
-                        // reads a plain slice.
-                        let n = (k_hi - k_lo + 1) as usize;
-                        let mut buf = [0.0f32; 2 * MAX_HALF_TAPS + 2];
-                        if periodic {
-                            // The voice has wrapped: the signal is periodic in the loop, so
-                            // every tap maps into the loop body. One division to place the
-                            // first tap, then an increment-and-wrap walk.
-                            let mut idx = (k_lo - loop_point).rem_euclid(loop_len) + loop_point;
-                            for slot in buf[..n].iter_mut() {
-                                *slot = data[idx as usize];
-                                idx += 1;
-                                if idx == data_len {
-                                    idx = loop_point;
-                                }
-                            }
-                        } else {
-                            // Window crosses the sample start/end before any wrap: zeros
-                            // outside, direct reads inside, and (for looping voices) the right
-                            // tail peeks into the first loop pass.
-                            for (j, slot) in buf[..n].iter_mut().enumerate() {
-                                let t = k_lo + j as i64;
-                                *slot = if t < 0 {
-                                    0.0
-                                } else if t < data_len {
-                                    data[t as usize]
-                                } else if looping && loop_len > 0 {
-                                    data[((t - loop_point).rem_euclid(loop_len) + loop_point)
-                                        as usize]
-                                } else {
-                                    0.0
-                                };
-                            }
-                        }
-                        let src = &buf[..n];
-                        resample_sinc(
-                            tbl,
-                            |t| f64::from(src[(t - k_lo) as usize]),
-                            pos,
-                            fc,
-                            step_mode,
-                        )
-                    }
+                    let src = GatherSource {
+                        data,
+                        looping,
+                        loop_point,
+                        loop_len,
+                        wrapped: self.wrapped,
+                    };
+                    gather_sinc(&src, tbl, pos, fc, step_mode)
                 } else {
                     // Tables not yet built; fall back to nearest.
                     get(pos.floor() as i64)
@@ -250,6 +293,90 @@ impl SampleInstrument {
         };
 
         self.output = result * self.volume;
+    }
+
+    /// Advances playback by `out.len()` output samples, adding each `volume`-scaled sample into
+    /// the corresponding `out` slot. Equivalent to calling [`Self::advance`] once per slot and
+    /// summing [`Self::output`], but hoists the per-sample setup (playback speed, mode
+    /// resolution, cutoff) out of the loop. Voice parameters (pitch, volume) are constant within
+    /// a block — the controller only changes them on sequencer ticks, and blocks never span one.
+    pub fn advance_block(
+        &mut self,
+        mode: ResampleMode,
+        tables: Option<&ResampleTables>,
+        out: &mut [f64],
+    ) {
+        // Only the sinc modes are worth hoisting; the 1–2 tap modes (and the PSG-square nearest
+        // override / missing-tables fallback) just take the per-sample path.
+        let hoisted_sinc = tables.is_some()
+            && match mode {
+                ResampleMode::SincSampleNyquist { .. } => !self.sample.is_psg_square,
+                ResampleMode::SincOutputNyquist { .. } => true,
+                _ => false,
+            };
+        if !hoisted_sinc {
+            for slot in out.iter_mut() {
+                self.advance(mode, tables);
+                *slot += self.output;
+            }
+            return;
+        }
+
+        let r = self.freq_ratio * self.sample.sample_rate * self.inv_sample_rate;
+        let data = &self.sample.data;
+        let looping = self.sample.looping;
+        let loop_point = self.sample.loop_point;
+        let data_len = data.len() as i64;
+        let data_len_f = data_len as f64;
+        let loop_len = data_len - loop_point;
+        let fold = looping && loop_len > 0;
+        let (lp_f, loop_len_f) = (loop_point as f64, loop_len as f64);
+
+        let mut pos = self.sample_t;
+        let mut wrapped = self.wrapped;
+        let vol = self.volume;
+
+        if vol == 0.0 {
+            // Fully attenuated: advance the position (with identical per-sample folding) only.
+            for _ in 0..out.len() {
+                pos += r;
+                if fold && pos >= data_len_f {
+                    pos = (pos - lp_f) % loop_len_f + lp_f;
+                    wrapped = true;
+                }
+            }
+            self.sample_t = pos;
+            self.wrapped = wrapped;
+            self.output = 0.0;
+            return;
+        }
+
+        let tbl = tables.expect("hoisted_sinc implies tables");
+        let step_mode = matches!(mode, ResampleMode::SincOutputNyquist { .. });
+        // See `advance` for the cutoff rationale (clean reconstruction vs BLEP output-Nyquist).
+        let fc = if step_mode || r > 1.0 { 0.5 / r } else { 0.5 };
+
+        let mut last = 0.0;
+        for slot in out.iter_mut() {
+            pos += r;
+            if fold && pos >= data_len_f {
+                pos = (pos - lp_f) % loop_len_f + lp_f;
+                wrapped = true;
+            }
+            let src = GatherSource {
+                data,
+                looping,
+                loop_point,
+                loop_len,
+                wrapped,
+            };
+            let result = gather_sinc(&src, tbl, pos, fc, step_mode);
+            last = result * vol;
+            *slot += last;
+        }
+        self.sample_t = pos;
+        self.wrapped = wrapped;
+        self.output = last;
     }
 
     fn recompute_freq(&mut self, tuning: TuningSystem) {
@@ -394,9 +521,8 @@ impl SampleSynthesizer {
         }
     }
 
-    /// Advances all active voices by one sample and mixes them into `val_l`/`val_r`.
-    pub fn next_sample(&mut self, config: &SynthConfig) {
-        // Rebuild the sinc tables if the mode switched to a sinc variant or the tap count changed.
+    /// Rebuilds the sinc tables if the mode switched to a sinc variant or the tap count changed.
+    fn ensure_tables(&mut self, config: &SynthConfig) {
         let needed_taps = match config.resample {
             ResampleMode::SincSampleNyquist { half_taps }
             | ResampleMode::SincOutputNyquist { half_taps } => Some(half_taps),
@@ -408,6 +534,11 @@ impl SampleSynthesizer {
                 self.resample_half_taps = ht;
             }
         }
+    }
+
+    /// Advances all active voices by one sample and mixes them into `val_l`/`val_r`.
+    pub fn next_sample(&mut self, config: &SynthConfig) {
+        self.ensure_tables(config);
         let tables = self.resample_tables.as_ref();
 
         let mut mono = 0.0;
@@ -416,6 +547,47 @@ impl SampleSynthesizer {
             mono += self.instrs[i].output;
         }
 
+        self.apply_stereo(mono, config);
+    }
+
+    /// Renders `n` samples in one block, adding the track's stereo output into
+    /// `acc_l[..n]`/`acc_r[..n]` when `mix` is true. State (voice positions, delay lines,
+    /// crossover filters) advances identically either way — `mix: false` matches how
+    /// [`Controller::next_sample`] keeps disabled tracks running without mixing them.
+    ///
+    /// Equivalent to `n` calls of [`Self::next_sample`], but voices render the whole block in one
+    /// pass (see [`SampleInstrument::advance_block`]). `n` must be at most [`MAX_BLOCK`].
+    ///
+    /// [`Controller::next_sample`]: crate::controller::Controller::next_sample
+    pub fn render_block(
+        &mut self,
+        config: &SynthConfig,
+        n: usize,
+        acc_l: &mut [f64],
+        acc_r: &mut [f64],
+        mix: bool,
+    ) {
+        assert!(n <= MAX_BLOCK && acc_l.len() >= n && acc_r.len() >= n);
+        self.ensure_tables(config);
+        let tables = self.resample_tables.as_ref();
+
+        let mut mono = [0.0f64; MAX_BLOCK];
+        for &i in &self.active_instrs {
+            self.instrs[i].advance_block(config.resample, tables, &mut mono[..n]);
+        }
+
+        for (j, &m) in mono[..n].iter().enumerate() {
+            self.apply_stereo(m, config);
+            if mix {
+                acc_l[j] += self.val_l;
+                acc_r[j] += self.val_r;
+            }
+        }
+    }
+
+    /// The per-sample stereo stage: pan, optional Haas widening, and the bass-mono crossover.
+    /// Consumes the voice-mixed `mono` sample and sets `val_l`/`val_r`.
+    fn apply_stereo(&mut self, mono: f64, config: &SynthConfig) {
         if !config.stereo_separation {
             self.val_l = mono * (1.0 - self.pan) * self.volume;
             self.val_r = mono * self.pan * self.volume;
