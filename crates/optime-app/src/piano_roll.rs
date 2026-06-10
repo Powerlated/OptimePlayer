@@ -133,10 +133,7 @@ impl PianoRoll {
 
         painter.rect_filled(rect, 0.0, Color32::from_rgb(0x0c, 0x0e, 0x14));
 
-        let roll = Rect::from_min_max(
-            Pos2::new(rect.min.x + KEYBOARD_W, rect.min.y),
-            rect.max,
-        );
+        let roll = Rect::from_min_max(Pos2::new(rect.min.x + KEYBOARD_W, rect.min.y), rect.max);
         let lane_h = roll.height() / LANES as f32;
         let cursor_x = roll.min.x + roll.width() * CURSOR_FRAC;
         let ppt = roll.width() as f64 / WINDOW_TICKS; // points per tick
@@ -254,15 +251,26 @@ impl PianoRoll {
             let rounding = (bar.height() * 0.4).min(4.0);
 
             // Glow halos.
-            painter.rect_filled(bar.expand(lane_h * 0.4), rounding + 3.0, scale_alpha(base, 0.10 * a));
-            painter.rect_filled(bar.expand(lane_h * 0.16), rounding + 2.0, scale_alpha(base, 0.22 * a));
+            painter.rect_filled(
+                bar.expand(lane_h * 0.4),
+                rounding + 3.0,
+                scale_alpha(base, 0.10 * a),
+            );
+            painter.rect_filled(
+                bar.expand(lane_h * 0.16),
+                rounding + 2.0,
+                scale_alpha(base, 0.22 * a),
+            );
 
             // Core bar.
             let core = if playing { lighten(base, 0.35) } else { base };
             painter.rect_filled(bar, rounding, scale_alpha(core, a));
             // Glossy top highlight.
             painter.rect_filled(
-                Rect::from_min_max(bar.min, Pos2::new(bar.max.x, bar.min.y + bar.height() * 0.4)),
+                Rect::from_min_max(
+                    bar.min,
+                    Pos2::new(bar.max.x, bar.min.y + bar.height() * 0.4),
+                ),
                 rounding,
                 scale_alpha(lighten(core, 0.6), 0.5 * a),
             );
@@ -285,9 +293,16 @@ impl PianoRoll {
             Pos2::new(cursor_x - 3.0, roll.min.y),
             Pos2::new(cursor_x + 3.0, roll.max.y),
         );
-        painter.rect_filled(glow, 0.0, Color32::from_rgba_unmultiplied(0x6c, 0x7a, 0xff, 40));
+        painter.rect_filled(
+            glow,
+            0.0,
+            Color32::from_rgba_unmultiplied(0x6c, 0x7a, 0xff, 40),
+        );
         painter.line_segment(
-            [Pos2::new(cursor_x, roll.min.y), Pos2::new(cursor_x, roll.max.y)],
+            [
+                Pos2::new(cursor_x, roll.min.y),
+                Pos2::new(cursor_x, roll.max.y),
+            ],
             Stroke::new(1.5, Color32::from_rgb(0x9a, 0xa6, 0xff)),
         );
     }
@@ -329,7 +344,11 @@ impl PianoRoll {
                 None => scale_alpha(rest, dim),
             };
             painter.rect_filled(key, 0.0, fill);
-            painter.rect_stroke(key, 0.0, Stroke::new(0.5, Color32::from_rgb(0x05, 0x06, 0x0a)));
+            painter.rect_stroke(
+                key,
+                0.0,
+                Stroke::new(0.5, Color32::from_rgb(0x05, 0x06, 0x0a)),
+            );
         }
     }
 }
