@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::controller::SynthConfig;
 use crate::dsp::BiquadFilter;
-use crate::resample::{resample_sinc, ResampleTables};
+use crate::resample::{resample_sinc, tap_window, ResampleTables, MAX_HALF_TAPS};
 use crate::sample::{ResampleMode, Sample};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
 
@@ -70,6 +70,11 @@ pub struct SampleInstrument {
     pub midi_note: f64,
     /// Fractional sample position.
     pub sample_t: f64,
+    /// Whether a looping voice has wrapped past the sample end at least once. Once it has, the
+    /// signal under the gather window is fully periodic in the loop, so every tap may be read
+    /// through the periodic mapping (before the first wrap, taps left of the loop end must still
+    /// read the one-shot pre-loop data directly).
+    wrapped: bool,
     finetune: f64,
     finetune_lfo: f64,
     freq_ratio: f64,
@@ -90,6 +95,7 @@ impl SampleInstrument {
             start_time: 0,
             midi_note: 0.0,
             sample_t: 0.0,
+            wrapped: false,
             finetune: 0.0,
             finetune_lfo: 0.0,
             freq_ratio: 0.0,
@@ -105,7 +111,30 @@ impl SampleInstrument {
         // r = source samples advanced per output sample (pitch-shifted playback speed).
         let r = self.freq_ratio * self.sample.sample_rate * self.inv_sample_rate;
         self.sample_t += r;
+
+        let data = &self.sample.data;
+        let looping = self.sample.looping;
+        let loop_point = self.sample.loop_point;
+        let data_len = data.len() as i64;
+        let loop_len = data_len - loop_point;
+
+        // Fold the read position back into the loop body once playback wraps. This keeps the
+        // position (and its fractional precision) bounded over arbitrarily long notes, and lets
+        // the sinc gather below read source taps without a per-tap loop-mapping division.
+        if looping && loop_len > 0 && self.sample_t >= data_len as f64 {
+            let lp = loop_point as f64;
+            self.sample_t = (self.sample_t - lp) % loop_len as f64 + lp;
+            self.wrapped = true;
+        }
         let pos = self.sample_t;
+
+        // A fully attenuated voice (release floor / silent track) contributes exactly 0 — skip
+        // the gather. The position keeps advancing so re-opening the envelope stays seamless.
+        if self.volume == 0.0 {
+            self.output = 0.0;
+            return;
+        }
+
         let is_psg = self.sample.is_psg_square;
 
         // Resolve the effective mode: PSG squares under SampleNyquist → nearest (per design).
@@ -117,21 +146,13 @@ impl SampleInstrument {
             other => other,
         };
 
-        // Build a borrow of the sample fields needed by the gather closure *before* we
-        // borrow self mutably for output.  These are all reads from self.sample (an Arc).
-        let data = &self.sample.data;
-        let looping = self.sample.looping;
-        let loop_point = self.sample.loop_point;
-        let data_len = data.len() as i64;
-
-        // Loop-aware sample accessor (inline of sample_data_at, avoids a second &self borrow).
+        // Loop-aware sample accessor for the cheap 1–2 tap modes (and the no-tables fallback).
         let get = |mut t: i64| -> f64 {
             if t >= data_len && looping {
-                let ll = data_len - loop_point;
-                if ll <= 0 {
+                if loop_len <= 0 {
                     return 0.0;
                 }
-                t = (t - loop_point).rem_euclid(ll) + loop_point;
+                t = (t - loop_point).rem_euclid(loop_len) + loop_point;
             }
             if t >= 0 && t < data_len {
                 f64::from(data[t as usize])
@@ -161,7 +182,66 @@ impl SampleInstrument {
                     //   crunch images that sit below output Nyquist while still band-limiting the
                     //   hard edges (no nearest-neighbour jitter).
                     let fc = if step_mode || r > 1.0 { 0.5 / r } else { 0.5 };
-                    resample_sinc(tbl, get, pos, fc, step_mode)
+
+                    // Pre-stage the exact tap window the gather will read so its accessor is a
+                    // branch-free slice index instead of a per-tap loop-mapping with a division
+                    // (the gather is the synth's hot loop: ~2P taps per voice per output sample).
+                    let (k_lo, k_hi) = tap_window(tbl, pos);
+                    let periodic = looping && self.wrapped && loop_len > 0;
+                    if !periodic && k_lo >= 0 && k_hi < data_len {
+                        // Fast path: the whole window is in-bounds one-shot data.
+                        let src = &data[k_lo as usize..=k_hi as usize];
+                        resample_sinc(
+                            tbl,
+                            |t| f64::from(src[(t - k_lo) as usize]),
+                            pos,
+                            fc,
+                            step_mode,
+                        )
+                    } else {
+                        // Edge path: stage the window into a stack buffer so the gather still
+                        // reads a plain slice.
+                        let n = (k_hi - k_lo + 1) as usize;
+                        let mut buf = [0.0f32; 2 * MAX_HALF_TAPS + 2];
+                        if periodic {
+                            // The voice has wrapped: the signal is periodic in the loop, so
+                            // every tap maps into the loop body. One division to place the
+                            // first tap, then an increment-and-wrap walk.
+                            let mut idx = (k_lo - loop_point).rem_euclid(loop_len) + loop_point;
+                            for slot in buf[..n].iter_mut() {
+                                *slot = data[idx as usize];
+                                idx += 1;
+                                if idx == data_len {
+                                    idx = loop_point;
+                                }
+                            }
+                        } else {
+                            // Window crosses the sample start/end before any wrap: zeros
+                            // outside, direct reads inside, and (for looping voices) the right
+                            // tail peeks into the first loop pass.
+                            for (j, slot) in buf[..n].iter_mut().enumerate() {
+                                let t = k_lo + j as i64;
+                                *slot = if t < 0 {
+                                    0.0
+                                } else if t < data_len {
+                                    data[t as usize]
+                                } else if looping && loop_len > 0 {
+                                    data[((t - loop_point).rem_euclid(loop_len) + loop_point)
+                                        as usize]
+                                } else {
+                                    0.0
+                                };
+                            }
+                        }
+                        let src = &buf[..n];
+                        resample_sinc(
+                            tbl,
+                            |t| f64::from(src[(t - k_lo) as usize]),
+                            pos,
+                            fc,
+                            step_mode,
+                        )
+                    }
                 } else {
                     // Tables not yet built; fall back to nearest.
                     get(pos.floor() as i64)
@@ -297,6 +377,7 @@ impl SampleSynthesizer {
             instr.volume = volume;
             instr.start_time = meta;
             instr.sample_t = 0.0;
+            instr.wrapped = false;
             instr.playing = true;
         }
 

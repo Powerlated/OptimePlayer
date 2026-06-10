@@ -39,6 +39,9 @@ const OVERSAMPLE: usize = 512;
 const TAU_MAX: usize = 64;
 /// Samples in the Blackman window table over the normalized half-support `x = d/P ∈ [0, 1]`.
 const WIN_OVERSAMPLE: usize = 4096;
+/// Largest supported `half_taps` (`P`). [`ResampleTables::new`] clamps to this, so callers may size
+/// stack buffers for the widest possible gather window (see [`tap_window`]).
+pub const MAX_HALF_TAPS: usize = TAU_MAX;
 
 /// `sinc(x) = sin(πx)/(πx)` (the normalized cardinal sine, unit zero-crossings).
 fn sinc(x: f64) -> f64 {
@@ -113,15 +116,15 @@ fn kernels() -> &'static Kernels {
     })
 }
 
-/// Linear interpolation into an `f32` table at floating index `idx` (clamped at the top edge),
-/// widening to `f64` for the gather accumulation.
+/// Linear interpolation into an `f32` table at floating index `idx`, widening to `f64` for the
+/// gather accumulation. Callers guarantee `idx < tab.len() - 1` (each lookup helper guards its
+/// table's edge before calling), so `i + 1` is always in range.
 #[inline]
 fn lerp(tab: &[f32], idx: f64) -> f64 {
     let i = idx as usize;
     let frac = idx - i as f64;
-    let hi = (i + 1).min(tab.len() - 1);
     let lo = f64::from(tab[i]);
-    lo + (f64::from(tab[hi]) - lo) * frac
+    lo + (f64::from(tab[i + 1]) - lo) * frac
 }
 
 /// The BLEP step `S(τ) = ∫₀^τ sinc`, looked up at the **pre-scaled signed index** `idx = τ·OVERSAMPLE`.
@@ -187,6 +190,15 @@ impl ResampleTables {
     }
 }
 
+/// The inclusive source-tap window `[k_lo, k_hi]` the gather reads for a read position `pos`:
+/// every integer `k` with `|pos − k| ≤ P`. Exported so callers can pre-stage exactly the source
+/// samples [`resample_sinc`] will request (the formula must match the one used internally).
+#[inline]
+pub fn tap_window(tables: &ResampleTables, pos: f64) -> (i64, i64) {
+    let p = tables.half_taps as f64;
+    ((pos - p).floor() as i64, (pos + p).ceil() as i64)
+}
+
 /// Windowed-sinc polyphase gather — the single shared resampler for both sinc modes.
 ///
 /// # Parameters
@@ -219,8 +231,7 @@ pub fn resample_sinc(
     let win_idx_step = inv_p * WIN_OVERSAMPLE as f64; // Δ window index per source sample
 
     // Fixed source-sample support: |pos − k| ≤ P, i.e. ≈ 2P taps regardless of fc.
-    let k_lo = (pos - p).floor() as i64;
-    let k_hi = (pos + p).ceil() as i64;
+    let (k_lo, k_hi) = tap_window(tables, pos);
 
     if step_mode {
         // BLEP gather of the boxcar-integrated windowed kernel: tap `k` weighs its source-sample
