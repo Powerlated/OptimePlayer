@@ -1,4 +1,4 @@
-name: Deploy web app to GitHub Pages
+﻿name: Deploy web app to GitHub Pages
 
 on:
   push:
@@ -22,7 +22,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust (with wasm target)
-        uses: dtolnay/rust-toolchain@stable
+        # Nightly: the default `simd` feature uses portable SIMD (see rust-toolchain.toml).
+        uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32-unknown-unknown
 

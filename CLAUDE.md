@@ -10,6 +10,8 @@ The project is a **Rust workspace** with an `egui`/`eframe` UI that runs both na
 
 ## Commands
 
+The workspace pins **nightly Rust** (`rust-toolchain.toml`): the default `simd` cargo feature uses `std::simd` (portable SIMD) in the sinc resampler. `--no-default-features` on `optime-core` builds the scalar gather (works on stable). `.cargo/config.toml` sets `-C target-cpu=native` for native x86-64/aarch64 hosts — the hot path relies on AVX2/FMA codegen.
+
 - `cargo run -p optime-app` — run the native desktop app (loads a demo from `demos/` on start)
 - `cargo test --workspace` — run all tests (unit + SDAT integration + pokediamond-reference tests)
 - `cargo clippy --workspace --all-targets` — lint (kept warning-clean)

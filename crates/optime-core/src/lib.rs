@@ -1,3 +1,4 @@
+#![cfg_attr(feature = "simd", feature(portable_simd))]
 //! Platform-independent emulation of the Nintendo DS sound system.
 //!
 //! This is an idiomatic Rust port of the original `OptimePlayer.js` engine. It parses SDAT

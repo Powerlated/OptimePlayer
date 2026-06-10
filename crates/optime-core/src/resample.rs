@@ -71,6 +71,8 @@ fn blackman(x: f64) -> f64 {
 /// and the load cost in the strided gather, while sums still accumulate in `f64`.
 struct Kernels {
     /// `sinc[k] = sinc(k / OVERSAMPLE)` for `k` in `0..=TAU_MAX * OVERSAMPLE` (symmetric).
+    /// (Unused by the `simd` build, which evaluates the impulse kernel analytically.)
+    #[cfg(not(feature = "simd"))]
     sinc: Vec<f32>,
     /// `sinc_int[k] = ∫₀^{k/OVERSAMPLE} sinc(t) dt = (1/π)·Si(π·τ)`, the cumulative integral of the
     /// bare sinc (the BLEP step), odd in `τ` with asymptote `0.5` as `τ → ∞`.
@@ -106,6 +108,7 @@ fn kernels() -> &'static Kernels {
         }
 
         Kernels {
+            #[cfg(not(feature = "simd"))]
             sinc: sinc_f64.iter().map(|&v| v as f32).collect(),
             sinc_int: sinc_int.iter().map(|&v| v as f32).collect(),
             // Blackman window over the normalized half-support.
@@ -159,6 +162,8 @@ fn win_at(k: &Kernels, idx: f64) -> f64 {
 /// Bare sinc looked up at the non-negative pre-scaled index `idx = τ·OVERSAMPLE`, returning 0 past
 /// the table. Safe because in impulse mode (`fc ≤ 0.5`, `P ≤ TAU_MAX`) the window already vanishes
 /// wherever `idx` would run off the end, so the 0 is only ever multiplied by a 0 window.
+/// (The `simd` build evaluates the impulse kernel analytically and does not read this table.)
+#[cfg(not(feature = "simd"))]
 #[inline]
 fn sinc_at(k: &Kernels, idx: f64) -> f64 {
     if idx >= (k.sinc.len() - 1) as f64 {
@@ -236,68 +241,202 @@ pub fn resample_sinc(
     let sinc_idx_step = 2.0 * fc * OVERSAMPLE as f64; // Δ index per unit τ-step (one source sample)
     let win_idx_step = WIN_OVERSAMPLE as f64 / tables.half_taps as f64; // Δ window index per source sample
 
+    // The gather kernel is selected at build time: the portable-SIMD version when the nightly
+    // `simd` feature is enabled, the scalar version otherwise. Both compute the same
+    // `(Σ src·w, Σ w)` pair (summation order differs, so results may diverge by float rounding).
+    let d0 = pos - k_lo as f64; // offset of the first tap from the read position (≈ P)
+                                // Step mode always uses the scalar gather: its cumulative-sinc table lookup carries one edge
+                                // value across iterations, which measures faster than any vectorized variant (the table
+                                // gathers dominate). Impulse mode vectorizes well because its kernel can be evaluated
+                                // analytically with rotating phasors — no table traffic at all.
     let (out, wsum) = if step_mode {
-        // BLEP gather of the boxcar-integrated windowed kernel: tap `k` weighs its source-sample
-        // bin `[pos−k−1, pos−k]` by the band-limited step rise across it,
-        //     [S(2fc·(pos−k)) − S(2fc·(pos−k−1))] · blackman(|bin-center| / P),
-        // where `S` is the cumulative sinc integral. The bin's upper-edge `S` value is the next
-        // bin's lower edge, so it is carried across iterations (one `sinc_int` lookup per tap).
-        // Normalizing by the weight sum forces exact DC unity (and absorbs the window).
-        let mut out = 0.0;
-        let mut wsum = 0.0;
-        let d_hi0 = pos - k_lo as f64;
-        let mut si_hi = sinc_int_at(k, sinc_idx_step * d_hi0);
-        let mut lo_idx = sinc_idx_step * (d_hi0 - 1.0); // S index of the bin's lower edge
-        let mut mid_idx = win_idx_step * (d_hi0 - 0.5); // window index of the bin centre (signed)
-        for &s in src {
-            let si_lo = sinc_int_at(k, lo_idx);
-            let w = win_at(k, mid_idx.abs()) * (si_hi - si_lo);
-            out += f64::from(s) * w;
-            wsum += w;
-            si_hi = si_lo;
-            lo_idx -= sinc_idx_step;
-            mid_idx -= win_idx_step;
-        }
-        (out, wsum.abs())
+        gather_step(k, src, d0, sinc_idx_step, win_idx_step)
     } else {
-        // Impulse gather: out = Σ_k src(k) · sinc(2fc·|d|) · blackman(|d|/P), DC-normalized.
-        // The kernel is even in `d = pos − k`, so we split at `d = 0` into two monotonic runs and
-        // walk `|d|`'s table indices by a constant add each tap — no per-tap `abs`/multiply. Taps
-        // past the support contribute a zero window, so no in-loop bounds test is needed.
-        let mut out = 0.0;
-        let mut wsum = 0.0;
-        let mid_j = (pos.floor() as i64 - k_lo) as usize; // last tap with d = pos − k ≥ 0
-        let (right, left) = src.split_at(mid_j + 1);
-
-        // Right run: descending |d| = pos − k.
-        let mut sinc_idx = (pos - k_lo as f64) * sinc_idx_step;
-        let mut win_idx = (pos - k_lo as f64) * win_idx_step;
-        for &s in right {
-            let w = sinc_at(k, sinc_idx) * win_at(k, win_idx);
-            out += f64::from(s) * w;
-            wsum += w;
-            sinc_idx -= sinc_idx_step;
-            win_idx -= win_idx_step;
+        #[cfg(feature = "simd")]
+        {
+            simd::gather_impulse(src, d0, fc, tables.half_taps as f64)
         }
-        // Left run: ascending |d| = k − pos.
-        let d0 = (k_lo + mid_j as i64 + 1) as f64 - pos;
-        let mut sinc_idx = d0 * sinc_idx_step;
-        let mut win_idx = d0 * win_idx_step;
-        for &s in left {
-            let w = sinc_at(k, sinc_idx) * win_at(k, win_idx);
-            out += f64::from(s) * w;
-            wsum += w;
-            sinc_idx += sinc_idx_step;
-            win_idx += win_idx_step;
+        #[cfg(not(feature = "simd"))]
+        {
+            let mid_j = (pos.floor() as i64 - k_lo) as usize; // last tap with d = pos − k ≥ 0
+            gather_impulse(k, src, d0, mid_j, sinc_idx_step, win_idx_step)
         }
-        (out, wsum)
     };
+    let wsum = if step_mode { wsum.abs() } else { wsum };
 
     if wsum > 1e-12 {
         out / wsum
     } else {
         // Degenerate weights (pathological fc): fall back to the nearest staged tap.
         f64::from(src[(pos.round() as i64 - k_lo) as usize])
+    }
+}
+
+/// Scalar BLEP gather of the boxcar-integrated windowed kernel: tap `j` weighs its source-sample
+/// bin `[pos−k−1, pos−k]` (where `d_hi = d0 − j = pos − k`) by the band-limited step rise across
+/// it,
+///     `[S(2fc·d_hi) − S(2fc·(d_hi−1))] · blackman(|bin-center| / P)`,
+/// where `S` is the cumulative sinc integral. The bin's upper-edge `S` value is the next bin's
+/// lower edge, so it is carried across iterations (one `sinc_int` lookup per tap). Normalizing by
+/// the weight sum forces exact DC unity (and absorbs the window). Returns `(Σ src·w, Σ w)`.
+fn gather_step(
+    k: &Kernels,
+    src: &[f32],
+    d0: f64,
+    sinc_idx_step: f64,
+    win_idx_step: f64,
+) -> (f64, f64) {
+    let mut out = 0.0;
+    let mut wsum = 0.0;
+    let mut si_hi = sinc_int_at(k, sinc_idx_step * d0);
+    let mut lo_idx = sinc_idx_step * (d0 - 1.0); // S index of the bin's lower edge
+    let mut mid_idx = win_idx_step * (d0 - 0.5); // window index of the bin centre (signed)
+    for &s in src {
+        let si_lo = sinc_int_at(k, lo_idx);
+        let w = win_at(k, mid_idx.abs()) * (si_hi - si_lo);
+        out += f64::from(s) * w;
+        wsum += w;
+        si_hi = si_lo;
+        lo_idx -= sinc_idx_step;
+        mid_idx -= win_idx_step;
+    }
+    (out, wsum)
+}
+
+/// Scalar impulse gather: `out = Σ_j src[j] · sinc(2fc·|d|) · blackman(|d|/P)` with `d = d0 − j`,
+/// DC-normalized by the caller. The kernel is even in `d`, so the window is split at `d = 0`
+/// (tap `mid_j`) into two monotonic runs that walk `|d|`'s table indices by a constant add each
+/// tap — no per-tap `abs`/multiply. Taps past the support contribute a zero window, so no in-loop
+/// bounds test is needed. Returns `(Σ src·w, Σ w)`.
+#[cfg(not(feature = "simd"))]
+fn gather_impulse(
+    k: &Kernels,
+    src: &[f32],
+    d0: f64,
+    mid_j: usize,
+    sinc_idx_step: f64,
+    win_idx_step: f64,
+) -> (f64, f64) {
+    let mut out = 0.0;
+    let mut wsum = 0.0;
+    let (right, left) = src.split_at(mid_j + 1);
+
+    // Right run: descending |d| = d0 − j.
+    let mut sinc_idx = d0 * sinc_idx_step;
+    let mut win_idx = d0 * win_idx_step;
+    for &s in right {
+        let w = sinc_at(k, sinc_idx) * win_at(k, win_idx);
+        out += f64::from(s) * w;
+        wsum += w;
+        sinc_idx -= sinc_idx_step;
+        win_idx -= win_idx_step;
+    }
+    // Left run: ascending |d| = j − d0.
+    let d_left = mid_j as f64 + 1.0 - d0;
+    let mut sinc_idx = d_left * sinc_idx_step;
+    let mut win_idx = d_left * win_idx_step;
+    for &s in left {
+        let w = sinc_at(k, sinc_idx) * win_at(k, win_idx);
+        out += f64::from(s) * w;
+        wsum += w;
+        sinc_idx += sinc_idx_step;
+        win_idx += win_idx_step;
+    }
+    (out, wsum)
+}
+
+/// Portable-SIMD (`std::simd`, nightly) impulse gather. Instead of vector-gathering the kernel
+/// tables (hardware gathers measured *slower* than the scalar walk), the kernel is evaluated
+/// analytically, four taps at a time, with **rotating phasors**: per chunk, each needed sin/cos
+/// advances by a constant angle via one complex multiply — pure FMA math, zero table traffic.
+/// This is also (slightly) more accurate than the table interpolation.
+///
+/// Accumulation runs in four parallel partial sums reduced at the end, so results differ from the
+/// scalar build by float rounding — the DC normalization in [`resample_sinc`] stays exact because
+/// `out` and `wsum` accumulate with identical operations.
+#[cfg(feature = "simd")]
+mod simd {
+    use core::f64::consts::PI;
+    use std::simd::prelude::*;
+
+    const LANES: usize = 4;
+    type Fv = Simd<f64, LANES>;
+
+    /// A vector of sin/cos pairs advanced by a fixed per-chunk angle step via complex rotation.
+    struct Phasor {
+        sin: Fv,
+        cos: Fv,
+        step_sin: f64,
+        step_cos: f64,
+    }
+
+    impl Phasor {
+        /// Lanes at angles `rate · (d0 − i)` for `i = 0..LANES`, stepping by `−rate·LANES`/chunk.
+        fn new(rate: f64, d0: f64) -> Self {
+            let (mut sin, mut cos) = ([0.0; LANES], [0.0; LANES]);
+            for i in 0..LANES {
+                (sin[i], cos[i]) = f64::sin_cos(rate * (d0 - i as f64));
+            }
+            let (step_sin, step_cos) = f64::sin_cos(rate * LANES as f64);
+            Self {
+                sin: Fv::from_array(sin),
+                cos: Fv::from_array(cos),
+                step_sin,
+                step_cos,
+            }
+        }
+
+        /// Rotates every lane by the chunk step: `θ ← θ − rate·LANES`.
+        #[inline]
+        fn rotate(&mut self) {
+            let (s, c) = (self.sin, self.cos);
+            let (ss, sc) = (Fv::splat(self.step_sin), Fv::splat(self.step_cos));
+            self.sin = s * sc - c * ss;
+            self.cos = c * sc + s * ss;
+        }
+    }
+
+    /// Vectorized impulse gather: `w(d) = sinc(2fc·d) · blackman(|d|/P)` evaluated analytically.
+    /// `sinc` is even and `blackman` is even in `d`, so no run splitting or `abs` ordering is
+    /// needed — one support mask per chunk. Returns `(Σ src·w, Σ w)`.
+    pub(super) fn gather_impulse(src: &[f32], d0: f64, fc: f64, p: f64) -> (f64, f64) {
+        // Angle rates per source sample: πτ = a·d for the sinc, and the blackman harmonics.
+        let a = PI * 2.0 * fc;
+        let b = PI / p;
+        let mut ph_sinc = Phasor::new(a, d0); // sin(a·d) / (a·d) = sinc(2fc·d)
+        let mut ph_win1 = Phasor::new(b, d0); // cos(π·d/P)
+        let mut ph_win2 = Phasor::new(2.0 * b, d0); // cos(2π·d/P)
+
+        let (mut out, mut wsum) = (Fv::splat(0.0), Fv::splat(0.0));
+        let mut d = Fv::splat(d0) - Fv::from_array([0.0, 1.0, 2.0, 3.0]);
+        for chunk in src.chunks_exact(LANES) {
+            // sinc(2fc·d) = sin(a·d)/(a·d), with the removable singularity at d = 0.
+            let arg = d * Fv::splat(a);
+            let near_zero = arg.abs().simd_lt(Fv::splat(1e-12));
+            let sinc = near_zero.select(Fv::splat(1.0), ph_sinc.sin / arg);
+            // blackman(|d|/P), 0 outside the ±P support.
+            let win =
+                Fv::splat(0.42) + Fv::splat(0.5) * ph_win1.cos + Fv::splat(0.08) * ph_win2.cos;
+            let inside = d.abs().simd_lt(Fv::splat(p));
+            let w = inside.select(sinc * win, Fv::splat(0.0));
+
+            out += Simd::<f32, LANES>::from_slice(chunk).cast::<f64>() * w;
+            wsum += w;
+            d -= Fv::splat(LANES as f64);
+            ph_sinc.rotate();
+            ph_win1.rotate();
+            ph_win2.rotate();
+        }
+        let (mut out, mut wsum) = (out.reduce_sum(), wsum.reduce_sum());
+
+        let done = src.len() - src.chunks_exact(LANES).remainder().len();
+        for (j, &s) in src.iter().enumerate().skip(done) {
+            let d = d0 - j as f64;
+            let w = super::sinc(2.0 * fc * d) * super::blackman(d.abs() / p);
+            out += f64::from(s) * w;
+            wsum += w;
+        }
+        (out, wsum)
     }
 }
 

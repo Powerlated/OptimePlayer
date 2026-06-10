@@ -84,13 +84,13 @@ pub fn show_crossover_window(
                     Line::new(lp_mag)
                         .color(Color32::from_rgb(100, 180, 255))
                         .name("Low-pass")
-                        .fill(-60.0),
+                        .fill(-60.0_f32),
                 );
                 plot_ui.line(
                     Line::new(hp_mag)
                         .color(Color32::from_rgb(255, 160, 80))
                         .name("High-pass")
-                        .fill(-60.0),
+                        .fill(-60.0_f32),
                 );
             });
 
@@ -140,12 +140,12 @@ pub fn show_crossover_window(
                 plot_ui.line(
                     Line::new(lp_phase)
                         .color(Color32::from_rgb(100, 180, 255))
-                        .fill(0.0),
+                        .fill(0.0_f32),
                 );
                 plot_ui.line(
                     Line::new(hp_phase)
                         .color(Color32::from_rgb(255, 160, 80))
-                        .fill(0.0),
+                        .fill(0.0_f32),
                 );
             });
 
@@ -190,14 +190,14 @@ pub fn show_crossover_window(
                     Points::new(pole_pts)
                         .color(Color32::from_rgb(255, 100, 100))
                         .shape(egui_plot::MarkerShape::Cross)
-                        .radius(8.0)
+                        .radius(8.0_f32)
                         .name("Poles (LP)"),
                 );
                 plot_ui.points(
                     Points::new(zero_pts)
                         .color(Color32::from_rgb(100, 200, 100))
                         .shape(egui_plot::MarkerShape::Circle)
-                        .radius(6.0)
+                        .radius(6.0_f32)
                         .name("Zeros (LP)"),
                 );
 
@@ -210,14 +210,14 @@ pub fn show_crossover_window(
                     Points::new(hp_pole_pts)
                         .color(Color32::from_rgb(255, 180, 60))
                         .shape(egui_plot::MarkerShape::Cross)
-                        .radius(8.0)
+                        .radius(8.0_f32)
                         .name("Poles (HP)"),
                 );
                 plot_ui.points(
                     Points::new(hp_zero_pts)
                         .color(Color32::from_rgb(100, 200, 200))
                         .shape(egui_plot::MarkerShape::Circle)
-                        .radius(6.0)
+                        .radius(6.0_f32)
                         .name("Zeros (HP)"),
                 );
             });
@@ -275,7 +275,7 @@ pub fn show_sinc_window(ctx: &egui::Context, open: &mut bool, mode: ResampleMode
                 plot_ui.line(
                     Line::new(mag_pts)
                         .color(Color32::from_rgb(120, 210, 160))
-                        .fill(-80.0),
+                        .fill(-80.0_f32),
                 );
             });
 
@@ -302,7 +302,7 @@ pub fn show_sinc_window(ctx: &egui::Context, open: &mut bool, mode: ResampleMode
                 plot_ui.line(
                     Line::new(phase_pts)
                         .color(Color32::from_rgb(120, 210, 160))
-                        .fill(0.0),
+                        .fill(0.0_f32),
                 );
             });
 
@@ -327,7 +327,7 @@ pub fn show_sinc_window(ctx: &egui::Context, open: &mut bool, mode: ResampleMode
                     plot_ui.line(
                         Line::new(stem)
                             .color(Color32::from_rgb(200, 200, 80))
-                            .width(1.0),
+                            .width(1.0_f32),
                     );
                 }
                 // Dot at the tip of each tap.
@@ -339,7 +339,7 @@ pub fn show_sinc_window(ctx: &egui::Context, open: &mut bool, mode: ResampleMode
                 plot_ui.points(
                     Points::new(tips)
                         .color(Color32::from_rgb(240, 220, 60))
-                        .radius(3.5),
+                        .radius(3.5_f32),
                 );
             });
         });

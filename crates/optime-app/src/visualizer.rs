@@ -92,7 +92,11 @@ pub fn draw(
             Color32::from_rgb(0xCC, 0, 0)
         };
         painter.rect_filled(toggle_rect, 2.0, alpha(toggle_color));
-        painter.rect_stroke(toggle_rect, 2.0, Stroke::new(1.0, alpha(Color32::BLACK)));
+        painter.rect_stroke(
+            toggle_rect,
+            2.0,
+            Stroke::new(1.0_f32, alpha(Color32::BLACK)),
+        );
 
         // White keys (background + lit).
         for j in 0..88usize {
@@ -109,7 +113,7 @@ pub fn draw(
                 Vec2::new(WHITE_W - 1.0, WHITE_H),
             );
             painter.rect_filled(key_rect, 0.0, alpha(Color32::WHITE));
-            painter.rect_stroke(key_rect, 0.0, Stroke::new(0.5, alpha(Color32::GRAY)));
+            painter.rect_stroke(key_rect, 0.0, Stroke::new(0.5_f32, alpha(Color32::GRAY)));
             if snap.notes_on[track][midi] {
                 let c = if snap.notes_kbd[track][midi] {
                     Color32::RED
@@ -153,7 +157,7 @@ pub fn draw(
             painter.rect_stroke(
                 outline,
                 0.0,
-                Stroke::new(1.5, Color32::from_rgb(0, 0x66, 0xFF)),
+                Stroke::new(1.5_f32, Color32::from_rgb(0, 0x66, 0xFF)),
             );
         }
     }

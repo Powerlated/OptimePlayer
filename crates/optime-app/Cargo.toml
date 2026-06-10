@@ -1,10 +1,14 @@
-[package]
+﻿[package]
 name = "optime-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "egui front-end (desktop + web) for the Optime Player DS sound engine."
+
+[features]
+# Nightly portable-SIMD sinc gather (see optime-core's feature of the same name).
+simd = ["optime-core/simd"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

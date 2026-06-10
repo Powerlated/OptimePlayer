@@ -1,0 +1,14 @@
+# Tune native builds for the build machine: the synth hot path (sinc gather) gains ~50-80% from
+# AVX2/FMA codegen, and the portable-SIMD kernels only lower to real vector code with it. Binaries
+# are built from source per machine, so non-portability is fine. (wasm32 is unaffected.)
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=native"]

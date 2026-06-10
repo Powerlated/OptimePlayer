@@ -1,0 +1,4 @@
+# The default `simd` feature uses `std::simd` (portable SIMD), which is nightly-only.
+[toolchain]
+channel = "nightly"
+targets = ["wasm32-unknown-unknown"]

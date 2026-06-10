@@ -5,7 +5,10 @@
 //! has real-time headroom; below 1× means it cannot keep up and the audio callback will underrun.
 //!
 //! Usage: `cargo run --release -p optime-core --example bench_resample [sseq_id] [half_taps]`
-//! Defaults to SSEQ 1025 from `demos/pokemon-platinum.sdat` at 64 taps.
+//! Defaults to SSEQ 1025 from `demos/pokemon-platinum.sdat` at 64 taps (per side).
+//!
+//! The default build uses the nightly portable-SIMD gather plus `target-cpu=native` (see
+//! `.cargo/config.toml`); add `--no-default-features` to time the scalar gather instead.
 
 use std::time::Instant;
 

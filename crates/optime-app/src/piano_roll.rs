@@ -177,7 +177,7 @@ impl PianoRoll {
             if pc == 0 {
                 painter.line_segment(
                     [Pos2::new(roll.min.x, bot), Pos2::new(roll.max.x, bot)],
-                    Stroke::new(1.0, Color32::from_rgb(0x22, 0x26, 0x33)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(0x22, 0x26, 0x33)),
                 );
             }
         }
@@ -192,7 +192,10 @@ impl PianoRoll {
             if x >= roll.min.x {
                 painter.line_segment(
                     [Pos2::new(x, roll.min.y), Pos2::new(x, roll.max.y)],
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x30, 0x36, 0x48, 80)),
+                    Stroke::new(
+                        1.0_f32,
+                        Color32::from_rgba_unmultiplied(0x30, 0x36, 0x48, 80),
+                    ),
                 );
             }
             t += GRID_TICKS;
@@ -303,7 +306,7 @@ impl PianoRoll {
                 Pos2::new(cursor_x, roll.min.y),
                 Pos2::new(cursor_x, roll.max.y),
             ],
-            Stroke::new(1.5, Color32::from_rgb(0x9a, 0xa6, 0xff)),
+            Stroke::new(1.5_f32, Color32::from_rgb(0x9a, 0xa6, 0xff)),
         );
     }
 
@@ -347,7 +350,7 @@ impl PianoRoll {
             painter.rect_stroke(
                 key,
                 0.0,
-                Stroke::new(0.5, Color32::from_rgb(0x05, 0x06, 0x0a)),
+                Stroke::new(0.5_f32, Color32::from_rgb(0x05, 0x06, 0x0a)),
             );
         }
     }
