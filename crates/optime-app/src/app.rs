@@ -63,6 +63,20 @@ pub struct OptimeApp {
     paused: bool,
     status: String,
 
+    /// When a song ends (sequence finished or looped twice), fade out and advance to the next.
+    autoplay: bool,
+    /// Pick the next song at random instead of in list order.
+    shuffle: bool,
+    /// Loops completed by the current song (counted from `Controller::jumps`).
+    loop_count: u32,
+    /// xorshift64 state for shuffle.
+    rng: u64,
+
+    /// Mobile layout: `true` shows the library (playlists + songs) instead of Now Playing.
+    mobile_library_open: bool,
+    /// Accumulated horizontal swipe distance on the Now Playing view.
+    swipe_dx: f32,
+
     /// Cross-thread inbox for asynchronously-loaded file bytes (file picker).
     pending_file: Arc<Mutex<Option<Vec<u8>>>>,
     /// Keys currently held, to debounce auto-repeat for note input.
@@ -109,6 +123,12 @@ impl OptimeApp {
             sinc_taps: 32,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
+            autoplay: true,
+            shuffle: false,
+            loop_count: 0,
+            rng: 0x9E37_79B9_7F4A_7C15,
+            mobile_library_open: false,
+            swipe_dx: 0.0,
             pending_file: Arc::new(Mutex::new(None)),
             held_notes: [false; 128],
             crossover_plot_open: false,
@@ -253,6 +273,7 @@ impl OptimeApp {
             Some(controller) => {
                 self.current_song = Some(index);
                 self.paused = false;
+                self.loop_count = 0;
                 self.piano_roll.clear();
                 // Parallel look-ahead runner; we drive it forward ourselves each frame.
                 self.look_ahead = FsVisController::new(sdat, song.sseq_id, 0);
@@ -261,6 +282,8 @@ impl OptimeApp {
                     if let Ok(mut st) = audio.shared.lock() {
                         st.config = self.config();
                         st.paused = false;
+                        st.fade_gain = 1.0;
+                        st.fade_step = 0.0;
                         st.controller = Some(controller);
                     }
                 }
@@ -275,13 +298,29 @@ impl OptimeApp {
         }
     }
 
+    /// Steps to the previous/next song in queue order: random when shuffle is on, otherwise list
+    /// order with wraparound.
     fn step_song(&mut self, delta: isize) {
-        if let Some(i) = self.current_song {
-            let next = i as isize + delta;
-            if next >= 0 && (next as usize) < self.songs.len() {
-                self.play_song(next as usize);
-            }
+        let n = self.songs.len();
+        if n == 0 {
+            return;
         }
+        let next = if self.shuffle && n > 1 {
+            loop {
+                // xorshift64
+                self.rng ^= self.rng << 13;
+                self.rng ^= self.rng >> 7;
+                self.rng ^= self.rng << 17;
+                let r = (self.rng % n as u64) as usize;
+                if Some(r) != self.current_song {
+                    break r;
+                }
+            }
+        } else {
+            let cur = self.current_song.unwrap_or(0) as isize;
+            (cur + delta).rem_euclid(n as isize) as usize
+        };
+        self.play_song(next);
     }
 
     /// Opens a native file dialog; on web spawns the async picker. Loaded bytes arrive via
@@ -344,19 +383,39 @@ impl OptimeApp {
     }
 
     /// Pushes UI config into the audio thread and pulls a note snapshot for the visualizer.
-    fn sync_audio(&mut self, ctx: &egui::Context) -> VisSnapshot {
+    /// Returns the snapshot and whether autoplay should advance to the next song.
+    fn sync_audio(&mut self, ctx: &egui::Context) -> (VisSnapshot, bool) {
         let config = self.config();
         let mut snap = VisSnapshot::default();
+        let mut advance = false;
         // Clone the shared handle so we drop the borrow of `self.audio` and can still touch
         // `self.held_notes` while holding the lock.
         let Some(shared) = self.audio.as_ref().map(|a| a.shared.clone()) else {
-            return snap;
+            return (snap, advance);
         };
         let Ok(mut st) = shared.lock() else {
-            return snap;
+            return (snap, advance);
         };
         st.config = config.clone();
         st.paused = self.paused;
+
+        // Autoplay: fade out once the sequence has finished (or looped twice), then advance.
+        if self.autoplay {
+            if let Some(controller) = &mut st.controller {
+                if controller.jumps > 0 {
+                    controller.jumps = 0;
+                    self.loop_count += 1;
+                }
+                let ended = std::mem::take(&mut controller.fading_start);
+                if st.fade_step == 0.0 && (ended || self.loop_count >= 2) {
+                    // 3-second fade at the device sample rate.
+                    st.fade_step = 1.0 / (3.0 * self.sample_rate as f32);
+                }
+            }
+            if st.controller.is_some() && st.fade_step > 0.0 && st.fade_gain <= 0.0 {
+                advance = true;
+            }
+        }
 
         if let Some(controller) = &mut st.controller {
             snap.active = true;
@@ -371,7 +430,126 @@ impl OptimeApp {
             }
             handle_keyboard(ctx, controller, &config, &mut self.held_notes);
         }
-        snap
+        (snap, advance)
+    }
+
+    /// The compact phone layout: a Spotify-style Now Playing screen with swipe navigation, plus
+    /// a library view (playlists = demo SDATs, then the song list).
+    fn mobile_ui(&mut self, ctx: &egui::Context, snap: &VisSnapshot) {
+        egui::TopBottomPanel::top("m_top").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.mobile_library_open, false, "🎵 Now Playing");
+                ui.selectable_value(&mut self.mobile_library_open, true, "📚 Library");
+            });
+        });
+
+        if self.mobile_library_open {
+            self.mobile_library(ctx);
+            return;
+        }
+
+        egui::TopBottomPanel::bottom("m_transport").show(ctx, |ui| {
+            ui.add_space(6.0);
+            // Title + status above the controls.
+            let title = self
+                .current_song
+                .and_then(|i| self.songs.get(i))
+                .map(|s| s.label.clone())
+                .unwrap_or_else(|| "No song loaded".to_owned());
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(title).strong().size(16.0));
+                ui.label(egui::RichText::new(&self.status).weak().size(11.0));
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let spacing = (ui.available_width() - 5.0 * 44.0).max(0.0) / 6.0;
+                ui.spacing_mut().item_spacing.x = spacing;
+                ui.add_space(spacing);
+                let big = egui::vec2(44.0, 36.0);
+                let shuffle = ui.add_sized(big, egui::Button::new("🔀").selected(self.shuffle));
+                if shuffle.clicked() {
+                    self.shuffle = !self.shuffle;
+                }
+                if ui.add_sized(big, egui::Button::new("⏮")).clicked() {
+                    self.step_song(-1);
+                }
+                let pause_icon = if self.paused || self.current_song.is_none() {
+                    "▶"
+                } else {
+                    "⏸"
+                };
+                if ui
+                    .add_sized(egui::vec2(56.0, 44.0), egui::Button::new(pause_icon))
+                    .clicked()
+                {
+                    self.paused = !self.paused;
+                }
+                if ui.add_sized(big, egui::Button::new("⏭")).clicked() {
+                    self.step_song(1);
+                }
+                if ui
+                    .add_sized(big, egui::Button::new("🔁").selected(self.autoplay))
+                    .on_hover_text("Autoplay next song")
+                    .clicked()
+                {
+                    self.autoplay = !self.autoplay;
+                }
+            });
+            ui.add_space(8.0);
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // The piano roll doubles as the album art; swipe horizontally to change songs.
+            let rect = ui.max_rect();
+            self.piano_roll.draw(ui, snap.active);
+            let resp = ui.interact(rect, egui::Id::new("swipe"), egui::Sense::drag());
+            if resp.dragged() {
+                self.swipe_dx += resp.drag_delta().x;
+            }
+            if resp.drag_stopped() {
+                if self.swipe_dx <= -60.0 {
+                    self.step_song(1); // swipe left → next
+                } else if self.swipe_dx >= 60.0 {
+                    self.step_song(-1); // swipe right → previous
+                }
+                self.swipe_dx = 0.0;
+            }
+        });
+    }
+
+    /// The mobile library: demo playlists, file open, and the song list.
+    fn mobile_library(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if ui.button("📂 Open ROM / SDAT…").clicked() {
+                    self.open_file_dialog();
+                }
+                ui.collapsing("Playlists (demos)", |ui| {
+                    let mut requested = None;
+                    for (label, stem) in DEMOS {
+                        if ui.button(*label).clicked() {
+                            requested = Some((*stem, *label));
+                        }
+                    }
+                    if let Some((stem, label)) = requested {
+                        self.request_demo(stem, label);
+                    }
+                });
+                ui.separator();
+                ui.label("Songs");
+                let mut to_play = None;
+                for (i, song) in self.songs.iter().enumerate() {
+                    let selected = self.current_song == Some(i);
+                    if ui.selectable_label(selected, &song.label).clicked() {
+                        to_play = Some(i);
+                    }
+                }
+                if let Some(i) = to_play {
+                    self.play_song(i);
+                    self.mobile_library_open = false;
+                }
+            });
+        });
     }
 }
 
@@ -394,7 +572,39 @@ impl eframe::App for OptimeApp {
             self.step_song(1);
         }
 
-        let snap = self.sync_audio(ctx);
+        let (snap, advance) = self.sync_audio(ctx);
+        if advance {
+            self.step_song(1);
+        }
+
+        // Advance the piano roll's smoothed playhead (frozen when paused / no song), then drive
+        // the look-ahead runner so it stays buffered ahead of the playhead, and pull its notes.
+        let playing = snap.active && !self.paused;
+        let dt = ctx.input(|i| i.stable_dt) as f64;
+        self.piano_roll.advance(&snap, dt, playing);
+        if let Some(look) = &mut self.look_ahead {
+            if playing {
+                let target = self.piano_roll.display_tick().ceil() as u32
+                    + crate::piano_roll::RUN_AHEAD_TICKS;
+                // Bounded catch-up so a stalled/zero-BPM sequence can't spin forever.
+                let mut guard = 0u32;
+                while look.sequence.ticks_elapsed < target && guard < 200_000 {
+                    look.tick();
+                    guard += 1;
+                }
+            }
+            self.piano_roll.ingest(look);
+        }
+
+        // Narrow screens (phones) get the Spotify-style mobile layout.
+        if ctx.screen_rect().width() < 600.0 {
+            self.mobile_ui(ctx, &snap);
+            #[cfg(target_arch = "wasm32")]
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            #[cfg(not(target_arch = "wasm32"))]
+            ctx.request_repaint();
+            return;
+        }
 
         egui::SidePanel::left("songs")
             .resizable(true)
@@ -453,6 +663,10 @@ impl eframe::App for OptimeApp {
                 if ui.button("⏭").on_hover_text("Next (→)").clicked() {
                     self.step_song(1);
                 }
+                ui.separator();
+                ui.toggle_value(&mut self.shuffle, "🔀 Shuffle");
+                ui.toggle_value(&mut self.autoplay, "🔁 Autoplay")
+                    .on_hover_text("Fade out and advance when a song ends or loops twice");
                 ui.separator();
                 if ui.button("💾 Export WAV").clicked() {
                     self.export_wav();
@@ -578,25 +792,6 @@ impl eframe::App for OptimeApp {
         if self.resample_choice >= 2 {
             let resample_mode = self.config().resample;
             crate::filter_plot::show_sinc_window(ctx, &mut self.sinc_plot_open, resample_mode);
-        }
-
-        // Advance the piano roll's smoothed playhead (frozen when paused / no song), then drive
-        // the look-ahead runner so it stays buffered ahead of the playhead, and pull its notes.
-        let playing = snap.active && !self.paused;
-        let dt = ctx.input(|i| i.stable_dt) as f64;
-        self.piano_roll.advance(&snap, dt, playing);
-        if let Some(look) = &mut self.look_ahead {
-            if playing {
-                let target = self.piano_roll.display_tick().ceil() as u32
-                    + crate::piano_roll::RUN_AHEAD_TICKS;
-                // Bounded catch-up so a stalled/zero-BPM sequence can't spin forever.
-                let mut guard = 0u32;
-                while look.sequence.ticks_elapsed < target && guard < 200_000 {
-                    look.tick();
-                    guard += 1;
-                }
-            }
-            self.piano_roll.ingest(look);
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {

@@ -1,6 +1,6 @@
 //! The per-tick ADSR/LFO pass over the active notes (the audio-side envelope engine).
 
-use super::lfo::{lfo_type, lfo_tick, LfoParams};
+use super::lfo::{lfo_tick, lfo_type, LfoParams};
 use super::volume::{calc_channel_volume, decibel_db};
 use super::{ActiveNote, AdsrState, Controller, SynthConfig};
 
