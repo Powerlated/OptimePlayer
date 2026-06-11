@@ -37,6 +37,28 @@ enum MobileTab {
     Settings,
 }
 
+/// A locked-in decision of which song a prev/next step lands on, so a swipe preview and the
+/// commit that follows agree even with shuffle's randomness.
+#[derive(Clone, Copy)]
+enum StepTarget {
+    /// An index into the flattened song list.
+    List(usize),
+    /// A position within the active playlist queue.
+    Queue(usize),
+}
+
+/// The adjacent song's pre-rendered piano roll, shown sliding in during a swipe.
+struct SwipePreview {
+    /// +1 = next (dragging left), -1 = previous (dragging right).
+    dir: isize,
+    /// Where the swipe will land when committed.
+    target: StepTarget,
+    /// A roll pre-filled with the target song's opening notes.
+    roll: PianoRoll,
+    /// The look-ahead runner that filled `roll`; handed to the app on commit.
+    look: Option<FsVisController>,
+}
+
 /// Which library collection is open in the library browser.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum LibraryView {
@@ -121,6 +143,10 @@ pub struct OptimeApp {
     swipe_offset: f32,
     /// Volume attenuation tied to the swipe: 1.0 centered, → 0.0 as the view leaves the screen.
     swipe_gain: f32,
+    /// The adjacent song's roll shown while dragging (becomes the live roll on commit).
+    swipe_preview: Option<SwipePreview>,
+    /// The old song's roll sliding out after a committed swipe: (roll, exit side −1/+1).
+    swipe_out: Option<(PianoRoll, f32)>,
 
     /// Rolling history of the audio-callback DSP load, for the top-bar meter.
     cpu_history: std::collections::VecDeque<f32>,
@@ -193,6 +219,8 @@ impl OptimeApp {
             mobile_tab: MobileTab::NowPlaying,
             swipe_offset: 0.0,
             swipe_gain: 1.0,
+            swipe_preview: None,
+            swipe_out: None,
             cpu_history: std::collections::VecDeque::new(),
             voice_history: std::collections::VecDeque::new(),
             pending_file: Arc::new(Mutex::new(None)),
@@ -450,6 +478,13 @@ impl OptimeApp {
     /// Steps to the previous/next song in queue order: within the active playlist queue if one
     /// is set, otherwise the full list. Random when shuffle is on, else wraparound order.
     fn step_song(&mut self, delta: isize) {
+        if let Some(target) = self.step_target(delta) {
+            self.commit_step(target);
+        }
+    }
+
+    /// Decides where a prev/next step lands (consuming the shuffle RNG), without playing it.
+    fn step_target(&mut self, delta: isize) -> Option<StepTarget> {
         if let Some((tracks, pos)) = self.queue.clone() {
             if tracks.is_empty() {
                 self.queue = None;
@@ -459,14 +494,12 @@ impl OptimeApp {
                 } else {
                     (pos as isize + delta).rem_euclid(tracks.len() as isize) as usize
                 };
-                self.queue = Some((tracks.clone(), next));
-                self.play_ref(tracks[next].clone());
-                return;
+                return Some(StepTarget::Queue(next));
             }
         }
         let n = self.songs.len();
         if n == 0 {
-            return;
+            return None;
         }
         let next = if self.shuffle && n > 1 {
             self.rand_index(n, self.current_song)
@@ -474,7 +507,64 @@ impl OptimeApp {
             let cur = self.current_song.unwrap_or(0) as isize;
             (cur + delta).rem_euclid(n as isize) as usize
         };
-        self.play_song(next);
+        Some(StepTarget::List(next))
+    }
+
+    /// Starts playing a previously decided step target.
+    fn commit_step(&mut self, target: StepTarget) {
+        match target {
+            StepTarget::List(i) => self.play_song(i),
+            StepTarget::Queue(pos) => {
+                if let Some((tracks, _)) = self.queue.clone() {
+                    if let Some(t) = tracks.get(pos).cloned() {
+                        self.queue = Some((tracks, pos));
+                        self.play_ref(t);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Builds the swipe preview for the song a step in `delta` direction would land on: a piano
+    /// roll pre-filled with that song's opening notes via its own look-ahead runner.
+    fn build_swipe_preview(&mut self, delta: isize) -> Option<SwipePreview> {
+        let target = self.step_target(delta)?;
+        // Resolve the target to an SDAT + SSEQ within the currently loaded archive (a queue
+        // track from another source previews as an empty roll).
+        let resolved = match target {
+            StepTarget::List(i) => self.songs.get(i).map(|s| (s.sdat_index, s.sseq_id)),
+            StepTarget::Queue(pos) => self
+                .queue
+                .as_ref()
+                .and_then(|(tracks, _)| tracks.get(pos))
+                .filter(|t| t.source == self.current_source)
+                .and_then(|t| {
+                    self.songs
+                        .iter()
+                        .find(|s| s.sseq_id == t.sseq_id)
+                        .map(|s| (s.sdat_index, s.sseq_id))
+                }),
+        };
+        let mut roll = PianoRoll::default();
+        let look = resolved.and_then(|(sdat_index, sseq_id)| {
+            let mut look = FsVisController::new(&self.sdats[sdat_index], sseq_id, 0)?;
+            // Pre-buffer the opening notes (bounded like the live look-ahead drive).
+            let mut guard = 0u32;
+            while look.sequence.ticks_elapsed < crate::piano_roll::RUN_AHEAD_TICKS
+                && guard < 200_000
+            {
+                look.tick();
+                guard += 1;
+            }
+            roll.ingest(&look);
+            Some(look)
+        });
+        Some(SwipePreview {
+            dir: delta,
+            target,
+            roll,
+            look,
+        })
     }
 
     /// Plays a persistent track reference, loading its source archive first if needed (demo
@@ -861,6 +951,7 @@ impl OptimeApp {
             &self.cpu_history,
             1.0,
             color,
+            format!("{:.0}%", cpu * 100.0),
             format!("DSP load: {:.0}%", cpu * 100.0),
         );
         let voices = self.voice_history.back().copied().unwrap_or(0.0);
@@ -871,6 +962,7 @@ impl OptimeApp {
             &self.voice_history,
             scale,
             accent,
+            format!("{voices:.0}"),
             format!("Voices: {voices:.0}"),
         );
     }
@@ -993,14 +1085,35 @@ impl OptimeApp {
                 ];
                 ui.columns(tabs.len(), |cols| {
                     for (col, (tab, icon, label)) in cols.iter_mut().zip(tabs) {
-                        col.vertical_centered(|ui| {
-                            let selected = self.mobile_tab == tab;
-                            let text = egui::RichText::new(format!("{icon}\n{label}")).size(13.0);
-                            let text = if selected { text.strong() } else { text.weak() };
-                            if ui.add(egui::Button::new(text).frame(false)).clicked() {
-                                self.mobile_tab = tab;
-                            }
-                        });
+                        let selected = self.mobile_tab == tab;
+                        let (rect, resp) = col.allocate_exact_size(
+                            egui::vec2(col.available_width(), 44.0),
+                            egui::Sense::click(),
+                        );
+                        let color = if selected {
+                            col.visuals().widgets.active.fg_stroke.color
+                        } else {
+                            col.visuals().weak_text_color()
+                        };
+                        // Painter-drawn so the label is exactly centered under the icon.
+                        let painter = col.painter_at(rect);
+                        painter.text(
+                            rect.center() - egui::vec2(0.0, 9.0),
+                            egui::Align2::CENTER_CENTER,
+                            icon,
+                            egui::FontId::proportional(17.0),
+                            color,
+                        );
+                        painter.text(
+                            rect.center() + egui::vec2(0.0, 12.0),
+                            egui::Align2::CENTER_CENTER,
+                            label,
+                            egui::FontId::proportional(11.0),
+                            color,
+                        );
+                        if resp.clicked() {
+                            self.mobile_tab = tab;
+                        }
                     }
                 });
                 ui.add_space(4.0);
@@ -1215,30 +1328,72 @@ impl OptimeApp {
             let dt = ui.input(|i| i.stable_dt).min(0.1);
             if resp.dragged() {
                 self.swipe_offset += resp.drag_delta().x;
+                // Keep a preview of the song the swipe is heading toward, so it is already
+                // visible (notes and all) next to the outgoing roll.
+                let dir: isize = if self.swipe_offset < -4.0 {
+                    1
+                } else if self.swipe_offset > 4.0 {
+                    -1
+                } else {
+                    0
+                };
+                if dir == 0 {
+                    self.swipe_preview = None;
+                } else if self.swipe_preview.as_ref().map(|p| p.dir) != Some(dir) {
+                    self.swipe_preview = self.build_swipe_preview(dir);
+                }
             } else if resp.drag_stopped() {
-                if self.swipe_offset <= -0.25 * w {
-                    // Swiped left → next song slides in from the right.
-                    self.step_song(1);
-                    self.swipe_offset += w;
-                } else if self.swipe_offset >= 0.25 * w {
-                    // Swiped right → previous song slides in from the left.
-                    self.step_song(-1);
-                    self.swipe_offset -= w;
+                if self.swipe_offset.abs() >= 0.25 * w {
+                    // Committed: the old roll keeps sliding out while the preview (already
+                    // populated with the next song's notes) becomes the live roll.
+                    let exit_side = self.swipe_offset.signum();
+                    let old_roll = std::mem::take(&mut self.piano_roll);
+                    self.swipe_out = Some((old_roll, exit_side));
+                    if let Some(p) = self.swipe_preview.take() {
+                        self.commit_step(p.target);
+                        self.piano_roll = p.roll;
+                        if let Some(look) = p.look {
+                            self.look_ahead = Some(look);
+                        }
+                    } else {
+                        self.step_song(if exit_side < 0.0 { 1 } else { -1 });
+                    }
+                    self.swipe_offset -= exit_side * w;
+                } else {
+                    self.swipe_preview = None;
                 }
             } else if self.swipe_offset != 0.0 {
                 // Spring back / slide in.
                 self.swipe_offset *= (-12.0 * dt).exp();
                 if self.swipe_offset.abs() < 0.5 {
                     self.swipe_offset = 0.0;
+                    self.swipe_preview = None;
+                    self.swipe_out = None;
                 }
                 ui.ctx().request_repaint();
             }
             self.swipe_gain = 1.0 - (self.swipe_offset.abs() / w).clamp(0.0, 1.0);
 
+            // The live roll, offset by the swipe.
             let child_rect = rect.translate(egui::vec2(self.swipe_offset, 0.0));
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(child_rect));
             child.set_clip_rect(rect);
             self.piano_roll.draw(&mut child, snap.active);
+
+            // The incoming song's preview alongside it while dragging.
+            if let Some(p) = &self.swipe_preview {
+                let r = rect.translate(egui::vec2(self.swipe_offset + p.dir as f32 * w, 0.0));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
+                child.set_clip_rect(rect);
+                p.roll.draw(&mut child, true);
+            }
+            // The old song's roll sliding out after a committed swipe.
+            if let Some((roll, side)) = &self.swipe_out {
+                let r = rect.translate(egui::vec2(self.swipe_offset + side * w, 0.0));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
+                child.set_clip_rect(rect);
+                roll.draw(&mut child, true);
+            }
         });
     }
 
@@ -1487,17 +1642,20 @@ impl eframe::App for OptimeApp {
     }
 }
 
-/// One scrolling history graph for the top-bar meters: an icon label plus a filled line plot.
+/// One scrolling history graph for the top-bar meters: an icon label, a filled line plot, and
+/// the current value drawn inside the plot.
+#[allow(clippy::too_many_arguments)]
 fn draw_meter(
     ui: &mut egui::Ui,
     icon: &str,
     values: &std::collections::VecDeque<f32>,
     max: f32,
     color: egui::Color32,
+    value_text: String,
     hover: String,
 ) {
     ui.label(icon);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(64.0, 18.0), egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(72.0, 18.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
     if values.len() >= 2 {
@@ -1521,6 +1679,13 @@ fn draw_meter(
         }
         painter.add(egui::Shape::line(pts, egui::Stroke::new(1.5_f32, color)));
     }
+    painter.text(
+        egui::pos2(rect.right() - 3.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        value_text,
+        egui::FontId::monospace(10.0),
+        ui.visuals().strong_text_color(),
+    );
     resp.on_hover_text(hover);
 }
 
