@@ -70,6 +70,7 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         return;
     }
     let config = &st.config;
+    let volume = st.volume;
     let mut gain = st.fade_gain;
     let step = st.fade_step;
     let controller = st.controller.as_mut().unwrap();
@@ -77,8 +78,8 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         // The common case: render the whole device buffer through the block path.
         controller.fill(data, config);
         for frame in data.chunks_exact_mut(2) {
-            frame[0] *= 0.5 * gain;
-            frame[1] *= 0.5 * gain;
+            frame[0] *= 0.5 * volume * gain;
+            frame[1] *= 0.5 * volume * gain;
             gain = (gain - step).max(0.0);
         }
         st.fade_gain = gain;
@@ -86,7 +87,7 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
     }
     for frame in data.chunks_mut(channels.max(1)) {
         let (l, r) = controller.next_sample(config);
-        let (l, r) = (l * 0.5 * gain, r * 0.5 * gain);
+        let (l, r) = (l * 0.5 * volume * gain, r * 0.5 * volume * gain);
         gain = (gain - step).max(0.0);
         match frame.len() {
             0 => {}

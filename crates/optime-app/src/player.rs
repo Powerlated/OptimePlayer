@@ -14,6 +14,8 @@ pub struct AudioState {
     pub config: SynthConfig,
     /// When set, the callback emits silence but keeps the controller intact.
     pub paused: bool,
+    /// User master volume (0..=1), applied by the callback.
+    pub volume: f32,
     /// Master gain applied by the callback; ramped toward zero during an end-of-song fade.
     pub fade_gain: f32,
     /// Per-sample gain decrement while fading out (0.0 = not fading).
@@ -26,6 +28,7 @@ impl AudioState {
             controller: None,
             config: SynthConfig::default(),
             paused: false,
+            volume: 1.0,
             fade_gain: 1.0,
             fade_step: 0.0,
         }

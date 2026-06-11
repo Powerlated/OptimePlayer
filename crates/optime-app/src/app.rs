@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use optime_core::{Controller, FsVisController, ResampleMode, Sdat, SynthConfig, TuningSystem};
 
+use crate::library::{Library, Persisted, RepeatMode, TrackRef};
 use crate::piano_roll::PianoRoll;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
@@ -22,6 +23,20 @@ enum VisTab {
     PianoRoll,
     /// The legacy per-track keyboard grid (track enables + live-input selection).
     Tracks,
+}
+
+/// Cross-thread inbox for asynchronously-loaded file bytes: (source key, bytes).
+type FileInbox = Arc<Mutex<Option<(String, Vec<u8>)>>>;
+
+/// Which library collection is open in the library browser.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum LibraryView {
+    /// The list of collections (liked / recent / playlists).
+    Root,
+    Liked,
+    Recent,
+    /// A user playlist, by index into `library.playlists`.
+    Playlist(usize),
 }
 
 /// Demo SDATs available to load. Native reads from `demos/`; web fetches them at runtime.
@@ -63,22 +78,40 @@ pub struct OptimeApp {
     paused: bool,
     status: String,
 
-    /// When a song ends (sequence finished or looped twice), fade out and advance to the next.
-    autoplay: bool,
+    /// What happens when a song ends (after fade-out): stop, advance, or replay.
+    repeat: RepeatMode,
     /// Pick the next song at random instead of in list order.
     shuffle: bool,
+    /// Master volume (0..=1).
+    volume: f32,
     /// Loops completed by the current song (counted from `Controller::jumps`).
     loop_count: u32,
     /// xorshift64 state for shuffle.
     rng: u64,
+
+    /// The user's persistent library (playlists, likes, history).
+    library: Library,
+    /// Which library collection the browser shows.
+    library_view: LibraryView,
+    /// Text buffer for the "new playlist" name field.
+    new_playlist_name: String,
+    /// Source key (demo stem or user file name) of the currently loaded SDATs.
+    current_source: String,
+    /// When playing from a playlist/collection: its tracks and the current position.
+    queue: Option<(Vec<TrackRef>, usize)>,
+    /// A track waiting for its source archive to finish loading (cross-source playlist jump
+    /// or session restore).
+    pending_play: Option<TrackRef>,
+    /// Restore-on-launch: start the restored track paused instead of blasting audio.
+    resume_paused: bool,
 
     /// Mobile layout: `true` shows the library (playlists + songs) instead of Now Playing.
     mobile_library_open: bool,
     /// Accumulated horizontal swipe distance on the Now Playing view.
     swipe_dx: f32,
 
-    /// Cross-thread inbox for asynchronously-loaded file bytes (file picker).
-    pending_file: Arc<Mutex<Option<Vec<u8>>>>,
+    /// Cross-thread inbox for asynchronously-loaded file bytes: (source key, bytes).
+    pending_file: FileInbox,
     /// Keys currently held, to debounce auto-repeat for note input.
     held_notes: [bool; 128],
 
@@ -98,12 +131,17 @@ pub struct OptimeApp {
 impl OptimeApp {
     /// Builds the app and loads the first demo. Native starts audio immediately; web defers it
     /// until the first user gesture (browser autoplay policy — see [`Self::ensure_audio`]).
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let audio = AudioEngine::new();
         #[cfg(target_arch = "wasm32")]
         let audio: Option<AudioEngine> = None;
         let sample_rate = audio.as_ref().map(|a| a.sample_rate).unwrap_or(48_000.0);
+
+        let p: Persisted = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
+            .unwrap_or_default();
 
         let mut app = Self {
             audio,
@@ -112,21 +150,29 @@ impl OptimeApp {
             sdats: Vec::new(),
             songs: Vec::new(),
             current_song: None,
-            stereo_separation: true,
-            force_stereo_separation: true,
-            bass_mono: true,
-            bass_mono_freq: 200.0,
-            tuning_choice: 0,
-            pure_tonic: 0,
+            stereo_separation: p.stereo_separation,
+            force_stereo_separation: p.force_stereo_separation,
+            bass_mono: p.bass_mono,
+            bass_mono_freq: p.bass_mono_freq,
+            tuning_choice: p.tuning_choice,
+            pure_tonic: p.pure_tonic,
             track_enables: [true; TRACK_COUNT],
-            resample_choice: 2,
-            sinc_taps: 32,
+            resample_choice: p.resample_choice,
+            sinc_taps: p.sinc_taps,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
-            autoplay: true,
-            shuffle: false,
+            repeat: p.repeat,
+            shuffle: p.shuffle,
+            volume: p.volume.clamp(0.0, 1.0),
             loop_count: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
+            library: p.library,
+            library_view: LibraryView::Root,
+            new_playlist_name: String::new(),
+            current_source: String::new(),
+            queue: None,
+            pending_play: None,
+            resume_paused: false,
             mobile_library_open: false,
             swipe_dx: 0.0,
             pending_file: Arc::new(Mutex::new(None)),
@@ -137,12 +183,55 @@ impl OptimeApp {
             piano_roll: PianoRoll::default(),
             look_ahead: None,
         };
-        app.try_load_first_demo();
+        // Resume where the last session left off (paused), if the last track was from a demo
+        // we can re-fetch; otherwise fall back to the first demo.
+        match p.last_track {
+            Some(t) if DEMOS.iter().any(|(_, stem)| *stem == t.source) => {
+                app.resume_paused = true;
+                app.pending_play = Some(t.clone());
+                let label = DEMOS
+                    .iter()
+                    .find(|(_, stem)| *stem == t.source)
+                    .map(|(l, _)| *l)
+                    .unwrap_or("demo");
+                app.request_demo(&t.source, label);
+            }
+            _ => app.request_demo(DEMOS[0].1, DEMOS[0].0),
+        }
         app
     }
 
-    fn try_load_first_demo(&mut self) {
-        self.request_demo(DEMOS[0].1, DEMOS[0].0);
+    /// The serializable bundle written to eframe storage.
+    fn persisted(&self) -> Persisted {
+        Persisted {
+            library: self.library.clone(),
+            shuffle: self.shuffle,
+            repeat: self.repeat,
+            volume: self.volume,
+            last_track: self.current_track_ref(),
+            stereo_separation: self.stereo_separation,
+            force_stereo_separation: self.force_stereo_separation,
+            bass_mono: self.bass_mono,
+            bass_mono_freq: self.bass_mono_freq,
+            tuning_choice: self.tuning_choice,
+            pure_tonic: self.pure_tonic,
+            resample_choice: self.resample_choice,
+            sinc_taps: self.sinc_taps,
+        }
+    }
+
+    /// The persistent reference for the song at list index `i`, if it exists.
+    fn track_ref(&self, i: usize) -> Option<TrackRef> {
+        self.songs.get(i).map(|s| TrackRef {
+            source: self.current_source.clone(),
+            sseq_id: s.sseq_id,
+            label: s.label.clone(),
+        })
+    }
+
+    /// The persistent reference for the currently playing song.
+    fn current_track_ref(&self) -> Option<TrackRef> {
+        self.current_song.and_then(|i| self.track_ref(i))
     }
 
     /// Lazily starts the audio engine. On the web the `AudioContext` may only begin after a user
@@ -187,7 +276,7 @@ impl OptimeApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             match std::fs::read(format!("demos/{stem}.sdat")) {
-                Ok(bytes) => self.load_bytes(&bytes, label),
+                Ok(bytes) => self.load_bytes(&bytes, stem, label),
                 Err(_) => self.status = format!("Demo '{label}' not found in demos/."),
             }
         }
@@ -195,11 +284,12 @@ impl OptimeApp {
         {
             self.status = format!("Loading {label}…");
             let inbox = self.pending_file.clone();
+            let key = stem.to_owned();
             let url = format!("{stem}.sdat");
             wasm_bindgen_futures::spawn_local(async move {
                 if let Some(bytes) = crate::web::fetch_bytes(&url).await {
                     if let Ok(mut slot) = inbox.lock() {
-                        *slot = Some(bytes);
+                        *slot = Some((key, bytes));
                     }
                 }
             });
@@ -236,8 +326,9 @@ impl OptimeApp {
         }
     }
 
-    /// Parses SDATs from `bytes` and rebuilds the song list.
-    fn load_bytes(&mut self, bytes: &[u8], source: &str) {
+    /// Parses SDATs from `bytes` and rebuilds the song list. `key` is the persistent source
+    /// identity (demo stem or user file name); `source` is the display name for status text.
+    fn load_bytes(&mut self, bytes: &[u8], key: &str, source: &str) {
         let sdats = Sdat::load_all(bytes);
         if sdats.is_empty() {
             self.status = format!("No SDAT found in {source}.");
@@ -260,11 +351,33 @@ impl OptimeApp {
             }
         }
         self.current_song = None;
+        self.current_source = key.to_owned();
         self.status = format!("Loaded {source}: {} songs.", self.songs.len());
+
+        // A track was waiting for this source (playlist jump / session restore).
+        if let Some(t) = self.pending_play.take() {
+            if t.source == self.current_source {
+                if let Some(i) = self.songs.iter().position(|s| s.sseq_id == t.sseq_id) {
+                    self.play_song_keep_queue(i);
+                    if std::mem::take(&mut self.resume_paused) {
+                        self.paused = true;
+                    }
+                }
+            } else {
+                self.pending_play = Some(t);
+            }
+        }
     }
 
-    /// Starts playing the song at `index` in the flattened list.
+    /// Starts playing the song at `index`, leaving any playlist queue: navigation reverts to
+    /// the full song list.
     fn play_song(&mut self, index: usize) {
+        self.queue = None;
+        self.play_song_keep_queue(index);
+    }
+
+    /// Starts playing the song at `index` in the flattened list without touching the queue.
+    fn play_song_keep_queue(&mut self, index: usize) {
         let Some(song) = self.songs.get(index) else {
             return;
         };
@@ -274,6 +387,9 @@ impl OptimeApp {
                 self.current_song = Some(index);
                 self.paused = false;
                 self.loop_count = 0;
+                if let Some(t) = self.track_ref(index) {
+                    self.library.push_recent(&t);
+                }
                 self.piano_roll.clear();
                 // Parallel look-ahead runner; we drive it forward ourselves each frame.
                 self.look_ahead = FsVisController::new(sdat, song.sseq_id, 0);
@@ -294,33 +410,104 @@ impl OptimeApp {
 
     fn restart(&mut self) {
         if let Some(i) = self.current_song {
-            self.play_song(i);
+            self.play_song_keep_queue(i);
         }
     }
 
-    /// Steps to the previous/next song in queue order: random when shuffle is on, otherwise list
-    /// order with wraparound.
+    /// A pseudo-random index in `0..n`, avoiding `current` when possible (xorshift64).
+    fn rand_index(&mut self, n: usize, current: Option<usize>) -> usize {
+        loop {
+            self.rng ^= self.rng << 13;
+            self.rng ^= self.rng >> 7;
+            self.rng ^= self.rng << 17;
+            let r = (self.rng % n as u64) as usize;
+            if n == 1 || Some(r) != current {
+                return r;
+            }
+        }
+    }
+
+    /// Steps to the previous/next song in queue order: within the active playlist queue if one
+    /// is set, otherwise the full list. Random when shuffle is on, else wraparound order.
     fn step_song(&mut self, delta: isize) {
+        if let Some((tracks, pos)) = self.queue.clone() {
+            if tracks.is_empty() {
+                self.queue = None;
+            } else {
+                let next = if self.shuffle && tracks.len() > 1 {
+                    self.rand_index(tracks.len(), Some(pos))
+                } else {
+                    (pos as isize + delta).rem_euclid(tracks.len() as isize) as usize
+                };
+                self.queue = Some((tracks.clone(), next));
+                self.play_ref(tracks[next].clone());
+                return;
+            }
+        }
         let n = self.songs.len();
         if n == 0 {
             return;
         }
         let next = if self.shuffle && n > 1 {
-            loop {
-                // xorshift64
-                self.rng ^= self.rng << 13;
-                self.rng ^= self.rng >> 7;
-                self.rng ^= self.rng << 17;
-                let r = (self.rng % n as u64) as usize;
-                if Some(r) != self.current_song {
-                    break r;
-                }
-            }
+            self.rand_index(n, self.current_song)
         } else {
             let cur = self.current_song.unwrap_or(0) as isize;
             (cur + delta).rem_euclid(n as isize) as usize
         };
         self.play_song(next);
+    }
+
+    /// Plays a persistent track reference, loading its source archive first if needed (demo
+    /// sources are auto-fetched; user files must be re-opened manually).
+    fn play_ref(&mut self, t: TrackRef) {
+        if t.source == self.current_source {
+            if let Some(i) = self.songs.iter().position(|s| s.sseq_id == t.sseq_id) {
+                self.play_song_keep_queue(i);
+            } else {
+                self.status = format!("Track not found in current archive: {}", t.label);
+            }
+            return;
+        }
+        if let Some((label, stem)) = DEMOS.iter().find(|(_, stem)| *stem == t.source) {
+            let (label, stem) = (*label, *stem);
+            self.pending_play = Some(t);
+            self.request_demo(stem, label);
+        } else {
+            self.status = format!("Open '{}' to play: {}", t.source, t.label);
+        }
+    }
+
+    /// Starts playing `tracks` as the active queue, from position `pos`.
+    fn play_queue(&mut self, tracks: Vec<TrackRef>, pos: usize) {
+        if tracks.is_empty() {
+            return;
+        }
+        let pos = pos.min(tracks.len() - 1);
+        let t = tracks[pos].clone();
+        self.queue = Some((tracks, pos));
+        self.play_ref(t);
+    }
+
+    /// What to do when the current song has finished its fade-out.
+    fn handle_song_end(&mut self) {
+        match self.repeat {
+            RepeatMode::One => self.restart(),
+            RepeatMode::All => self.step_song(1),
+            RepeatMode::Off => {
+                let at_end = match &self.queue {
+                    Some((tracks, pos)) => pos + 1 >= tracks.len(),
+                    None => self.current_song.is_none_or(|i| i + 1 >= self.songs.len()),
+                };
+                if at_end && !self.shuffle {
+                    // Reload the song (resetting the fade) and leave it paused at the start.
+                    self.restart();
+                    self.paused = true;
+                    self.status = "End of queue.".to_owned();
+                } else {
+                    self.step_song(1);
+                }
+            }
+        }
     }
 
     /// Opens a native file dialog; on web spawns the async picker. Loaded bytes arrive via
@@ -334,9 +521,13 @@ impl OptimeApp {
                     .add_filter("DS sound", &["nds", "sdat"])
                     .pick_file()
                 {
+                    let key = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "file".to_owned());
                     if let Ok(bytes) = std::fs::read(path) {
                         if let Ok(mut slot) = inbox.lock() {
-                            *slot = Some(bytes);
+                            *slot = Some((key, bytes));
                         }
                     }
                 }
@@ -350,20 +541,22 @@ impl OptimeApp {
                     .pick_file()
                     .await
                 {
+                    let key = handle.file_name();
                     let bytes = handle.read().await;
                     if let Ok(mut slot) = inbox.lock() {
-                        *slot = Some(bytes);
+                        *slot = Some((key, bytes));
                     }
                 }
             });
         }
     }
 
-    /// Drains a pending picked file, if any.
+    /// Drains a pending picked/fetched file, if any.
     fn poll_pending_file(&mut self) {
-        let bytes = self.pending_file.lock().ok().and_then(|mut s| s.take());
-        if let Some(bytes) = bytes {
-            self.load_bytes(&bytes, "selected file");
+        let pending = self.pending_file.lock().ok().and_then(|mut s| s.take());
+        if let Some((key, bytes)) = pending {
+            let display = key.clone();
+            self.load_bytes(&bytes, &key, &display);
         }
     }
 
@@ -398,23 +591,23 @@ impl OptimeApp {
         };
         st.config = config.clone();
         st.paused = self.paused;
+        st.volume = self.volume;
 
-        // Autoplay: fade out once the sequence has finished (or looped twice), then advance.
-        if self.autoplay {
-            if let Some(controller) = &mut st.controller {
-                if controller.jumps > 0 {
-                    controller.jumps = 0;
-                    self.loop_count += 1;
-                }
-                let ended = std::mem::take(&mut controller.fading_start);
-                if st.fade_step == 0.0 && (ended || self.loop_count >= 2) {
-                    // 3-second fade at the device sample rate.
-                    st.fade_step = 1.0 / (3.0 * self.sample_rate as f32);
-                }
+        // End-of-song: fade out once the sequence has finished (or looped twice), then let
+        // [`Self::handle_song_end`] apply the repeat mode.
+        if let Some(controller) = &mut st.controller {
+            if controller.jumps > 0 {
+                controller.jumps = 0;
+                self.loop_count += 1;
             }
-            if st.controller.is_some() && st.fade_step > 0.0 && st.fade_gain <= 0.0 {
-                advance = true;
+            let ended = std::mem::take(&mut controller.fading_start);
+            if st.fade_step == 0.0 && (ended || self.loop_count >= 2) {
+                // 3-second fade at the device sample rate.
+                st.fade_step = 1.0 / (3.0 * self.sample_rate as f32);
             }
+        }
+        if st.controller.is_some() && st.fade_step > 0.0 && st.fade_gain <= 0.0 {
+            advance = true;
         }
 
         if let Some(controller) = &mut st.controller {
@@ -431,6 +624,196 @@ impl OptimeApp {
             handle_keyboard(ctx, controller, &config, &mut self.held_notes);
         }
         (snap, advance)
+    }
+
+    /// The full song list with like / add-to-playlist context menus (right-click on desktop,
+    /// long-press on touch). Returns `true` if a song was started.
+    fn song_list_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        enum Action {
+            Play(usize),
+            Like(usize),
+            Add(usize, usize),
+        }
+        let mut action = None;
+        for (i, song) in self.songs.iter().enumerate() {
+            let selected = self.current_song == Some(i);
+            let resp = ui.selectable_label(selected, &song.label);
+            if resp.clicked() {
+                action = Some(Action::Play(i));
+            }
+            resp.context_menu(|ui| {
+                let liked = self.track_ref(i).is_some_and(|t| self.library.is_liked(&t));
+                let like_label = if liked { "💔 Unlike" } else { "❤ Like" };
+                if ui.button(like_label).clicked() {
+                    action = Some(Action::Like(i));
+                    ui.close_menu();
+                }
+                ui.menu_button("➕ Add to playlist", |ui| {
+                    if self.library.playlists.is_empty() {
+                        ui.label("No playlists yet — create one in the Library.");
+                    }
+                    for (p, pl) in self.library.playlists.iter().enumerate() {
+                        if ui.button(&pl.name).clicked() {
+                            action = Some(Action::Add(i, p));
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+        }
+        match action {
+            Some(Action::Play(i)) => {
+                self.play_song(i);
+                return true;
+            }
+            Some(Action::Like(i)) => {
+                if let Some(t) = self.track_ref(i) {
+                    self.library.toggle_liked(&t);
+                }
+            }
+            Some(Action::Add(i, p)) => {
+                if let Some(t) = self.track_ref(i) {
+                    let pl = &mut self.library.playlists[p];
+                    if !pl.tracks.iter().any(|x| x.same_song(&t)) {
+                        pl.tracks.push(t);
+                    }
+                }
+            }
+            None => {}
+        }
+        false
+    }
+
+    /// The library browser (liked / recent / playlists). Returns `true` if playback started.
+    fn library_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        match self.library_view {
+            LibraryView::Root => {
+                self.library_root_ui(ui);
+                false
+            }
+            view => self.collection_ui(ui, view),
+        }
+    }
+
+    /// The library root: collection buttons plus playlist management.
+    fn library_root_ui(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .button(format!("❤ Liked Songs ({})", self.library.liked.len()))
+            .clicked()
+        {
+            self.library_view = LibraryView::Liked;
+        }
+        if ui.button("🕘 Recently Played").clicked() {
+            self.library_view = LibraryView::Recent;
+        }
+        ui.add_space(4.0);
+        ui.label("Playlists");
+        let mut open = None;
+        let mut delete = None;
+        for (p, pl) in self.library.playlists.iter().enumerate() {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!("🎵 {} ({})", pl.name, pl.tracks.len()))
+                    .clicked()
+                {
+                    open = Some(p);
+                }
+                if ui
+                    .small_button("🗑")
+                    .on_hover_text("Delete playlist")
+                    .clicked()
+                {
+                    delete = Some(p);
+                }
+            });
+        }
+        if let Some(p) = open {
+            self.library_view = LibraryView::Playlist(p);
+        }
+        if let Some(p) = delete {
+            self.library.playlists.remove(p);
+        }
+        ui.horizontal(|ui| {
+            let edit = egui::TextEdit::singleline(&mut self.new_playlist_name)
+                .hint_text("New playlist…")
+                .desired_width(120.0);
+            ui.add(edit);
+            let name = self.new_playlist_name.trim().to_owned();
+            if ui.button("➕").clicked() && !name.is_empty() {
+                self.library.playlists.push(crate::library::Playlist {
+                    name,
+                    tracks: Vec::new(),
+                });
+                self.new_playlist_name.clear();
+            }
+        });
+    }
+
+    /// One open collection (liked / recent / a playlist): play all, play/remove single tracks.
+    /// Returns `true` if playback started.
+    fn collection_ui(&mut self, ui: &mut egui::Ui, view: LibraryView) -> bool {
+        let (title, tracks, removable) = match view {
+            LibraryView::Liked => ("❤ Liked Songs", self.library.liked.clone(), true),
+            LibraryView::Recent => ("🕘 Recently Played", self.library.recent.clone(), false),
+            LibraryView::Playlist(p) => match self.library.playlists.get(p) {
+                Some(pl) => (pl.name.as_str(), pl.tracks.clone(), true),
+                None => {
+                    self.library_view = LibraryView::Root;
+                    return false;
+                }
+            },
+            LibraryView::Root => return false,
+        };
+        let title = title.to_owned();
+        let mut started = false;
+        ui.horizontal(|ui| {
+            if ui.button("⬅").clicked() {
+                self.library_view = LibraryView::Root;
+            }
+            ui.label(egui::RichText::new(format!("{title} ({})", tracks.len())).strong());
+        });
+        if !tracks.is_empty() && ui.button("▶ Play all").clicked() {
+            let pos = if self.shuffle {
+                self.rand_index(tracks.len(), None)
+            } else {
+                0
+            };
+            self.play_queue(tracks.clone(), pos);
+            started = true;
+        }
+        let current = self.current_track_ref();
+        let mut play = None;
+        let mut remove = None;
+        for (i, t) in tracks.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let here = current.as_ref().is_some_and(|c| c.same_song(t));
+                if ui.selectable_label(here, &t.label).clicked() {
+                    play = Some(i);
+                }
+                if removable && ui.small_button("❌").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = play {
+            self.play_queue(tracks.clone(), i);
+            started = true;
+        }
+        if let Some(i) = remove {
+            match view {
+                LibraryView::Liked => {
+                    let t = tracks[i].clone();
+                    self.library.liked.retain(|x| !x.same_song(&t));
+                }
+                LibraryView::Playlist(p) => {
+                    if let Some(pl) = self.library.playlists.get_mut(p) {
+                        pl.tracks.remove(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        started
     }
 
     /// The compact phone layout: a Spotify-style Now Playing screen with swipe navigation, plus
@@ -462,7 +845,7 @@ impl OptimeApp {
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let spacing = (ui.available_width() - 5.0 * 44.0).max(0.0) / 6.0;
+                let spacing = (ui.available_width() - 6.0 * 44.0).max(0.0) / 7.0;
                 ui.spacing_mut().item_spacing.x = spacing;
                 ui.add_space(spacing);
                 let big = egui::vec2(44.0, 36.0);
@@ -487,13 +870,39 @@ impl OptimeApp {
                 if ui.add_sized(big, egui::Button::new("⏭")).clicked() {
                     self.step_song(1);
                 }
+                let repeat_icon = match self.repeat {
+                    RepeatMode::One => "🔂",
+                    _ => "🔁",
+                };
                 if ui
-                    .add_sized(big, egui::Button::new("🔁").selected(self.autoplay))
-                    .on_hover_text("Autoplay next song")
+                    .add_sized(
+                        big,
+                        egui::Button::new(repeat_icon).selected(self.repeat != RepeatMode::Off),
+                    )
+                    .on_hover_text("Repeat: off / all / one")
                     .clicked()
                 {
-                    self.autoplay = !self.autoplay;
+                    self.repeat = self.repeat.next();
                 }
+                if let Some(t) = self.current_track_ref() {
+                    let liked = self.library.is_liked(&t);
+                    let heart = if liked { "❤" } else { "🤍" };
+                    if ui
+                        .add_sized(big, egui::Button::new(heart).selected(liked))
+                        .clicked()
+                    {
+                        self.library.toggle_liked(&t);
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("🔊");
+                ui.add(
+                    egui::Slider::new(&mut self.volume, 0.0..=1.0)
+                        .show_value(false)
+                        .trailing_fill(true),
+                );
             });
             ui.add_space(8.0);
         });
@@ -517,14 +926,14 @@ impl OptimeApp {
         });
     }
 
-    /// The mobile library: demo playlists, file open, and the song list.
+    /// The mobile library: user library, demo archives, file open, and the song list.
     fn mobile_library(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if ui.button("📂 Open ROM / SDAT…").clicked() {
                     self.open_file_dialog();
                 }
-                ui.collapsing("Playlists (demos)", |ui| {
+                ui.collapsing("Demo archives", |ui| {
                     let mut requested = None;
                     for (label, stem) in DEMOS {
                         if ui.button(*label).clicked() {
@@ -536,16 +945,12 @@ impl OptimeApp {
                     }
                 });
                 ui.separator();
-                ui.label("Songs");
-                let mut to_play = None;
-                for (i, song) in self.songs.iter().enumerate() {
-                    let selected = self.current_song == Some(i);
-                    if ui.selectable_label(selected, &song.label).clicked() {
-                        to_play = Some(i);
-                    }
+                if self.library_ui(ui) {
+                    self.mobile_library_open = false;
                 }
-                if let Some(i) = to_play {
-                    self.play_song(i);
+                ui.separator();
+                ui.label("All songs");
+                if self.song_list_ui(ui) {
                     self.mobile_library_open = false;
                 }
             });
@@ -554,6 +959,11 @@ impl OptimeApp {
 }
 
 impl eframe::App for OptimeApp {
+    /// Persists the library, playback prefs, and synth settings (native: disk; web: localStorage).
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, &self.persisted());
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ensure_audio(ctx);
         self.poll_pending_file();
@@ -574,7 +984,7 @@ impl eframe::App for OptimeApp {
 
         let (snap, advance) = self.sync_audio(ctx);
         if advance {
-            self.step_song(1);
+            self.handle_song_end();
         }
 
         // Advance the piano roll's smoothed playhead (frozen when paused / no song), then drive
@@ -629,18 +1039,13 @@ impl eframe::App for OptimeApp {
                     }
                 });
                 ui.separator();
+                ui.collapsing("Library", |ui| {
+                    self.library_ui(ui);
+                });
+                ui.separator();
                 ui.label("Songs");
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut to_play = None;
-                    for (i, song) in self.songs.iter().enumerate() {
-                        let selected = self.current_song == Some(i);
-                        if ui.selectable_label(selected, &song.label).clicked() {
-                            to_play = Some(i);
-                        }
-                    }
-                    if let Some(i) = to_play {
-                        self.play_song(i);
-                    }
+                    self.song_list_ui(ui);
                 });
             });
 
@@ -665,8 +1070,30 @@ impl eframe::App for OptimeApp {
                 }
                 ui.separator();
                 ui.toggle_value(&mut self.shuffle, "🔀 Shuffle");
-                ui.toggle_value(&mut self.autoplay, "🔁 Autoplay")
-                    .on_hover_text("Fade out and advance when a song ends or loops twice");
+                if ui
+                    .button(self.repeat.label())
+                    .on_hover_text("Repeat mode: off / all / one")
+                    .clicked()
+                {
+                    self.repeat = self.repeat.next();
+                }
+                if let Some(t) = self.current_track_ref() {
+                    let liked = self.library.is_liked(&t);
+                    if ui
+                        .button(if liked { "❤" } else { "🤍" })
+                        .on_hover_text("Like")
+                        .clicked()
+                    {
+                        self.library.toggle_liked(&t);
+                    }
+                }
+                ui.separator();
+                ui.label("🔊");
+                ui.add(
+                    egui::Slider::new(&mut self.volume, 0.0..=1.0)
+                        .show_value(false)
+                        .trailing_fill(true),
+                );
                 ui.separator();
                 if ui.button("💾 Export WAV").clicked() {
                     self.export_wav();
