@@ -20,6 +20,12 @@ pub struct AudioState {
     pub fade_gain: f32,
     /// Per-sample gain decrement while fading out (0.0 = not fading).
     pub fade_step: f32,
+    /// Device sample rate, for converting render time into DSP load.
+    pub sample_rate: f64,
+    /// Smoothed audio-callback load: render time / buffer real-time budget (1.0 = can't keep up).
+    pub dsp_load: f32,
+    /// Number of currently sounding synthesizer voices.
+    pub voices: usize,
 }
 
 impl AudioState {
@@ -31,6 +37,9 @@ impl AudioState {
             volume: 1.0,
             fade_gain: 1.0,
             fade_step: 0.0,
+            sample_rate: 48_000.0,
+            dsp_load: 0.0,
+            voices: 0,
         }
     }
 }

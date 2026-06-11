@@ -27,6 +27,9 @@ impl AudioEngine {
         config.buffer_size = cpal::BufferSize::Fixed(2048);
 
         let shared = new_shared();
+        if let Ok(mut st) = shared.lock() {
+            st.sample_rate = sample_rate;
+        }
         let cb_shared = shared.clone();
 
         if supported.sample_format() != cpal::SampleFormat::F32 {
@@ -58,8 +61,39 @@ impl AudioEngine {
     }
 }
 
+/// Monotonic clock in seconds (`Instant` is unavailable on wasm; use `performance.now()`).
+fn now_seconds() -> f64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_secs_f64()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now() / 1000.0)
+            .unwrap_or(0.0)
+    }
+}
+
+/// Updates the DSP-load and voice-count meters after a buffer has been rendered.
+fn update_meters(st: &mut crate::player::AudioState, t0: f64, frames: usize) {
+    st.voices = st
+        .controller
+        .as_ref()
+        .map(|c| c.synthesizers.iter().map(|s| s.voice_count()).sum())
+        .unwrap_or(0);
+    let budget = (frames as f64 / st.sample_rate.max(1.0)).max(1e-9);
+    let load = ((now_seconds() - t0) / budget) as f32;
+    st.dsp_load = st.dsp_load * 0.85 + load.clamp(0.0, 2.0) * 0.15;
+}
+
 /// Fills the device buffer from the controller (or silence when idle/paused).
 fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
+    let t0 = now_seconds();
     let Ok(mut guard) = shared.lock() else {
         data.fill(0.0);
         return;
@@ -67,6 +101,8 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
     let st = &mut *guard;
     if st.paused || st.controller.is_none() {
         data.fill(0.0);
+        st.dsp_load *= 0.85;
+        st.voices = 0;
         return;
     }
     let config = &st.config;
@@ -83,6 +119,7 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
             gain = (gain - step).max(0.0);
         }
         st.fade_gain = gain;
+        update_meters(st, t0, data.len() / 2);
         return;
     }
     for frame in data.chunks_mut(channels.max(1)) {
@@ -102,4 +139,5 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         }
     }
     st.fade_gain = gain;
+    update_meters(st, t0, data.len() / channels.max(1));
 }

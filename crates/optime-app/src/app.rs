@@ -122,6 +122,11 @@ pub struct OptimeApp {
     /// Volume attenuation tied to the swipe: 1.0 centered, → 0.0 as the view leaves the screen.
     swipe_gain: f32,
 
+    /// Rolling history of the audio-callback DSP load, for the top-bar meter.
+    cpu_history: std::collections::VecDeque<f32>,
+    /// Rolling history of the active synthesizer voice count.
+    voice_history: std::collections::VecDeque<f32>,
+
     /// Cross-thread inbox for asynchronously-loaded file bytes: (source key, bytes).
     pending_file: FileInbox,
     /// Keys currently held, to debounce auto-repeat for note input.
@@ -188,6 +193,8 @@ impl OptimeApp {
             mobile_tab: MobileTab::NowPlaying,
             swipe_offset: 0.0,
             swipe_gain: 1.0,
+            cpu_history: std::collections::VecDeque::new(),
+            voice_history: std::collections::VecDeque::new(),
             pending_file: Arc::new(Mutex::new(None)),
             held_notes: [false; 128],
             crossover_plot_open: false,
@@ -607,6 +614,17 @@ impl OptimeApp {
         // Swipe attenuation: the song gets quieter as its visualizer slides offscreen.
         st.volume = self.volume * self.swipe_gain;
 
+        // Sample the performance meters (drawn in the top bar).
+        const METER_SAMPLES: usize = 128;
+        self.cpu_history.push_back(st.dsp_load);
+        self.voice_history.push_back(st.voices as f32);
+        if self.cpu_history.len() > METER_SAMPLES {
+            self.cpu_history.pop_front();
+        }
+        if self.voice_history.len() > METER_SAMPLES {
+            self.voice_history.pop_front();
+        }
+
         // End-of-song: fade out once the sequence has finished (or looped twice), then let
         // [`Self::handle_song_end`] apply the repeat mode.
         if let Some(controller) = &mut st.controller {
@@ -830,6 +848,33 @@ impl OptimeApp {
         started
     }
 
+    /// FL-Studio-style top-bar performance meters: 🖥 DSP load and 🎶 active voices, each a
+    /// small scrolling graph with the exact numbers on hover.
+    fn meters_ui(&self, ui: &mut egui::Ui) {
+        let cpu = self.cpu_history.back().copied().unwrap_or(0.0);
+        let danger = ui.visuals().error_fg_color;
+        let accent = ui.visuals().selection.bg_fill;
+        let color = if cpu > 0.85 { danger } else { accent };
+        draw_meter(
+            ui,
+            "🖥",
+            &self.cpu_history,
+            1.0,
+            color,
+            format!("DSP load: {:.0}%", cpu * 100.0),
+        );
+        let voices = self.voice_history.back().copied().unwrap_or(0.0);
+        let scale = self.voice_history.iter().fold(16.0f32, |m, &v| m.max(v));
+        draw_meter(
+            ui,
+            "🎶",
+            &self.voice_history,
+            scale,
+            accent,
+            format!("Voices: {voices:.0}"),
+        );
+    }
+
     /// The synthesis settings (shared between the desktop side panel and the mobile tab).
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Settings");
@@ -926,6 +971,16 @@ impl OptimeApp {
     /// The compact phone layout: a bottom navigation bar (Now Playing / Library / Playlists /
     /// Settings) with a floating mini-player above it on every screen except Now Playing.
     fn mobile_ui(&mut self, ctx: &egui::Context, snap: &VisSnapshot) {
+        egui::TopBottomPanel::top("m_meters")
+            .show_separator_line(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.meters_ui(ui);
+                    });
+                });
+            });
+
         egui::TopBottomPanel::bottom("m_nav")
             .show_separator_line(false)
             .show(ctx, |ui| {
@@ -1370,6 +1425,9 @@ impl eframe::App for OptimeApp {
                 if ui.button("💾 Export WAV").clicked() {
                     self.export_wav();
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.meters_ui(ui);
+                });
             });
         });
 
@@ -1427,6 +1485,43 @@ impl eframe::App for OptimeApp {
         #[cfg(not(target_arch = "wasm32"))]
         ctx.request_repaint();
     }
+}
+
+/// One scrolling history graph for the top-bar meters: an icon label plus a filled line plot.
+fn draw_meter(
+    ui: &mut egui::Ui,
+    icon: &str,
+    values: &std::collections::VecDeque<f32>,
+    max: f32,
+    color: egui::Color32,
+    hover: String,
+) {
+    ui.label(icon);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(64.0, 18.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+    if values.len() >= 2 {
+        let n = values.len();
+        let pts: Vec<egui::Pos2> = values
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let x = rect.left() + rect.width() * i as f32 / (n - 1) as f32;
+                let y = rect.bottom() - rect.height() * (v / max.max(1e-6)).clamp(0.0, 1.0);
+                egui::pos2(x, y)
+            })
+            .collect();
+        // Soft fill under the curve, then the line itself.
+        let fill = color.linear_multiply(0.25);
+        for p in &pts {
+            painter.line_segment(
+                [*p, egui::pos2(p.x, rect.bottom())],
+                egui::Stroke::new(1.0_f32, fill),
+            );
+        }
+        painter.add(egui::Shape::line(pts, egui::Stroke::new(1.5_f32, color)));
+    }
+    resp.on_hover_text(hover);
 }
 
 /// Saves bytes to disk (native, via dialog) or triggers a browser download (web).
