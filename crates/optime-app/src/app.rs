@@ -28,6 +28,15 @@ enum VisTab {
 /// Cross-thread inbox for asynchronously-loaded file bytes: (source key, bytes).
 type FileInbox = Arc<Mutex<Option<(String, Vec<u8>)>>>;
 
+/// The screens reachable from the mobile bottom navigation bar.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum MobileTab {
+    NowPlaying,
+    Library,
+    Playlists,
+    Settings,
+}
+
 /// Which library collection is open in the library browser.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum LibraryView {
@@ -105,10 +114,13 @@ pub struct OptimeApp {
     /// Restore-on-launch: start the restored track paused instead of blasting audio.
     resume_paused: bool,
 
-    /// Mobile layout: `true` shows the library (playlists + songs) instead of Now Playing.
-    mobile_library_open: bool,
-    /// Accumulated horizontal swipe distance on the Now Playing view.
-    swipe_dx: f32,
+    /// Which mobile screen the bottom navigation has selected.
+    mobile_tab: MobileTab,
+    /// Horizontal slide of the Now Playing visualizer, in points: follows the finger during a
+    /// swipe, then animates back to 0 (the new song sliding in after a committed swipe).
+    swipe_offset: f32,
+    /// Volume attenuation tied to the swipe: 1.0 centered, → 0.0 as the view leaves the screen.
+    swipe_gain: f32,
 
     /// Cross-thread inbox for asynchronously-loaded file bytes: (source key, bytes).
     pending_file: FileInbox,
@@ -173,8 +185,9 @@ impl OptimeApp {
             queue: None,
             pending_play: None,
             resume_paused: false,
-            mobile_library_open: false,
-            swipe_dx: 0.0,
+            mobile_tab: MobileTab::NowPlaying,
+            swipe_offset: 0.0,
+            swipe_gain: 1.0,
             pending_file: Arc::new(Mutex::new(None)),
             held_notes: [false; 128],
             crossover_plot_open: false,
@@ -591,7 +604,8 @@ impl OptimeApp {
         };
         st.config = config.clone();
         st.paused = self.paused;
-        st.volume = self.volume;
+        // Swipe attenuation: the song gets quieter as its visualizer slides offscreen.
+        st.volume = self.volume * self.swipe_gain;
 
         // End-of-song: fade out once the sequence has finished (or looped twice), then let
         // [`Self::handle_song_end`] apply the repeat mode.
@@ -816,21 +830,249 @@ impl OptimeApp {
         started
     }
 
-    /// The compact phone layout: a Spotify-style Now Playing screen with swipe navigation, plus
-    /// a library view (playlists = demo SDATs, then the song list).
-    fn mobile_ui(&mut self, ctx: &egui::Context, snap: &VisSnapshot) {
-        egui::TopBottomPanel::top("m_top").show(ctx, |ui| {
+    /// The synthesis settings (shared between the desktop side panel and the mobile tab).
+    fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Settings");
+        ui.checkbox(&mut self.stereo_separation, "Stereo separation");
+        ui.add_enabled_ui(self.stereo_separation, |ui| {
+            ui.checkbox(&mut self.force_stereo_separation, "Force stereo separation");
+            ui.checkbox(&mut self.bass_mono, "Keep bass centered");
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.mobile_library_open, false, "🎵 Now Playing");
-                ui.selectable_value(&mut self.mobile_library_open, true, "📚 Library");
+                ui.add_enabled(
+                    self.bass_mono,
+                    egui::Slider::new(&mut self.bass_mono_freq, 40.0..=800.0)
+                        .text("Bass crossover")
+                        .suffix(" Hz")
+                        .logarithmic(true),
+                )
+                .on_hover_text(
+                    "Frequencies below this stay glued to the center; \
+                     mids and treble are widened.",
+                );
+                if ui
+                    .add_enabled(self.bass_mono, egui::Button::new("📈"))
+                    .on_hover_text("Analyze crossover filter")
+                    .clicked()
+                {
+                    self.crossover_plot_open = true;
+                }
             });
         });
+        ui.separator();
+        ui.label("Resampling");
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("resample")
+                .selected_text(match self.resample_choice {
+                    1 => "Linear",
+                    2 => "Sinc – output Nyquist (crunch)",
+                    3 => "Sinc – sample Nyquist (clean)",
+                    _ => "Nearest (DS hardware)",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.resample_choice, 0, "Nearest (DS hardware)");
+                    ui.selectable_value(&mut self.resample_choice, 1, "Linear");
+                    ui.selectable_value(
+                        &mut self.resample_choice,
+                        2,
+                        "Sinc – output Nyquist (crunch)",
+                    );
+                    ui.selectable_value(
+                        &mut self.resample_choice,
+                        3,
+                        "Sinc – sample Nyquist (clean)",
+                    );
+                });
+            if ui
+                .add_enabled(self.resample_choice >= 2, egui::Button::new("📈"))
+                .on_hover_text("Analyze sinc kernel")
+                .clicked()
+            {
+                self.sinc_plot_open = true;
+            }
+        });
+        let is_sinc = self.resample_choice >= 2;
+        ui.add_enabled_ui(is_sinc, |ui| {
+            ui.add(
+                egui::Slider::new(&mut self.sinc_taps, 4..=128)
+                    .step_by(2.0)
+                    .text("Sinc taps")
+                    .logarithmic(false),
+            )
+            .on_hover_text(
+                "Number of source samples the kernel spans — fixed regardless of pitch, \
+                 so CPU cost is constant per voice. More taps → sharper cutoff and better \
+                 stopband rejection, at higher CPU cost.",
+            );
+        });
+        ui.separator();
+        ui.label("Tuning system");
+        egui::ComboBox::from_id_salt("tuning")
+            .selected_text(if self.tuning_choice == 0 {
+                "Equal temperament"
+            } else {
+                "Pure (Pythagorean)"
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.tuning_choice, 0, "Equal temperament");
+                ui.selectable_value(&mut self.tuning_choice, 1, "Pure (Pythagorean)");
+            });
+        if self.tuning_choice == 1 {
+            ui.add(
+                egui::Slider::new(&mut self.pure_tonic, 0..=11).text("Tonic (semitones from A)"),
+            );
+        }
+    }
 
-        if self.mobile_library_open {
-            self.mobile_library(ctx);
-            return;
+    /// The compact phone layout: a bottom navigation bar (Now Playing / Library / Playlists /
+    /// Settings) with a floating mini-player above it on every screen except Now Playing.
+    fn mobile_ui(&mut self, ctx: &egui::Context, snap: &VisSnapshot) {
+        egui::TopBottomPanel::bottom("m_nav")
+            .show_separator_line(false)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                let tabs = [
+                    (MobileTab::NowPlaying, "▶", "Playing"),
+                    (MobileTab::Library, "📚", "Library"),
+                    (MobileTab::Playlists, "🎵", "Playlists"),
+                    (MobileTab::Settings, "⚙", "Settings"),
+                ];
+                ui.columns(tabs.len(), |cols| {
+                    for (col, (tab, icon, label)) in cols.iter_mut().zip(tabs) {
+                        col.vertical_centered(|ui| {
+                            let selected = self.mobile_tab == tab;
+                            let text = egui::RichText::new(format!("{icon}\n{label}")).size(13.0);
+                            let text = if selected { text.strong() } else { text.weak() };
+                            if ui.add(egui::Button::new(text).frame(false)).clicked() {
+                                self.mobile_tab = tab;
+                            }
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+            });
+
+        if self.mobile_tab != MobileTab::NowPlaying && self.current_song.is_some() {
+            egui::TopBottomPanel::bottom("m_mini")
+                .show_separator_line(false)
+                .show(ctx, |ui| self.mini_player(ui));
         }
 
+        match self.mobile_tab {
+            MobileTab::NowPlaying => self.mobile_now_playing(ctx, snap),
+            MobileTab::Library => self.mobile_library(ctx),
+            MobileTab::Playlists => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.heading("Playlists");
+                        ui.add_space(4.0);
+                        self.library_ui(ui);
+                    });
+                });
+            }
+            MobileTab::Settings => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        self.settings_ui(ui);
+                        ui.separator();
+                        if ui.button("💾 Export WAV").clicked() {
+                            self.export_wav();
+                        }
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(&self.status).weak().size(11.0));
+                    });
+                });
+            }
+        }
+    }
+
+    /// The Spotify-style floating mini-player: animated EQ bars, song title, and transport;
+    /// tapping it opens the Now Playing screen.
+    fn mini_player(&mut self, ui: &mut egui::Ui) {
+        let height = 48.0;
+        let (rect, resp) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height),
+            egui::Sense::click(),
+        );
+        let painter = ui.painter_at(rect);
+        let visuals = ui.visuals();
+        let bg = if resp.hovered() {
+            visuals.widgets.hovered.bg_fill
+        } else {
+            visuals.widgets.inactive.bg_fill
+        };
+        painter.rect_filled(rect, 10.0, bg);
+
+        // Animated EQ bars (frozen when paused).
+        let accent = visuals.selection.bg_fill;
+        let t = ui.input(|i| i.time);
+        let playing = !self.paused;
+        let bar_w = 4.0;
+        let max_h = height - 16.0;
+        for b in 0..4 {
+            let phase = b as f64 * 1.3;
+            let level = if playing {
+                ((t * (4.0 + b as f64 * 0.9) + phase).sin() * 0.5 + 0.5) as f32
+            } else {
+                0.15
+            };
+            let h = 4.0 + level * (max_h - 4.0);
+            let x = rect.left() + 12.0 + b as f32 * (bar_w + 3.0);
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(x, rect.center().y + max_h / 2.0 - h),
+                egui::pos2(x + bar_w, rect.center().y + max_h / 2.0),
+            );
+            painter.rect_filled(bar, 2.0, accent);
+        }
+        if playing {
+            ui.ctx().request_repaint();
+        }
+
+        // Song title.
+        let title = self
+            .current_song
+            .and_then(|i| self.songs.get(i))
+            .map(|s| s.label.clone())
+            .unwrap_or_default();
+        let text_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + 48.0, rect.top()),
+            egui::pos2(rect.right() - 88.0, rect.bottom()),
+        );
+        painter.text(
+            text_rect.left_center(),
+            egui::Align2::LEFT_CENTER,
+            title,
+            egui::FontId::proportional(14.0),
+            visuals.text_color(),
+        );
+
+        // Transport buttons layered on the right edge of the bar.
+        let btn = egui::vec2(34.0, 34.0);
+        let pause_icon = if self.paused { "▶" } else { "⏸" };
+        let pause_rect =
+            egui::Rect::from_center_size(egui::pos2(rect.right() - 62.0, rect.center().y), btn);
+        if ui
+            .put(pause_rect, egui::Button::new(pause_icon).frame(false))
+            .clicked()
+        {
+            self.paused = !self.paused;
+        }
+        let next_rect =
+            egui::Rect::from_center_size(egui::pos2(rect.right() - 26.0, rect.center().y), btn);
+        if ui
+            .put(next_rect, egui::Button::new("⏭").frame(false))
+            .clicked()
+        {
+            self.step_song(1);
+        }
+
+        if resp.clicked() {
+            self.mobile_tab = MobileTab::NowPlaying;
+        }
+    }
+
+    /// The full-screen Now Playing view: visualizer with animated swipe navigation plus the
+    /// large transport.
+    fn mobile_now_playing(&mut self, ctx: &egui::Context, snap: &VisSnapshot) {
         egui::TopBottomPanel::bottom("m_transport").show(ctx, |ui| {
             ui.add_space(6.0);
             // Title + status above the controls.
@@ -909,27 +1151,49 @@ impl OptimeApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // The piano roll doubles as the album art; swipe horizontally to change songs.
+            // While dragging, the roll follows the finger; past the threshold the old song
+            // slides out and the next one slides in from the opposite edge, with the volume
+            // dipping in proportion to how far offscreen the view is.
             let rect = ui.max_rect();
-            self.piano_roll.draw(ui, snap.active);
+            let w = rect.width().max(1.0);
             let resp = ui.interact(rect, egui::Id::new("swipe"), egui::Sense::drag());
+            let dt = ui.input(|i| i.stable_dt).min(0.1);
             if resp.dragged() {
-                self.swipe_dx += resp.drag_delta().x;
-            }
-            if resp.drag_stopped() {
-                if self.swipe_dx <= -60.0 {
-                    self.step_song(1); // swipe left → next
-                } else if self.swipe_dx >= 60.0 {
-                    self.step_song(-1); // swipe right → previous
+                self.swipe_offset += resp.drag_delta().x;
+            } else if resp.drag_stopped() {
+                if self.swipe_offset <= -0.25 * w {
+                    // Swiped left → next song slides in from the right.
+                    self.step_song(1);
+                    self.swipe_offset += w;
+                } else if self.swipe_offset >= 0.25 * w {
+                    // Swiped right → previous song slides in from the left.
+                    self.step_song(-1);
+                    self.swipe_offset -= w;
                 }
-                self.swipe_dx = 0.0;
+            } else if self.swipe_offset != 0.0 {
+                // Spring back / slide in.
+                self.swipe_offset *= (-12.0 * dt).exp();
+                if self.swipe_offset.abs() < 0.5 {
+                    self.swipe_offset = 0.0;
+                }
+                ui.ctx().request_repaint();
             }
+            self.swipe_gain = 1.0 - (self.swipe_offset.abs() / w).clamp(0.0, 1.0);
+
+            let child_rect = rect.translate(egui::vec2(self.swipe_offset, 0.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(child_rect));
+            child.set_clip_rect(rect);
+            self.piano_roll.draw(&mut child, snap.active);
         });
     }
 
-    /// The mobile library: user library, demo archives, file open, and the song list.
+    /// The mobile library: file open, demo archives, and the song list. Selecting a song starts
+    /// it in the mini-player rather than jumping to the visualizer.
     fn mobile_library(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("Library");
+                ui.add_space(4.0);
                 if ui.button("📂 Open ROM / SDAT…").clicked() {
                     self.open_file_dialog();
                 }
@@ -945,14 +1209,8 @@ impl OptimeApp {
                     }
                 });
                 ui.separator();
-                if self.library_ui(ui) {
-                    self.mobile_library_open = false;
-                }
-                ui.separator();
                 ui.label("All songs");
-                if self.song_list_ui(ui) {
-                    self.mobile_library_open = false;
-                }
+                self.song_list_ui(ui);
             });
         });
     }
@@ -986,6 +1244,8 @@ impl eframe::App for OptimeApp {
         if advance {
             self.handle_song_end();
         }
+        // Re-derived each frame by the Now Playing swipe; full volume everywhere else.
+        self.swipe_gain = 1.0;
 
         // Advance the piano roll's smoothed playhead (frozen when paused / no song), then drive
         // the look-ahead runner so it stays buffered ahead of the playhead, and pull its notes.
@@ -1004,6 +1264,18 @@ impl eframe::App for OptimeApp {
                 }
             }
             self.piano_roll.ingest(look);
+        }
+
+        // Analysis popups (shown every frame while open) — reachable from both layouts.
+        crate::filter_plot::show_crossover_window(
+            ctx,
+            &mut self.crossover_plot_open,
+            self.sample_rate,
+            self.bass_mono_freq as f64,
+        );
+        if self.resample_choice >= 2 {
+            let resample_mode = self.config().resample;
+            crate::filter_plot::show_sinc_window(ctx, &mut self.sinc_plot_open, resample_mode);
         }
 
         // Narrow screens (phones) get the Spotify-style mobile layout.
@@ -1110,116 +1382,11 @@ impl eframe::App for OptimeApp {
         egui::SidePanel::right("settings")
             .default_width(220.0)
             .show(ctx, |ui| {
-                ui.heading("Settings");
-                ui.checkbox(&mut self.stereo_separation, "Stereo separation");
-                ui.add_enabled_ui(self.stereo_separation, |ui| {
-                    ui.checkbox(&mut self.force_stereo_separation, "Force stereo separation");
-                    ui.checkbox(&mut self.bass_mono, "Keep bass centered");
-                    ui.horizontal(|ui| {
-                        ui.add_enabled(
-                            self.bass_mono,
-                            egui::Slider::new(&mut self.bass_mono_freq, 40.0..=800.0)
-                                .text("Bass crossover")
-                                .suffix(" Hz")
-                                .logarithmic(true),
-                        )
-                        .on_hover_text(
-                            "Frequencies below this stay glued to the center; \
-                             mids and treble are widened.",
-                        );
-                        if ui
-                            .add_enabled(self.bass_mono, egui::Button::new("📈"))
-                            .on_hover_text("Analyze crossover filter")
-                            .clicked()
-                        {
-                            self.crossover_plot_open = true;
-                        }
-                    });
-                });
-                ui.separator();
-                ui.label("Resampling");
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("resample")
-                        .selected_text(match self.resample_choice {
-                            1 => "Linear",
-                            2 => "Sinc – output Nyquist (crunch)",
-                            3 => "Sinc – sample Nyquist (clean)",
-                            _ => "Nearest (DS hardware)",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.resample_choice,
-                                0,
-                                "Nearest (DS hardware)",
-                            );
-                            ui.selectable_value(&mut self.resample_choice, 1, "Linear");
-                            ui.selectable_value(
-                                &mut self.resample_choice,
-                                2,
-                                "Sinc – output Nyquist (crunch)",
-                            );
-                            ui.selectable_value(
-                                &mut self.resample_choice,
-                                3,
-                                "Sinc – sample Nyquist (clean)",
-                            );
-                        });
-                    if ui
-                        .add_enabled(self.resample_choice >= 2, egui::Button::new("📈"))
-                        .on_hover_text("Analyze sinc kernel")
-                        .clicked()
-                    {
-                        self.sinc_plot_open = true;
-                    }
-                });
-                let is_sinc = self.resample_choice >= 2;
-                ui.add_enabled_ui(is_sinc, |ui| {
-                    ui.add(
-                        egui::Slider::new(&mut self.sinc_taps, 4..=128)
-                            .step_by(2.0)
-                            .text("Sinc taps")
-                            .logarithmic(false),
-                    )
-                    .on_hover_text(
-                        "Number of source samples the kernel spans — fixed regardless of pitch, \
-                         so CPU cost is constant per voice. More taps → sharper cutoff and better \
-                         stopband rejection, at higher CPU cost.",
-                    );
-                });
-                ui.separator();
-                ui.label("Tuning system");
-                egui::ComboBox::from_id_salt("tuning")
-                    .selected_text(if self.tuning_choice == 0 {
-                        "Equal temperament"
-                    } else {
-                        "Pure (Pythagorean)"
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.tuning_choice, 0, "Equal temperament");
-                        ui.selectable_value(&mut self.tuning_choice, 1, "Pure (Pythagorean)");
-                    });
-                if self.tuning_choice == 1 {
-                    ui.add(
-                        egui::Slider::new(&mut self.pure_tonic, 0..=11)
-                            .text("Tonic (semitones from A)"),
-                    );
-                }
+                self.settings_ui(ui);
                 ui.separator();
                 ui.label("Live keyboard");
                 ui.label("Click a track row to capture, then play z–m / q–p.");
             });
-
-        // Analysis popups (shown every frame while open).
-        crate::filter_plot::show_crossover_window(
-            ctx,
-            &mut self.crossover_plot_open,
-            self.sample_rate,
-            self.bass_mono_freq as f64,
-        );
-        if self.resample_choice >= 2 {
-            let resample_mode = self.config().resample;
-            crate::filter_plot::show_sinc_window(ctx, &mut self.sinc_plot_open, resample_mode);
-        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
