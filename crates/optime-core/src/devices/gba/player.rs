@@ -25,7 +25,12 @@ const MASTER_VOLUME: u32 = 12;
 const ENGINE_RATE: f64 = 13379.0;
 
 /// Linear gain of a full-scale CGB channel relative to the DirectSound scale.
-const CGB_GAIN: f64 = 1.0;
+///
+/// On hardware the two paths meet at the 10-bit DAC: a full-volume DirectSound stream spans
+/// roughly ±0x100 DAC units, while a single PSG channel at envelope 15 with the usual NR50
+/// master peaks near ±0x20 — about 1/8 of the DS scale. Our square/wave/noise sample data is
+/// ±0.5, so 0.25 here lands a full-scale CGB channel at ±0.125 of a full-scale DS voice.
+const CGB_GAIN: f64 = 0.25;
 
 /// DirectSound channel envelope phase (the `SOUND_CHANNEL_SF_ENV` states + pseudo-echo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +75,8 @@ struct ChannelCommon {
 struct DirectSoundChannel {
     common: ChannelCommon,
     phase: EnvPhase,
+    /// Whether the start-frame initialization has run (`SOUND_CHANNEL_SF_START`).
+    started: bool,
     /// Envelope volume 0..=255.
     env: u8,
     /// WaveData `freq` field, for pitch recomputation.
@@ -329,6 +336,7 @@ impl GbaPlayer {
                 self.ds_channels[slot] = Some(DirectSoundChannel {
                     common: common(note.tone.key, right_vol, left_vol),
                     phase: EnvPhase::Attack,
+                    started: false,
                     env: 0,
                     wav_freq,
                     fixed,
@@ -653,11 +661,21 @@ fn cgb_data_rate(kind: CgbKind, reg: u32) -> f64 {
 /// One `SoundMainRAM` envelope frame for a DirectSound channel. Returns `true` if the channel
 /// shut off.
 fn direct_sound_env_frame(c: &mut DirectSoundChannel) -> bool {
+    if !c.started {
+        // SOUND_CHANNEL_SF_START: a channel released before its first frame never sounds.
+        c.started = true;
+        if c.common.stop {
+            return true;
+        }
+        // Otherwise the start frame falls straight into the attack step below.
+    }
     let mut env = u32::from(c.env);
     match c.phase {
         EnvPhase::PseudoEcho => {
-            c.common.echo_length = c.common.echo_length.wrapping_sub(1);
-            if c.common.echo_length == 0 || c.common.echo_length > 0x80 {
+            // `subs; bhi`: the channel survives only while the pre-decrement length exceeds 1.
+            let length = c.common.echo_length;
+            c.common.echo_length = length.wrapping_sub(1);
+            if length <= 1 {
                 return true;
             }
         }
@@ -703,18 +721,23 @@ fn direct_sound_env_frame(c: &mut DirectSoundChannel) -> bool {
 /// One `CgbSound` envelope step for a CGB channel. Returns `true` if the channel shut off.
 fn cgb_env_frame(c: &mut CgbChannel) -> bool {
     if !c.started {
-        // SOUND_CHANNEL_SF_START: initialize the envelope.
+        // SOUND_CHANNEL_SF_START: a channel released before its first frame never sounds;
+        // otherwise initialize the envelope.
         c.started = true;
+        if c.common.stop {
+            return true;
+        }
         cgb_mod_vol(c);
         c.env_counter = c.common.adsr[0];
         if c.common.adsr[0] != 0 {
             c.env = 0;
-        } else {
-            return cgb_decay_start(c);
+        } else if let Some(died) = cgb_decay_start(c) {
+            return died;
         }
     } else if c.phase == EnvPhase::PseudoEcho {
+        // C: `if ((s8)(chan->pseudoEchoLength) <= 0)` after the decrement.
         c.common.echo_length = c.common.echo_length.wrapping_sub(1);
-        if c.common.echo_length == 0 || c.common.echo_length > 0x80 {
+        if c.common.echo_length as i8 <= 0 {
             return true;
         }
         return false;
@@ -729,7 +752,7 @@ fn cgb_env_frame(c: &mut CgbChannel) -> bool {
         match c.phase {
             EnvPhase::Release => {
                 c.env = c.env.wrapping_sub(1);
-                if c.env == 0 || c.env > 0x80 {
+                if c.env as i8 <= 0 {
                     return cgb_echo_start(c);
                 }
                 c.env_counter = c.common.adsr[3];
@@ -739,14 +762,12 @@ fn cgb_env_frame(c: &mut CgbChannel) -> bool {
                 c.env_counter = 7;
             }
             EnvPhase::Decay => {
+                // C compares both sides as s8.
                 c.env = c.env.wrapping_sub(1);
-                if c.env <= c.sustain_goal || c.env > 0x80 {
-                    if c.common.adsr[2] == 0 {
-                        return cgb_echo_start(c);
+                if c.env as i8 <= c.sustain_goal as i8 {
+                    if let Some(died) = cgb_sustain_start(c) {
+                        return died;
                     }
-                    c.phase = EnvPhase::Sustain;
-                    c.env = c.sustain_goal;
-                    c.env_counter = 7;
                 } else {
                     c.env_counter = c.common.adsr[1];
                 }
@@ -754,9 +775,12 @@ fn cgb_env_frame(c: &mut CgbChannel) -> bool {
             EnvPhase::Attack | EnvPhase::PseudoEcho => {
                 c.env += 1;
                 if c.env >= c.env_goal {
-                    return cgb_decay_start(c);
+                    if let Some(died) = cgb_decay_start(c) {
+                        return died;
+                    }
+                } else {
+                    c.env_counter = c.common.adsr[0];
                 }
-                c.env_counter = c.common.adsr[0];
             }
         }
     }
@@ -764,27 +788,37 @@ fn cgb_env_frame(c: &mut CgbChannel) -> bool {
     false
 }
 
-/// `envelope_decay_start`. Returns `true` if the channel shut off.
-fn cgb_decay_start(c: &mut CgbChannel) -> bool {
+/// `envelope_decay_start`: `Some(died)` ends the frame right here (the C code jumped to
+/// `envelope_complete` / `oscillator_off`); `None` falls through to the counter decrement
+/// (`envelope_step_complete`), which matters for the every-15th-frame double step.
+fn cgb_decay_start(c: &mut CgbChannel) -> Option<bool> {
     c.phase = EnvPhase::Decay;
     c.env_counter = c.common.adsr[1];
-    c.env = c.env_goal;
-    if c.common.adsr[1] == 0 {
-        // No decay: jump straight to sustain (or the echo tail at zero sustain).
-        if c.common.adsr[2] == 0 {
-            return cgb_echo_start(c);
-        }
+    if c.env_counter != 0 {
+        c.env = c.env_goal;
+        None
+    } else {
+        cgb_sustain_start(c)
+    }
+}
+
+/// `envelope_sustain_start`: same exit convention as [`cgb_decay_start`].
+fn cgb_sustain_start(c: &mut CgbChannel) -> Option<bool> {
+    if c.common.adsr[2] == 0 {
+        Some(cgb_echo_start(c))
+    } else {
         c.phase = EnvPhase::Sustain;
         c.env = c.sustain_goal;
         c.env_counter = 7;
+        None
     }
-    false
 }
 
-/// `envelope_pseudoecho_start`. Returns `true` if the channel shut off.
+/// `envelope_pseudoecho_start`. Returns `true` if the channel shut off. (A zero echo length
+/// is caught on the *next* frame's IEC pass, exactly as in C.)
 fn cgb_echo_start(c: &mut CgbChannel) -> bool {
     c.env = (((u32::from(c.env_goal) * u32::from(c.common.echo_volume)) + 0xFF) >> 8) as u8;
-    if c.env == 0 || c.common.echo_length == 0 {
+    if c.env == 0 {
         return true;
     }
     c.phase = EnvPhase::PseudoEcho;
@@ -834,4 +868,541 @@ fn build_noise_samples() -> [Arc<Sample>; 2] {
         Arc::new(s)
     };
     [generate(false), generate(true)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `SOUND_CHANNEL_SF_*` from `pret/pokeemerald` `include/gba/m4a_internal.h`.
+    const SF_START: u8 = 0x80;
+    const SF_STOP: u8 = 0x40;
+    const SF_IEC: u8 = 0x04;
+    const SF_ENV: u8 = 0x03;
+    const SF_ENV_DECAY: u8 = 0x02;
+    const SF_ENV_ATTACK: u8 = 0x03;
+
+    /// Direct transcription of `ChnVolSetAsm` (`src/m4a_1.s`) used as the oracle.
+    fn c_chn_vol_set_asm(velocity: u8, rhythm_pan: i8, vol_mr: u8, vol_ml: u8) -> (u8, u8) {
+        let mut right =
+            ((0x80 + i32::from(rhythm_pan)) * i32::from(velocity) * i32::from(vol_mr)) >> 14;
+        if right > 0xFF {
+            right = 0xFF;
+        }
+        let mut left =
+            ((0x7F - i32::from(rhythm_pan)) * i32::from(velocity) * i32::from(vol_ml)) >> 14;
+        if left > 0xFF {
+            left = 0xFF;
+        }
+        (right as u8, left as u8)
+    }
+
+    #[test]
+    fn chn_vol_set_matches_pokeemerald() {
+        for velocity in [0u8, 1, 64, 100, 127, 255] {
+            for pan in [-128i8, -64, -2, 0, 2, 63, 126] {
+                for vol_mr in [0u8, 1, 90, 178, 255] {
+                    for vol_ml in [0u8, 1, 90, 178, 255] {
+                        let expect = c_chn_vol_set_asm(velocity, pan, vol_mr, vol_ml);
+                        let got = chn_vol_set(velocity, Some(pan), vol_mr, vol_ml);
+                        assert_eq!(
+                            got, expect,
+                            "velocity={velocity} pan={pan} volMR={vol_mr} volML={vol_ml}"
+                        );
+                    }
+                }
+            }
+        }
+        // A non-rhythm voice plays with rhythmPan 0.
+        assert_eq!(
+            chn_vol_set(100, None, 200, 200),
+            c_chn_vol_set_asm(100, 0, 200, 200)
+        );
+    }
+
+    /// A DirectSound channel in its note-on state (everything irrelevant zeroed).
+    fn make_ds_channel(adsr: [u8; 4], echo_volume: u8, echo_length: u8) -> DirectSoundChannel {
+        DirectSoundChannel {
+            common: ChannelCommon {
+                voice: 0,
+                track: 0,
+                linked: true,
+                key: 60,
+                midi_key: 60,
+                velocity: 100,
+                priority: 0,
+                gate: 0,
+                stop: false,
+                rhythm_pan: None,
+                right_vol: 0,
+                left_vol: 0,
+                adsr,
+                echo_volume,
+                echo_length,
+            },
+            phase: EnvPhase::Attack,
+            started: false,
+            env: 0,
+            wav_freq: 0,
+            fixed: false,
+        }
+    }
+
+    /// The oracle's DirectSound channel: raw `statusFlags` state, as the hardware keeps it.
+    struct CDsChannel {
+        status: u8,
+        env: u8,
+        adsr: [u8; 4],
+        echo_volume: u8,
+        echo_length: u8,
+    }
+
+    /// Direct transcription of the `SoundMainRAM` envelope section (`src/m4a_1.s`,
+    /// `_081DCF6A`..`_081DD006`). Returns `false` once the channel turns off.
+    fn c_sound_main_ram_env(c: &mut CDsChannel) -> bool {
+        let [attack, decay, sustain, release] = c.adsr;
+        if c.status & SF_START != 0 {
+            if c.status & SF_STOP != 0 {
+                c.status = 0;
+                return false;
+            }
+            // Start: status = ENV_ATTACK, env = 0, then fall into the attack step.
+            c.status = SF_ENV_ATTACK;
+            let env = u32::from(attack); // 0 + attack
+            if env >= 0xFF {
+                c.env = 0xFF;
+                c.status -= 1;
+            } else {
+                c.env = env as u8;
+            }
+            return true;
+        }
+        let mut env = u32::from(c.env);
+        if c.status & SF_IEC != 0 {
+            // `subs r0, 1; strb; bhi` — survives only while the pre-decrement length > 1.
+            let orig = c.echo_length;
+            c.echo_length = orig.wrapping_sub(1);
+            if orig <= 1 {
+                c.status = 0;
+                return false;
+            }
+        } else if c.status & SF_STOP != 0 {
+            env = (env * u32::from(release)) >> 8;
+            if env <= u32::from(c.echo_volume) {
+                if c.echo_volume == 0 {
+                    c.status = 0;
+                    return false;
+                }
+                env = u32::from(c.echo_volume);
+                c.status |= SF_IEC;
+            }
+        } else if c.status & SF_ENV == SF_ENV_DECAY {
+            env = (env * u32::from(decay)) >> 8;
+            if env <= u32::from(sustain) {
+                env = u32::from(sustain);
+                if sustain == 0 {
+                    if c.echo_volume == 0 {
+                        c.status = 0;
+                        return false;
+                    }
+                    env = u32::from(c.echo_volume);
+                    c.status |= SF_IEC;
+                } else {
+                    c.status -= 1;
+                }
+            }
+        } else if c.status & SF_ENV == SF_ENV_ATTACK {
+            env += u32::from(attack);
+            if env >= 0xFF {
+                env = 0xFF;
+                c.status -= 1;
+            }
+        }
+        c.env = env as u8;
+        true
+    }
+
+    #[test]
+    fn direct_sound_envelope_matches_pokeemerald() {
+        for attack in [0u8, 1, 9, 80, 255] {
+            for decay in [0u8, 128, 235, 255] {
+                for sustain in [0u8, 77, 255] {
+                    for release in [0u8, 128, 245] {
+                        for (echo_volume, echo_length) in [
+                            (0u8, 0u8),
+                            (40, 0),
+                            (40, 1),
+                            (40, 5),
+                            (40, 0x81),
+                            (40, 0xC0),
+                        ] {
+                            for release_frame in [0u32, 1, 3, 25] {
+                                ds_envelope_scenario(
+                                    [attack, decay, sustain, release],
+                                    echo_volume,
+                                    echo_length,
+                                    release_frame,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Runs one note: started, released at `release_frame`, followed for 600 frames.
+    fn ds_envelope_scenario(adsr: [u8; 4], echo_volume: u8, echo_length: u8, release_frame: u32) {
+        let label = format!(
+            "adsr={adsr:?} echo=({echo_volume},{echo_length}) release_frame={release_frame}"
+        );
+        let mut ours = make_ds_channel(adsr, echo_volume, echo_length);
+        let mut oracle = CDsChannel {
+            status: SF_START,
+            env: 0,
+            adsr,
+            echo_volume,
+            echo_length,
+        };
+        for frame in 0..600u32 {
+            if frame == release_frame {
+                ours.common.stop = true;
+                oracle.status |= SF_STOP;
+            }
+            let ours_alive = !direct_sound_env_frame(&mut ours);
+            let oracle_alive = c_sound_main_ram_env(&mut oracle);
+            assert_eq!(
+                ours_alive, oracle_alive,
+                "{label}: aliveness at frame {frame}"
+            );
+            if !ours_alive {
+                return;
+            }
+            assert_eq!(ours.env, oracle.env, "{label}: env at frame {frame}");
+        }
+    }
+
+    /// A CGB channel in its note-on state.
+    fn make_cgb_channel(
+        adsr: [u8; 4],
+        echo_volume: u8,
+        echo_length: u8,
+        left_vol: u8,
+        right_vol: u8,
+    ) -> CgbChannel {
+        CgbChannel {
+            common: ChannelCommon {
+                voice: 0,
+                track: 0,
+                linked: true,
+                key: 60,
+                midi_key: 60,
+                velocity: 100,
+                priority: 0,
+                gate: 0,
+                stop: false,
+                rhythm_pan: None,
+                right_vol,
+                left_vol,
+                adsr,
+                echo_volume,
+                echo_length,
+            },
+            kind: CgbKind::Square2 { duty: 2 },
+            phase: EnvPhase::Attack,
+            started: false,
+            env: 0,
+            env_goal: 0,
+            sustain_goal: 0,
+            env_counter: 0,
+        }
+    }
+
+    /// The oracle's CGB channel: raw `statusFlags` state.
+    struct CCgbChannel {
+        status: u8,
+        env: u8,
+        env_counter: u8,
+        env_goal: u8,
+        sustain_goal: u8,
+        adsr: [u8; 4],
+        echo_volume: u8,
+        echo_length: u8,
+        left_vol: u8,
+        right_vol: u8,
+    }
+
+    /// `CgbModVol` (`src/m4a.c`), stereo branch (we don't model the GB pan mask).
+    fn c_cgb_mod_vol(c: &mut CCgbChannel) {
+        let mut goal = (u32::from(c.left_vol) + u32::from(c.right_vol)) / 16;
+        if goal > 15 {
+            goal = 15;
+        }
+        c.env_goal = goal as u8;
+        c.sustain_goal = ((goal * u32::from(c.adsr[2]) + 15) >> 4) as u8;
+    }
+
+    /// `envelope_pseudoecho_start`: `Some(alive)` ends the frame (envelope_complete /
+    /// oscillator_off); the caller must return it.
+    fn c_pseudoecho_start(c: &mut CCgbChannel) -> Option<bool> {
+        c.env = ((u32::from(c.env_goal) * u32::from(c.echo_volume) + 0xFF) >> 8) as u8;
+        if c.env != 0 {
+            c.status |= SF_IEC;
+            Some(true)
+        } else {
+            c.status = 0;
+            Some(false)
+        }
+    }
+
+    /// `envelope_sustain_start`. `None` falls through to envelope_step_complete.
+    fn c_sustain_start(c: &mut CCgbChannel) -> Option<bool> {
+        if c.adsr[2] == 0 {
+            c.status &= !SF_ENV;
+            c_pseudoecho_start(c)
+        } else {
+            c.status -= 1;
+            c.env = c.sustain_goal;
+            c.env_counter = 7;
+            None
+        }
+    }
+
+    /// `envelope_decay_start`. `None` falls through to envelope_step_complete.
+    fn c_decay_start(c: &mut CCgbChannel) -> Option<bool> {
+        c.status -= 1;
+        c.env_counter = c.adsr[1];
+        if c.env_counter != 0 {
+            c.env = c.env_goal;
+            None
+        } else {
+            c_sustain_start(c)
+        }
+    }
+
+    /// Direct transcription of the `CgbSound` envelope section (`src/m4a.c`) for one frame of
+    /// one channel. `c15_zero` is `soundInfo->c15 == 0` (the double-step frame). Returns
+    /// `false` once the channel turns off.
+    fn c_cgb_sound_env(c: &mut CCgbChannel, c15_zero: bool) -> bool {
+        let mut prev_c15: i32 = if c15_zero { 0 } else { 1 };
+
+        // The pre-step branches; `step` says whether control reached envelope_step_repeat
+        // (true) or envelope_step_complete (false).
+        let step;
+        if c.status & SF_START != 0 {
+            if c.status & SF_STOP != 0 {
+                c.status = 0;
+                return false;
+            }
+            c.status = SF_ENV_ATTACK;
+            c_cgb_mod_vol(c);
+            c.env_counter = c.adsr[0];
+            if c.adsr[0] as i8 != 0 {
+                c.env = 0;
+                step = false;
+            } else {
+                match c_decay_start(c) {
+                    Some(alive) => return alive,
+                    None => step = false,
+                }
+            }
+        } else if c.status & SF_IEC != 0 {
+            c.echo_length = c.echo_length.wrapping_sub(1);
+            if c.echo_length as i8 <= 0 {
+                c.status = 0;
+                return false;
+            }
+            return true; // envelope_complete: no step, no double-step
+        } else if c.status & SF_STOP != 0 && c.status & SF_ENV != 0 {
+            c.status &= !SF_ENV;
+            c.env_counter = c.adsr[3];
+            if c.adsr[3] as i8 != 0 {
+                step = false;
+            } else {
+                match c_pseudoecho_start(c) {
+                    Some(alive) => return alive,
+                    None => unreachable!(),
+                }
+            }
+        } else {
+            step = true; // straight into envelope_step_repeat
+        }
+
+        let mut do_step = step;
+        loop {
+            if do_step && c.env_counter == 0 {
+                c_cgb_mod_vol(c);
+                let exit = match c.status & SF_ENV {
+                    0 => {
+                        // RELEASE
+                        c.env = c.env.wrapping_sub(1);
+                        if c.env as i8 <= 0 {
+                            c_pseudoecho_start(c)
+                        } else {
+                            c.env_counter = c.adsr[3];
+                            None
+                        }
+                    }
+                    1 => {
+                        // SUSTAIN
+                        c.env = c.sustain_goal;
+                        c.env_counter = 7;
+                        None
+                    }
+                    2 => {
+                        // DECAY (both sides compared as s8)
+                        c.env = c.env.wrapping_sub(1);
+                        if c.env as i8 <= c.sustain_goal as i8 {
+                            c_sustain_start(c)
+                        } else {
+                            c.env_counter = c.adsr[1];
+                            None
+                        }
+                    }
+                    _ => {
+                        // ATTACK
+                        c.env = c.env.wrapping_add(1);
+                        if c.env >= c.env_goal {
+                            c_decay_start(c)
+                        } else {
+                            c.env_counter = c.adsr[0];
+                            None
+                        }
+                    }
+                };
+                if let Some(alive) = exit {
+                    return alive;
+                }
+            }
+            // envelope_step_complete:
+            c.env_counter = c.env_counter.wrapping_sub(1);
+            if prev_c15 == 0 {
+                prev_c15 -= 1;
+                do_step = true;
+                continue;
+            }
+            return true;
+        }
+    }
+
+    #[test]
+    fn cgb_envelope_matches_pokeemerald() {
+        for attack in [0u8, 1, 3] {
+            for decay in [0u8, 1, 5] {
+                for sustain in [0u8, 8, 15] {
+                    for release in [0u8, 1, 4] {
+                        for (echo_volume, echo_length) in
+                            [(0u8, 0u8), (200, 0), (200, 3), (200, 0x81)]
+                        {
+                            for (left, right) in [(0u8, 0u8), (60, 80), (255, 255)] {
+                                for release_frame in [0u32, 1, 7, 40] {
+                                    cgb_envelope_scenario(
+                                        [attack, decay, sustain, release],
+                                        echo_volume,
+                                        echo_length,
+                                        left,
+                                        right,
+                                        release_frame,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Runs one CGB note through both machines, including the every-15th-frame double step.
+    fn cgb_envelope_scenario(
+        adsr: [u8; 4],
+        echo_volume: u8,
+        echo_length: u8,
+        left_vol: u8,
+        right_vol: u8,
+        release_frame: u32,
+    ) {
+        let label = format!(
+            "adsr={adsr:?} echo=({echo_volume},{echo_length}) vol=({left_vol},{right_vol}) \
+             release_frame={release_frame}"
+        );
+        let mut ours = make_cgb_channel(adsr, echo_volume, echo_length, left_vol, right_vol);
+        let mut oracle = CCgbChannel {
+            status: SF_START,
+            env: 0,
+            env_counter: 0,
+            env_goal: 0,
+            sustain_goal: 0,
+            adsr,
+            echo_volume,
+            echo_length,
+            left_vol,
+            right_vol,
+        };
+        // `SoundInfo::c15` starts at 0 and is updated at the top of every CgbSound call.
+        let mut c15 = 0u8;
+        for frame in 0..400u32 {
+            if frame == release_frame {
+                ours.common.stop = true;
+                oracle.status |= SF_STOP;
+            }
+            if c15 != 0 {
+                c15 -= 1;
+            } else {
+                c15 = 14;
+            }
+            let double_step = c15 == 0;
+
+            // Ours, as `GbaPlayer::envelope_frame` drives it.
+            let mut died = cgb_env_frame(&mut ours);
+            if !died && double_step && ours.phase != EnvPhase::PseudoEcho {
+                died = cgb_env_frame(&mut ours);
+            }
+            let ours_alive = !died;
+
+            let oracle_alive = c_cgb_sound_env(&mut oracle, double_step);
+            assert_eq!(
+                ours_alive, oracle_alive,
+                "{label}: aliveness at frame {frame}"
+            );
+            if !ours_alive {
+                return;
+            }
+            assert_eq!(ours.env, oracle.env, "{label}: env at frame {frame}");
+            assert_eq!(
+                ours.env_counter, oracle.env_counter,
+                "{label}: counter at frame {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn cgb_mod_vol_matches_pokeemerald() {
+        for left in [0u8, 1, 60, 127, 255] {
+            for right in [0u8, 1, 80, 127, 255] {
+                for sustain in [0u8, 1, 8, 15] {
+                    let mut ours = make_cgb_channel([0, 0, sustain, 0], 0, 0, left, right);
+                    cgb_mod_vol(&mut ours);
+                    let mut oracle = CCgbChannel {
+                        status: 0,
+                        env: 0,
+                        env_counter: 0,
+                        env_goal: 0,
+                        sustain_goal: 0,
+                        adsr: [0, 0, sustain, 0],
+                        echo_volume: 0,
+                        echo_length: 0,
+                        left_vol: left,
+                        right_vol: right,
+                    };
+                    c_cgb_mod_vol(&mut oracle);
+                    assert_eq!(
+                        (ours.env_goal, ours.sustain_goal),
+                        (oracle.env_goal, oracle.sustain_goal),
+                        "left={left} right={right} sustain={sustain}"
+                    );
+                }
+            }
+        }
+    }
 }
