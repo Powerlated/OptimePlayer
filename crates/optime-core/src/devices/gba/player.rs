@@ -29,8 +29,8 @@ const ENGINE_RATE: f64 = 13379.0;
 /// On hardware the two paths meet at the 10-bit DAC: a full-volume DirectSound stream spans
 /// roughly ±0x100 DAC units, while a single PSG channel at envelope 15 with the usual NR50
 /// master peaks near ±0x20 — about 1/8 of the DS scale. Our square/wave/noise sample data is
-/// ±0.5, so 0.25 here lands a full-scale CGB channel at ±0.125 of a full-scale DS voice.
-const CGB_GAIN: f64 = 0.25;
+/// ±0.5, so 0.5 here lands a full-scale CGB channel at ±0.25 of a full-scale DS voice.
+const CGB_GAIN: f64 = 0.5;
 
 /// DirectSound channel envelope phase (the `SOUND_CHANNEL_SF_ENV` states + pseudo-echo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
