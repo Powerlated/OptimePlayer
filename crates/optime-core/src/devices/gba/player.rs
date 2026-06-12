@@ -313,7 +313,8 @@ impl GbaPlayer {
 
         match note.tone.kind {
             ToneKind::DirectSound { wav_addr, fixed } => {
-                let Some(slot) = self.alloc_direct_sound(note.priority, track) else {
+                let Some(slot) = alloc_direct_sound(&self.ds_channels, note.priority, track)
+                else {
                     return;
                 };
                 if let Some(old) = self.ds_channels[slot].take() {
@@ -410,41 +411,6 @@ impl GbaPlayer {
         }
         tr.vol_pit_set();
         tr.flags = Default::default();
-    }
-
-    /// The DirectSound channel allocator from `ply_note`: first free channel, else steal the
-    /// lowest-priority one (releasing channels preferred; ties go to the latest track).
-    fn alloc_direct_sound(&mut self, priority: u8, track: usize) -> Option<usize> {
-        let mut best: Option<usize> = None;
-        let mut best_priority = priority;
-        let mut best_track = track;
-        let mut found_releasing = false;
-
-        for i in 0..self.ds_channels.len() {
-            let Some(chan) = &self.ds_channels[i] else {
-                return Some(i); // free channel
-            };
-            if chan.common.stop {
-                if !found_releasing {
-                    found_releasing = true;
-                    best_priority = chan.common.priority;
-                    best_track = chan.common.track;
-                    best = Some(i);
-                    continue;
-                }
-            } else if found_releasing {
-                continue; // releasing channels are always preferred over held ones
-            }
-            if chan.common.priority < best_priority {
-                best_priority = chan.common.priority;
-                best_track = chan.common.track;
-                best = Some(i);
-            } else if chan.common.priority == best_priority && chan.common.track >= best_track {
-                best_track = chan.common.track;
-                best = Some(i);
-            }
-        }
-        best
     }
 
     /// The end-of-frame `MPT_FLG_VOLCHG`/`PITCHG` pass: recompute track mixers and refresh
@@ -628,6 +594,48 @@ impl GbaPlayer {
 /// `chan.key + track.key_m`, clamped at zero (`ply_note` / `MPlayMain`).
 fn add_key(key: u8, key_m: i8) -> u8 {
     (i32::from(key) + i32::from(key_m)).max(0) as u8
+}
+
+/// The DirectSound channel allocator from `ply_note` (`src/m4a_1.s`, `_081DDBEC`): the first
+/// free channel wins outright; otherwise steal the lowest-priority channel, preferring
+/// releasing ones (once a releasing channel is seen, held channels are no longer candidates),
+/// with priority ties going to the latest track. A new note that loses every comparison is
+/// dropped (`None`).
+fn alloc_direct_sound(
+    channels: &[Option<DirectSoundChannel>],
+    priority: u8,
+    track: usize,
+) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_priority = priority;
+    let mut best_track = track;
+    let mut found_releasing = false;
+
+    for (i, chan) in channels.iter().enumerate() {
+        let Some(chan) = chan else {
+            return Some(i); // free channel
+        };
+        if chan.common.stop {
+            if !found_releasing {
+                found_releasing = true;
+                best_priority = chan.common.priority;
+                best_track = chan.common.track;
+                best = Some(i);
+                continue;
+            }
+        } else if found_releasing {
+            continue; // releasing channels are always preferred over held ones
+        }
+        if chan.common.priority < best_priority {
+            best_priority = chan.common.priority;
+            best_track = chan.common.track;
+            best = Some(i);
+        } else if chan.common.priority == best_priority && chan.common.track >= best_track {
+            best_track = chan.common.track;
+            best = Some(i);
+        }
+    }
+    best
 }
 
 /// `ChnVolSetAsm`: per-channel right/left volumes from velocity, rhythm pan, and the track
