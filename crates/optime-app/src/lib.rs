@@ -7,6 +7,7 @@ mod filter_plot;
 mod library;
 mod piano_roll;
 mod player;
+mod theme;
 mod visualizer;
 mod wav;
 

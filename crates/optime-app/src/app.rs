@@ -175,6 +175,7 @@ impl OptimeApp {
     /// Builds the app and loads the first demo. Native starts audio immediately; web defers it
     /// until the first user gesture (browser autoplay policy — see [`Self::ensure_audio`]).
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        crate::theme::apply(&cc.egui_ctx);
         #[cfg(not(target_arch = "wasm32"))]
         let audio = AudioEngine::new();
         #[cfg(target_arch = "wasm32")]
@@ -783,6 +784,7 @@ impl OptimeApp {
                 }
             });
         };
+        ui.spacing_mut().item_spacing.y = 0.0;
         for (i, song) in self.songs.iter().enumerate() {
             let selected = self.current_song == Some(i);
             let liked = self.library.is_liked(&TrackRef {
@@ -791,18 +793,16 @@ impl OptimeApp {
                 label: String::new(),
             });
             ui.horizontal(|ui| {
-                let row_w = ui.available_width();
-                let resp = ui.add_sized(
-                    egui::vec2(row_w - 34.0, ui.spacing().interact_size.y),
-                    egui::SelectableLabel::new(selected, &song.label),
-                );
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let row_w = (ui.available_width() - 38.0).max(60.0);
+                let resp = crate::theme::ios_row(ui, row_w, None, &song.label, selected, false);
                 if resp.clicked() {
                     action = Some(Action::Play(i));
                 }
                 resp.context_menu(|ui| {
                     song_menu(ui, i, liked, &self.library.playlists, &mut action)
                 });
-                ui.menu_button("⋯", |ui| {
+                ui.menu_button(egui::RichText::new("⋯").size(16.0), |ui| {
                     song_menu(ui, i, liked, &self.library.playlists, &mut action)
                 });
             });
@@ -844,31 +844,31 @@ impl OptimeApp {
         }
     }
 
-    /// The library root: collection buttons plus playlist management.
+    /// The library root: collection rows plus playlist management, iOS-grouped-list style.
     fn library_root_ui(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .button(format!("❤ Liked Songs ({})", self.library.liked.len()))
-            .clicked()
-        {
+        use crate::theme::{ios_row, section_header};
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let w = ui.available_width();
+        let liked_title = format!("Liked Songs ({})", self.library.liked.len());
+        if ios_row(ui, w, Some("❤"), &liked_title, false, true).clicked() {
             self.library_view = LibraryView::Liked;
         }
-        if ui.button("🕘 Recently Played").clicked() {
+        if ios_row(ui, w, Some("🕘"), "Recently Played", false, true).clicked() {
             self.library_view = LibraryView::Recent;
         }
-        ui.add_space(4.0);
-        ui.label("Playlists");
+        section_header(ui, "Playlists");
         let mut open = None;
         let mut delete = None;
         for (p, pl) in self.library.playlists.iter().enumerate() {
             ui.horizontal(|ui| {
-                if ui
-                    .button(format!("🎵 {} ({})", pl.name, pl.tracks.len()))
-                    .clicked()
-                {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let title = format!("{} ({})", pl.name, pl.tracks.len());
+                let row_w = (ui.available_width() - 34.0).max(60.0);
+                if ios_row(ui, row_w, Some("🎵"), &title, false, true).clicked() {
                     open = Some(p);
                 }
                 if ui
-                    .small_button("🗑")
+                    .add(egui::Button::new("🗑").frame(false))
                     .on_hover_text("Delete playlist")
                     .clicked()
                 {
@@ -882,10 +882,11 @@ impl OptimeApp {
         if let Some(p) = delete {
             self.library.playlists.remove(p);
         }
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
             let edit = egui::TextEdit::singleline(&mut self.new_playlist_name)
                 .hint_text("New playlist…")
-                .desired_width(120.0);
+                .desired_width((ui.available_width() - 44.0).max(80.0));
             ui.add(edit);
             let name = self.new_playlist_name.trim().to_owned();
             if ui.button("➕").clicked() && !name.is_empty() {
@@ -916,12 +917,30 @@ impl OptimeApp {
         let title = title.to_owned();
         let mut started = false;
         ui.horizontal(|ui| {
-            if ui.button("⬅").clicked() {
+            if ui
+                .add(egui::Button::new(egui::RichText::new("‹ Back").size(15.0)).frame(false))
+                .clicked()
+            {
                 self.library_view = LibraryView::Root;
             }
-            ui.label(egui::RichText::new(format!("{title} ({})", tracks.len())).strong());
+            ui.label(
+                egui::RichText::new(format!("{title} ({})", tracks.len()))
+                    .strong()
+                    .size(17.0),
+            );
         });
-        if !tracks.is_empty() && ui.button("▶ Play all").clicked() {
+        ui.add_space(4.0);
+        if !tracks.is_empty()
+            && ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("▶ Play all").color(egui::Color32::WHITE),
+                    )
+                    .fill(crate::theme::ACCENT)
+                    .min_size(egui::vec2(ui.available_width(), 36.0)),
+                )
+                .clicked()
+        {
             let pos = if self.shuffle {
                 self.rand_index(tracks.len(), None)
             } else {
@@ -930,16 +949,29 @@ impl OptimeApp {
             self.play_queue(tracks.clone(), pos);
             started = true;
         }
+        ui.add_space(4.0);
+        ui.spacing_mut().item_spacing.y = 0.0;
         let current = self.current_track_ref();
         let mut play = None;
         let mut remove = None;
         for (i, t) in tracks.iter().enumerate() {
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
                 let here = current.as_ref().is_some_and(|c| c.same_song(t));
-                if ui.selectable_label(here, &t.label).clicked() {
+                let row_w = if removable {
+                    (ui.available_width() - 34.0).max(60.0)
+                } else {
+                    ui.available_width()
+                };
+                if crate::theme::ios_row(ui, row_w, None, &t.label, here, false).clicked() {
                     play = Some(i);
                 }
-                if removable && ui.small_button("❌").clicked() {
+                if removable
+                    && ui
+                        .add(egui::Button::new("✕").frame(false))
+                        .on_hover_text("Remove")
+                        .clicked()
+                {
                     remove = Some(i);
                 }
             });
@@ -970,7 +1002,7 @@ impl OptimeApp {
     fn meters_ui(&self, ui: &mut egui::Ui) {
         let cpu = self.cpu_history.back().copied().unwrap_or(0.0);
         let danger = ui.visuals().error_fg_color;
-        let accent = ui.visuals().selection.bg_fill;
+        let accent = crate::theme::ACCENT;
         let color = if cpu > 0.85 { danger } else { accent };
         draw_meter(
             ui,
@@ -1110,29 +1142,38 @@ impl OptimeApp {
                     (MobileTab::Playlists, "🎵", "Playlists"),
                     (MobileTab::Settings, "⚙", "Settings"),
                 ];
+                // iOS-style tab bar: hairline on top, accent tint on the active tab.
+                let top = ui.max_rect().top();
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(ui.max_rect().left(), top),
+                        egui::pos2(ui.max_rect().right(), top),
+                    ],
+                    egui::Stroke::new(0.5_f32, crate::theme::HAIRLINE),
+                );
                 ui.columns(tabs.len(), |cols| {
                     for (col, (tab, icon, label)) in cols.iter_mut().zip(tabs) {
                         let selected = self.mobile_tab == tab;
                         let (rect, resp) = col.allocate_exact_size(
-                            egui::vec2(col.available_width(), 44.0),
+                            egui::vec2(col.available_width(), 50.0),
                             egui::Sense::click(),
                         );
                         let color = if selected {
-                            col.visuals().widgets.active.fg_stroke.color
+                            crate::theme::ACCENT
                         } else {
-                            col.visuals().weak_text_color()
+                            crate::theme::TEXT_DIM
                         };
                         // Painter-drawn so the label is exactly centered under the icon.
                         let painter = col.painter_at(rect);
                         painter.text(
-                            rect.center() - egui::vec2(0.0, 9.0),
+                            rect.center() - egui::vec2(0.0, 10.0),
                             egui::Align2::CENTER_CENTER,
                             icon,
-                            egui::FontId::proportional(17.0),
+                            egui::FontId::proportional(18.0),
                             color,
                         );
                         painter.text(
-                            rect.center() + egui::vec2(0.0, 12.0),
+                            rect.center() + egui::vec2(0.0, 13.0),
                             egui::Align2::CENTER_CENTER,
                             label,
                             egui::FontId::proportional(11.0),
@@ -1149,6 +1190,11 @@ impl OptimeApp {
         if self.mobile_tab != MobileTab::NowPlaying && self.current_song.is_some() {
             egui::TopBottomPanel::bottom("m_mini")
                 .show_separator_line(false)
+                .frame(
+                    egui::Frame::none()
+                        .fill(crate::theme::BG)
+                        .inner_margin(egui::Margin::symmetric(10.0, 4.0)),
+                )
                 .show(ctx, |ui| self.mini_player(ui));
         }
 
@@ -1169,7 +1215,13 @@ impl OptimeApp {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         self.settings_ui(ui);
                         ui.separator();
-                        if ui.button("💾 Export WAV").clicked() {
+                        if ui
+                            .add_enabled(
+                                self.current_song.is_some(),
+                                egui::Button::new("💾 Export WAV"),
+                            )
+                            .clicked()
+                        {
                             self.export_wav();
                         }
                         ui.add_space(4.0);
@@ -1183,22 +1235,28 @@ impl OptimeApp {
     /// The Spotify-style floating mini-player: animated EQ bars, song title, and transport;
     /// tapping it opens the Now Playing screen.
     fn mini_player(&mut self, ui: &mut egui::Ui) {
-        let height = 48.0;
+        let height = 52.0;
         let (rect, resp) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), height),
             egui::Sense::click(),
         );
+        // Floating-card look: soft drop shadow, rounded fill.
+        let painter = ui.painter();
+        painter.rect_filled(
+            rect.translate(egui::vec2(0.0, 2.0)).expand(2.0),
+            14.0,
+            egui::Color32::from_black_alpha(70),
+        );
         let painter = ui.painter_at(rect);
-        let visuals = ui.visuals();
         let bg = if resp.hovered() {
-            visuals.widgets.hovered.bg_fill
+            crate::theme::CARD_HI
         } else {
-            visuals.widgets.inactive.bg_fill
+            crate::theme::CARD
         };
-        painter.rect_filled(rect, 10.0, bg);
+        painter.rect_filled(rect, 12.0, bg);
 
         // Animated EQ bars (frozen when paused).
-        let accent = visuals.selection.bg_fill;
+        let accent = crate::theme::ACCENT;
         let t = ui.input(|i| i.time);
         let playing = !self.paused;
         let bar_w = 4.0;
@@ -1230,21 +1288,22 @@ impl OptimeApp {
             .unwrap_or_default();
         let text_rect = egui::Rect::from_min_max(
             egui::pos2(rect.left() + 48.0, rect.top()),
-            egui::pos2(rect.right() - 88.0, rect.bottom()),
+            egui::pos2(rect.right() - 92.0, rect.bottom()),
         );
-        painter.text(
+        // Clipped to its own rect so long titles never run under the buttons.
+        ui.painter_at(text_rect).text(
             text_rect.left_center(),
             egui::Align2::LEFT_CENTER,
             title,
-            egui::FontId::proportional(14.0),
-            visuals.text_color(),
+            egui::FontId::proportional(14.5),
+            crate::theme::TEXT,
         );
 
         // Transport buttons layered on the right edge of the bar.
-        let btn = egui::vec2(34.0, 34.0);
+        let btn = egui::vec2(36.0, 36.0);
         let pause_icon = if self.paused { "▶" } else { "⏸" };
         let pause_rect =
-            egui::Rect::from_center_size(egui::pos2(rect.right() - 62.0, rect.center().y), btn);
+            egui::Rect::from_center_size(egui::pos2(rect.right() - 64.0, rect.center().y), btn);
         if ui
             .put(pause_rect, egui::Button::new(pause_icon).frame(false))
             .clicked()
@@ -1269,7 +1328,8 @@ impl OptimeApp {
     /// large transport.
     fn mobile_now_playing(&mut self, ctx: &egui::Context, snap: &VisSnapshot) {
         egui::TopBottomPanel::bottom("m_transport").show(ctx, |ui| {
-            ui.add_space(6.0);
+            use crate::theme::icon_button;
+            ui.add_space(8.0);
             // Title + status above the controls.
             let title = self
                 .current_song
@@ -1277,26 +1337,35 @@ impl OptimeApp {
                 .map(|s| s.label.clone())
                 .unwrap_or_else(|| "No song loaded".to_owned());
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new(title).strong().size(16.0));
-                ui.label(egui::RichText::new(&self.status).weak().size(11.0));
+                ui.label(
+                    egui::RichText::new(title)
+                        .strong()
+                        .size(18.0)
+                        .color(crate::theme::TEXT),
+                );
+                ui.label(
+                    egui::RichText::new(&self.status)
+                        .size(11.5)
+                        .color(crate::theme::TEXT_DIM),
+                );
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
-                // Six identically sized controls, evenly spaced across the row.
-                let btn = egui::vec2(46.0, 40.0);
+                // iOS-style transport: five small circular buttons around a large filled
+                // play/pause disc, evenly spaced. The heart slot is always present so the
+                // row never shifts.
                 let have_songs = !self.songs.is_empty();
-                let spacing = (ui.available_width() - 6.0 * btn.x).max(0.0) / 7.0;
+                let small = 42.0;
+                let big = 58.0;
+                let total = 5.0 * small + big;
+                let spacing = (ui.available_width() - total).max(0.0) / 7.0;
                 ui.spacing_mut().item_spacing.x = spacing;
                 ui.add_space(spacing);
-                let shuffle = ui.add_sized(btn, egui::Button::new("🔀").selected(self.shuffle));
-                if shuffle.clicked() {
+
+                if icon_button(ui, "🔀", small, 18.0, false, self.shuffle, true).clicked() {
                     self.shuffle = !self.shuffle;
                 }
-                if ui
-                    .add_enabled_ui(have_songs, |ui| ui.add_sized(btn, egui::Button::new("⏮")))
-                    .inner
-                    .clicked()
-                {
+                if icon_button(ui, "⏮", small, 20.0, false, false, have_songs).clicked() {
                     self.step_song(-1);
                 }
                 let pause_icon = if self.paused || self.current_song.is_none() {
@@ -1304,142 +1373,142 @@ impl OptimeApp {
                 } else {
                     "⏸"
                 };
-                if ui
-                    .add_enabled_ui(have_songs, |ui| {
-                        ui.add_sized(btn, egui::Button::new(pause_icon))
-                    })
-                    .inner
-                    .clicked()
-                {
+                if icon_button(ui, pause_icon, big, 26.0, true, false, have_songs).clicked() {
                     self.paused = !self.paused;
                 }
-                if ui
-                    .add_enabled_ui(have_songs, |ui| ui.add_sized(btn, egui::Button::new("⏭")))
-                    .inner
-                    .clicked()
-                {
+                if icon_button(ui, "⏭", small, 20.0, false, false, have_songs).clicked() {
                     self.step_song(1);
                 }
                 let repeat_icon = match self.repeat {
                     RepeatMode::One => "🔂",
                     _ => "🔁",
                 };
-                if ui
-                    .add_sized(
-                        btn,
-                        egui::Button::new(repeat_icon).selected(self.repeat != RepeatMode::Off),
-                    )
-                    .on_hover_text("Repeat: off / all / one")
-                    .clicked()
-                {
+                let repeat = icon_button(
+                    ui,
+                    repeat_icon,
+                    small,
+                    18.0,
+                    false,
+                    self.repeat != RepeatMode::Off,
+                    true,
+                );
+                if repeat.on_hover_text("Repeat: off / all / one").clicked() {
                     self.repeat = self.repeat.next();
                 }
-                // The heart slot is always present so the row never shifts.
                 let current = self.current_track_ref();
                 let liked = current.as_ref().is_some_and(|t| self.library.is_liked(t));
-                let heart = if liked { "❤" } else { "🤍" };
-                if ui
-                    .add_enabled_ui(current.is_some(), |ui| {
-                        ui.add_sized(btn, egui::Button::new(heart).selected(liked))
-                    })
-                    .inner
-                    .clicked()
-                {
+                let heart = if liked { "❤" } else { "♡" };
+                if icon_button(ui, heart, small, 18.0, false, liked, current.is_some()).clicked() {
                     if let Some(t) = current {
                         self.library.toggle_liked(&t);
                     }
                 }
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label("🔊");
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("🔈").color(crate::theme::TEXT_DIM));
+                ui.spacing_mut().slider_width = (ui.available_width() - 40.0).max(60.0);
                 ui.add(
                     egui::Slider::new(&mut self.volume, 0.0..=1.0)
                         .show_value(false)
                         .trailing_fill(true),
                 );
+                ui.label(egui::RichText::new("🔊").color(crate::theme::TEXT_DIM));
             });
-            ui.add_space(8.0);
+            ui.add_space(10.0);
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // The piano roll doubles as the album art; swipe horizontally to change songs.
-            // While dragging, the roll follows the finger; past the threshold the old song
-            // slides out and the next one slides in from the opposite edge, with the volume
-            // dipping in proportion to how far offscreen the view is.
-            let rect = ui.max_rect();
-            let w = rect.width().max(1.0);
-            let resp = ui.interact(rect, egui::Id::new("swipe"), egui::Sense::drag());
-            let dt = ui.input(|i| i.stable_dt).min(0.1);
-            if resp.dragged() {
-                self.swipe_offset += resp.drag_delta().x;
-                // Keep a preview of the song the swipe is heading toward, so it is already
-                // visible (notes and all) next to the outgoing roll.
-                let dir: isize = if self.swipe_offset < -4.0 {
-                    1
-                } else if self.swipe_offset > 4.0 {
-                    -1
-                } else {
-                    0
-                };
-                if dir == 0 {
-                    self.swipe_preview = None;
-                } else if self.swipe_preview.as_ref().map(|p| p.dir) != Some(dir) {
-                    self.swipe_preview = self.build_swipe_preview(dir);
-                }
-            } else if resp.drag_stopped() {
-                if self.swipe_offset.abs() >= 0.25 * w {
-                    // Committed: the old roll keeps sliding out while the preview (already
-                    // populated with the next song's notes) becomes the live roll.
-                    let exit_side = self.swipe_offset.signum();
-                    let old_roll = std::mem::take(&mut self.piano_roll);
-                    self.swipe_out = Some((old_roll, exit_side));
-                    if let Some(p) = self.swipe_preview.take() {
-                        self.commit_step(p.target);
-                        self.piano_roll = p.roll;
-                        if let Some(look) = p.look {
-                            self.look_ahead = Some(look);
-                        }
+        let card_frame = egui::Frame::none()
+            .fill(crate::theme::BG)
+            .inner_margin(egui::Margin::symmetric(10.0, 8.0));
+        egui::CentralPanel::default()
+            .frame(card_frame)
+            .show(ctx, |ui| {
+                // The piano roll doubles as the album art; swipe horizontally to change songs.
+                // While dragging, the roll follows the finger; past the threshold the old song
+                // slides out and the next one slides in from the opposite edge, with the volume
+                // dipping in proportion to how far offscreen the view is.
+                let rect = ui.max_rect();
+                let w = rect.width().max(1.0);
+                let resp = ui.interact(rect, egui::Id::new("swipe"), egui::Sense::drag());
+                let dt = ui.input(|i| i.stable_dt).min(0.1);
+                if resp.dragged() {
+                    self.swipe_offset += resp.drag_delta().x;
+                    // Keep a preview of the song the swipe is heading toward, so it is already
+                    // visible (notes and all) next to the outgoing roll.
+                    let dir: isize = if self.swipe_offset < -4.0 {
+                        1
+                    } else if self.swipe_offset > 4.0 {
+                        -1
                     } else {
-                        self.step_song(if exit_side < 0.0 { 1 } else { -1 });
+                        0
+                    };
+                    if dir == 0 {
+                        self.swipe_preview = None;
+                    } else if self.swipe_preview.as_ref().map(|p| p.dir) != Some(dir) {
+                        self.swipe_preview = self.build_swipe_preview(dir);
                     }
-                    self.swipe_offset -= exit_side * w;
-                } else {
-                    self.swipe_preview = None;
+                } else if resp.drag_stopped() {
+                    if self.swipe_offset.abs() >= 0.25 * w {
+                        // Committed: the old roll keeps sliding out while the preview (already
+                        // populated with the next song's notes) becomes the live roll.
+                        let exit_side = self.swipe_offset.signum();
+                        let old_roll = std::mem::take(&mut self.piano_roll);
+                        self.swipe_out = Some((old_roll, exit_side));
+                        if let Some(p) = self.swipe_preview.take() {
+                            self.commit_step(p.target);
+                            self.piano_roll = p.roll;
+                            if let Some(look) = p.look {
+                                self.look_ahead = Some(look);
+                            }
+                        } else {
+                            self.step_song(if exit_side < 0.0 { 1 } else { -1 });
+                        }
+                        self.swipe_offset -= exit_side * w;
+                    } else {
+                        self.swipe_preview = None;
+                    }
+                } else if self.swipe_offset != 0.0 {
+                    // Spring back / slide in.
+                    self.swipe_offset *= (-12.0 * dt).exp();
+                    if self.swipe_offset.abs() < 0.5 {
+                        self.swipe_offset = 0.0;
+                        self.swipe_preview = None;
+                        self.swipe_out = None;
+                    }
+                    ui.ctx().request_repaint();
                 }
-            } else if self.swipe_offset != 0.0 {
-                // Spring back / slide in.
-                self.swipe_offset *= (-12.0 * dt).exp();
-                if self.swipe_offset.abs() < 0.5 {
-                    self.swipe_offset = 0.0;
-                    self.swipe_preview = None;
-                    self.swipe_out = None;
+                self.swipe_gain = 1.0 - (self.swipe_offset.abs() / w).clamp(0.0, 1.0);
+
+                // The live roll, offset by the swipe.
+                let child_rect = rect.translate(egui::vec2(self.swipe_offset, 0.0));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(child_rect));
+                child.set_clip_rect(rect);
+                self.piano_roll.draw(&mut child, snap.active);
+
+                // The incoming song's preview alongside it while dragging.
+                if let Some(p) = &self.swipe_preview {
+                    let r = rect.translate(egui::vec2(self.swipe_offset + p.dir as f32 * w, 0.0));
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
+                    child.set_clip_rect(rect);
+                    p.roll.draw(&mut child, true);
                 }
-                ui.ctx().request_repaint();
-            }
-            self.swipe_gain = 1.0 - (self.swipe_offset.abs() / w).clamp(0.0, 1.0);
+                // The old song's roll sliding out after a committed swipe.
+                if let Some((roll, side)) = &self.swipe_out {
+                    let r = rect.translate(egui::vec2(self.swipe_offset + side * w, 0.0));
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
+                    child.set_clip_rect(rect);
+                    roll.draw(&mut child, true);
+                }
 
-            // The live roll, offset by the swipe.
-            let child_rect = rect.translate(egui::vec2(self.swipe_offset, 0.0));
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(child_rect));
-            child.set_clip_rect(rect);
-            self.piano_roll.draw(&mut child, snap.active);
-
-            // The incoming song's preview alongside it while dragging.
-            if let Some(p) = &self.swipe_preview {
-                let r = rect.translate(egui::vec2(self.swipe_offset + p.dir as f32 * w, 0.0));
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
-                child.set_clip_rect(rect);
-                p.roll.draw(&mut child, true);
-            }
-            // The old song's roll sliding out after a committed swipe.
-            if let Some((roll, side)) = &self.swipe_out {
-                let r = rect.translate(egui::vec2(self.swipe_offset + side * w, 0.0));
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
-                child.set_clip_rect(rect);
-                roll.draw(&mut child, true);
-            }
-        });
+                // Card outline over the visualizer area.
+                ui.painter().rect_stroke(
+                    rect,
+                    12.0,
+                    egui::Stroke::new(1.0_f32, crate::theme::HAIRLINE),
+                );
+            });
     }
 
     /// The mobile library: file open, demo archives, and the song list. Selecting a song starts
@@ -1448,23 +1517,30 @@ impl OptimeApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Library");
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 if ui.button("📂 Open ROM / SDAT…").clicked() {
                     self.open_file_dialog();
                 }
-                ui.collapsing("Demo archives", |ui| {
+                crate::theme::section_header(ui, "Demo archives");
+                {
+                    let prev_spacing = ui.spacing().item_spacing.y;
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     let mut requested = None;
+                    let active = &self.current_source;
                     for (label, stem) in DEMOS {
-                        if ui.button(*label).clicked() {
+                        let selected = active == stem;
+                        let w = ui.available_width();
+                        if crate::theme::ios_row(ui, w, Some("💿"), label, selected, true).clicked()
+                        {
                             requested = Some((*stem, *label));
                         }
                     }
+                    ui.spacing_mut().item_spacing.y = prev_spacing;
                     if let Some((stem, label)) = requested {
                         self.request_demo(stem, label);
                     }
-                });
-                ui.separator();
-                ui.label("All songs");
+                }
+                crate::theme::section_header(ui, "All songs");
                 self.song_list_ui(ui);
             });
         });
@@ -1622,7 +1698,13 @@ impl eframe::App for OptimeApp {
                         .trailing_fill(true),
                 );
                 ui.separator();
-                if ui.button("💾 Export WAV").clicked() {
+                if ui
+                    .add_enabled(
+                        self.current_song.is_some(),
+                        egui::Button::new("💾 Export WAV"),
+                    )
+                    .clicked()
+                {
                     self.export_wav();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
