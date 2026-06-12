@@ -840,80 +840,9 @@ impl OptimeApp {
                         |ui| song_menu(ui, i, liked, &self.library.playlists, &mut action),
                     );
                     let row_w = ui.available_width();
-                    let (down, pressed, released, pos) = pointer;
 
-                    // Spotify-style swipe: the row content slides with the finger, revealing
-                    // a solid colored action panel (icon emerging from the screen edge).
-                    let mut offset = 0.0f32;
-                    let mut horizontal = false;
-                    let mut dx = 0.0f32;
-                    if swipeable {
-                        if let Some((row, origin)) = self.row_swipe {
-                            if row == i && (down || released) {
-                                if let Some(p) = pos {
-                                    dx = p.x - origin.x;
-                                    let dy = (p.y - origin.y).abs();
-                                    horizontal = dx.abs() > 12.0 && dx.abs() > dy * 1.5;
-                                    if horizontal && down {
-                                        offset = dx.clamp(-130.0, 130.0);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Reserve the row area, paint the reveal behind, then draw the row's
-                    // content into a horizontally shifted, clipped child UI.
-                    let (row_rect, _) =
-                        ui.allocate_exact_size(egui::vec2(row_w, 42.0), egui::Sense::hover());
-                    if offset != 0.0 {
-                        let committed = offset.abs() >= SWIPE_COMMIT;
-                        let (tint, glyph, panel, icon_x) = if offset > 0.0 {
-                            // Swipe right → favorite (accent panel from the left edge).
-                            let panel = egui::Rect::from_min_max(
-                                row_rect.left_top(),
-                                egui::pos2(row_rect.left() + offset, row_rect.bottom()),
-                            );
-                            (
-                                crate::theme::ACCENT,
-                                "❤",
-                                panel,
-                                row_rect.left() + (offset / 2.0).min(40.0),
-                            )
-                        } else {
-                            // Swipe left → add to playlist (green panel from the right).
-                            let panel = egui::Rect::from_min_max(
-                                egui::pos2(row_rect.right() + offset, row_rect.top()),
-                                row_rect.right_bottom(),
-                            );
-                            (
-                                egui::Color32::from_rgb(0x2f, 0xc1, 0x4e),
-                                "➕",
-                                panel,
-                                row_rect.right() - (offset.abs() / 2.0).min(40.0),
-                            )
-                        };
-                        let painter = ui.painter_at(row_rect);
-                        let alpha = if committed { 1.0 } else { 0.75 };
-                        painter.rect_filled(panel, 10.0, tint.linear_multiply(alpha));
-                        if offset.abs() > 28.0 {
-                            painter.text(
-                                egui::pos2(icon_x, row_rect.center().y),
-                                egui::Align2::CENTER_CENTER,
-                                glyph,
-                                egui::FontId::proportional(17.0),
-                                egui::Color32::WHITE,
-                            );
-                        }
-                    }
-                    let mut child = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(row_rect.translate(egui::vec2(offset, 0.0)))
-                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                    );
-                    child.set_clip_rect(row_rect);
                     let resp = crate::theme::ios_row(
-                        &mut child,
+                        ui,
                         row_w,
                         None,
                         &song.label,
@@ -927,24 +856,6 @@ impl OptimeApp {
                     resp.context_menu(|ui| {
                         song_menu(ui, i, liked, &self.library.playlists, &mut action)
                     });
-
-                    if swipeable {
-                        if pressed && resp.hovered() {
-                            if let Some(p) = pos {
-                                self.row_swipe = Some((i, p));
-                            }
-                        }
-                        if let Some((row, _)) = self.row_swipe {
-                            if row == i && released {
-                                if horizontal && dx >= SWIPE_COMMIT {
-                                    action = Some(Action::Like(i));
-                                } else if horizontal && dx <= -SWIPE_COMMIT {
-                                    action = Some(Action::PickPlaylist(i));
-                                }
-                                self.row_swipe = None;
-                            }
-                        }
-                    }
                 },
             );
         }
