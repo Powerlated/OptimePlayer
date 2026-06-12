@@ -702,4 +702,179 @@ mod tests {
         // the wait expires): loops at frames 24, 48, 72, 96 — and one report per loop, not two.
         assert_eq!(loops_seen, vec![24, 48, 72, 96]);
     }
+
+    /// Direct transcription of `TrkVolPitSet` (`src/m4a.c`) used as the oracle. The unmodeled
+    /// external inputs (`volX` fade is modeled; `panX`/`keyShiftX`/`pitX` are not) are zero.
+    /// Returns `(vol_mr, vol_ml, key_m, pit_m)`.
+    #[allow(clippy::too_many_arguments)]
+    fn c_trk_vol_pit_set(
+        vol: u8,
+        vol_x: u8,
+        pan: i8,
+        mod_m: i8,
+        mod_t: u8,
+        bend: i8,
+        bend_range: u8,
+        tune: i8,
+        key_shift: i8,
+    ) -> (u8, u8, i8, u8) {
+        let mut x = (u32::from(vol) * u32::from(vol_x)) >> 5;
+        if mod_t == 1 {
+            x = (x * (i32::from(mod_m) + 128) as u32) >> 7;
+        }
+        let mut y = 2 * i32::from(pan);
+        if mod_t == 2 {
+            y += i32::from(mod_m);
+        }
+        y = y.clamp(-128, 127);
+        let vol_mr = (((y + 128) as u32 * x) >> 8) as u8;
+        let vol_ml = (((127 - y) as u32 * x) >> 8) as u8;
+
+        let bend_full = i32::from(bend) * i32::from(bend_range);
+        let mut p = (i32::from(tune) + bend_full) * 4 + (i32::from(key_shift) << 8);
+        if mod_t == 0 {
+            p += 16 * i32::from(mod_m);
+        }
+        (vol_mr, vol_ml, (p >> 8) as i8, p as u8)
+    }
+
+    #[test]
+    fn vol_pit_set_matches_pokeemerald() {
+        let (rom, header) = looping_song();
+        for vol in [0u8, 1, 90, 127, 255] {
+            for vol_x in [0u8, 40, 64] {
+                for pan in [-64i8, -1, 0, 63] {
+                    for mod_m in [-64i8, 0, 17] {
+                        for mod_t in [0u8, 1, 2] {
+                            for (bend, bend_range, tune, key_shift) in [
+                                (0i8, 2u8, 0i8, 0i8),
+                                (-64, 2, 0, 0),
+                                (63, 12, -10, -12),
+                                (1, 255, 64, 11),
+                            ] {
+                                let mut seq = Mp2kSequencer::new(rom.clone(), &header);
+                                let tr = &mut seq.tracks[0];
+                                tr.flags = ChangeFlags {
+                                    volume: true,
+                                    pitch: true,
+                                };
+                                tr.vol = vol;
+                                tr.vol_x = vol_x;
+                                tr.pan = pan;
+                                tr.mod_m = mod_m;
+                                tr.mod_type = mod_t;
+                                tr.bend = bend;
+                                tr.bend_range = bend_range;
+                                tr.tune = tune;
+                                tr.key_shift = key_shift;
+                                tr.vol_pit_set();
+                                let expect = c_trk_vol_pit_set(
+                                    vol, vol_x, pan, mod_m, mod_t, bend, bend_range, tune,
+                                    key_shift,
+                                );
+                                assert_eq!(
+                                    (tr.vol_mr, tr.vol_ml, tr.key_m, tr.pit_m),
+                                    expect,
+                                    "vol={vol} volX={vol_x} pan={pan} modM={mod_m} modT={mod_t} \
+                                     bend={bend} range={bend_range} tune={tune} shift={key_shift}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// TrkVolPitSet only recomputes the half whose change flag is set.
+    #[test]
+    fn vol_pit_set_honors_change_flags() {
+        let (rom, header) = looping_song();
+        let mut seq = Mp2kSequencer::new(rom, &header);
+        let tr = &mut seq.tracks[0];
+        tr.vol = 100;
+        tr.key_shift = 12;
+        tr.flags = ChangeFlags {
+            volume: false,
+            pitch: true,
+        };
+        tr.vol_pit_set();
+        assert_eq!((tr.vol_mr, tr.vol_ml), (0, 0), "volume untouched");
+        assert_eq!(tr.key_m, 12, "pitch recomputed");
+    }
+
+    /// The oracle's LFO state, stepped per the `MPlayMain` asm (`src/m4a_1.s`, `_081DD95A`).
+    #[derive(Default)]
+    struct CLfo {
+        speed_c: u8,
+        delay_c: u8,
+        mod_m: i8,
+        flagged_pitch: bool,
+        flagged_volume: bool,
+    }
+
+    fn c_lfo_step(t: &mut CLfo, speed: u8, depth: u8, mod_t: u8) {
+        if speed == 0 || depth == 0 {
+            return;
+        }
+        if t.delay_c != 0 {
+            t.delay_c -= 1;
+            return;
+        }
+        t.speed_c = t.speed_c.wrapping_add(speed);
+        let triangle: i32 = if (t.speed_c.wrapping_sub(0x40) as i8) < 0 {
+            i32::from(t.speed_c as i8)
+        } else {
+            0x80 - i32::from(t.speed_c)
+        };
+        let value = (i32::from(depth) * triangle) >> 6;
+        if value as u8 != t.mod_m as u8 {
+            t.mod_m = value as i8;
+            if mod_t == 0 {
+                t.flagged_pitch = true;
+            } else {
+                t.flagged_volume = true;
+            }
+        }
+    }
+
+    #[test]
+    fn lfo_step_matches_pokeemerald() {
+        let (rom, header) = looping_song();
+        for speed in [0u8, 1, 22, 64, 130, 255] {
+            for depth in [0u8, 1, 12, 127, 255] {
+                for delay in [0u8, 3] {
+                    for mod_t in [0u8, 1] {
+                        let mut seq = Mp2kSequencer::new(rom.clone(), &header);
+                        let tr = &mut seq.tracks[0];
+                        tr.lfo_speed = speed;
+                        tr.mod_depth = depth;
+                        tr.lfo_delay_c = delay;
+                        tr.mod_type = mod_t;
+                        let mut oracle = CLfo {
+                            delay_c: delay,
+                            ..CLfo::default()
+                        };
+                        for step in 0..600u32 {
+                            tr.flags = ChangeFlags::default();
+                            oracle.flagged_pitch = false;
+                            oracle.flagged_volume = false;
+                            tr.lfo_step();
+                            c_lfo_step(&mut oracle, speed, depth, mod_t);
+                            assert_eq!(
+                                (tr.mod_m, tr.lfo_speed_c, tr.lfo_delay_c),
+                                (oracle.mod_m, oracle.speed_c, oracle.delay_c),
+                                "speed={speed} depth={depth} delay={delay} modT={mod_t} step={step}"
+                            );
+                            assert_eq!(
+                                (tr.flags.pitch, tr.flags.volume),
+                                (oracle.flagged_pitch, oracle.flagged_volume),
+                                "flags: speed={speed} depth={depth} delay={delay} modT={mod_t} step={step}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
