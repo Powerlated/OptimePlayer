@@ -21,6 +21,9 @@ pub const TEXT_DIM: Color32 = Color32::from_rgb(0x9a, 0x9a, 0xa5);
 
 /// Applies the theme to the egui context (call once at startup).
 pub fn apply(ctx: &egui::Context) {
+    // Pin the app to dark mode: egui 0.29 keeps separate dark/light styles and follows the
+    // OS theme by default, which would swap in the stock light style on light-mode systems.
+    ctx.set_theme(egui::ThemePreference::Dark);
     let mut style = (*ctx.style()).clone();
 
     style.text_styles = [

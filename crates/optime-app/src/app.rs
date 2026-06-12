@@ -760,7 +760,7 @@ impl OptimeApp {
             Add(usize, usize),
         }
         let mut action = None;
-        // The Like / Add-to-playlist menu body, shared between the per-row `⋯` button (works
+        // The Like / Add-to-playlist menu body, shared between the per-row `…` button (works
         // by tap — touch has no right-click) and the desktop context menu.
         let song_menu = |ui: &mut egui::Ui,
                          i: usize,
@@ -802,9 +802,13 @@ impl OptimeApp {
                 resp.context_menu(|ui| {
                     song_menu(ui, i, liked, &self.library.playlists, &mut action)
                 });
-                ui.menu_button(egui::RichText::new("⋯").size(16.0), |ui| {
-                    song_menu(ui, i, liked, &self.library.playlists, &mut action)
-                });
+                // "…" — U+22EF is missing from egui's bundled fonts and renders as tofu.
+                ui.menu_button(
+                    egui::RichText::new("…")
+                        .size(22.0)
+                        .color(crate::theme::TEXT_DIM),
+                    |ui| song_menu(ui, i, liked, &self.library.playlists, &mut action),
+                );
             });
         }
         match action {
@@ -968,7 +972,7 @@ impl OptimeApp {
                 }
                 if removable
                     && ui
-                        .add(egui::Button::new("✕").frame(false))
+                        .add(egui::Button::new("❌").frame(false))
                         .on_hover_text("Remove")
                         .clicked()
                 {
@@ -1397,7 +1401,9 @@ impl OptimeApp {
                 }
                 let current = self.current_track_ref();
                 let liked = current.as_ref().is_some_and(|t| self.library.is_liked(t));
-                let heart = if liked { "❤" } else { "♡" };
+                // Same glyph either way (the outline heart isn't in egui's fonts); the
+                // active flag tints it accent when liked, white otherwise.
+                let heart = "❤";
                 if icon_button(ui, heart, small, 18.0, false, liked, current.is_some()).clicked() {
                     if let Some(t) = current {
                         self.library.toggle_liked(&t);
@@ -1622,6 +1628,7 @@ impl eframe::App for OptimeApp {
         egui::SidePanel::left("songs")
             .resizable(true)
             .default_width(260.0)
+            .width_range(200.0..=400.0)
             .show(ctx, |ui| {
                 ui.heading("Optime Player");
                 ui.add_space(4.0);
@@ -1682,8 +1689,13 @@ impl eframe::App for OptimeApp {
                 }
                 if let Some(t) = self.current_track_ref() {
                     let liked = self.library.is_liked(&t);
+                    let heart_color = if liked {
+                        crate::theme::ACCENT
+                    } else {
+                        crate::theme::TEXT_DIM
+                    };
                     if ui
-                        .button(if liked { "❤" } else { "🤍" })
+                        .button(egui::RichText::new("❤").color(heart_color))
                         .on_hover_text("Like")
                         .clicked()
                     {
