@@ -4,6 +4,11 @@ use std::sync::{Arc, Mutex};
 
 use optime_core::{Controller, FsVisController, ResampleMode, Sdat, SynthConfig, TuningSystem};
 
+#[cfg(target_arch = "wasm32")]
+use crate::web::get_track_ref_from_query_string;
+#[cfg(target_arch = "wasm32")]
+use crate::web::update_query_string;
+
 use crate::library::{Library, Persisted, RepeatMode, TrackRef};
 use crate::piano_roll::PianoRoll;
 use crate::visualizer::{self, VisSnapshot};
@@ -241,9 +246,15 @@ impl OptimeApp {
             piano_roll: PianoRoll::default(),
             look_ahead: None,
         };
+
+        #[cfg(target_arch = "wasm32")]
+        let track = get_track_ref_from_query_string().or_else(|| p.last_track.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let track = p.last_track.clone();
+
         // Resume where the last session left off (paused), if the last track was from a demo
         // we can re-fetch; otherwise fall back to the first demo.
-        match p.last_track {
+        match track {
             Some(t) if DEMOS.iter().any(|(_, stem)| *stem == t.source) => {
                 app.resume_paused = true;
                 app.pending_play = Some(t.clone());
@@ -465,6 +476,11 @@ impl OptimeApp {
                 }
             }
             None => self.status = format!("Failed to load: {}", song.label),
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        if let Some(track_ref) = self.current_track_ref() {
+            update_query_string(track_ref);
         }
     }
 
@@ -1722,15 +1738,13 @@ impl eframe::App for OptimeApp {
         let dt = ctx.input(|i| i.stable_dt) as f64;
         self.piano_roll.advance(&snap, dt, playing);
         if let Some(look) = &mut self.look_ahead {
-            if playing {
-                let target = self.piano_roll.display_tick().ceil() as u32
-                    + crate::piano_roll::RUN_AHEAD_TICKS;
-                // Bounded catch-up so a stalled/zero-BPM sequence can't spin forever.
-                let mut guard = 0u32;
-                while look.sequence.ticks_elapsed < target && guard < 200_000 {
-                    look.tick();
-                    guard += 1;
-                }
+            let target = self.piano_roll.display_tick().ceil() as u32
+                + crate::piano_roll::RUN_AHEAD_TICKS;
+            // Bounded catch-up so a stalled/zero-BPM sequence can't spin forever.
+            let mut guard = 0u32;
+            while look.sequence.ticks_elapsed < target && guard < 200_000 {
+                look.tick();
+                guard += 1;
             }
             self.piano_roll.ingest(look);
         }
