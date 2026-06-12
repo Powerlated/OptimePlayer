@@ -70,6 +70,9 @@ enum LibraryView {
     Playlist(usize),
 }
 
+/// Horizontal drag distance (points) that commits a song-row swipe gesture.
+const SWIPE_COMMIT: f32 = 64.0;
+
 /// Demo SDATs available to load. Native reads from `demos/`; web fetches them at runtime.
 const DEMOS: &[(&str, &str)] = &[
     ("Super Mario 64 DS", "super-mario-64-ds"),
@@ -143,6 +146,10 @@ pub struct OptimeApp {
     swipe_offset: f32,
     /// Volume attenuation tied to the swipe: 1.0 centered, → 0.0 as the view leaves the screen.
     swipe_gain: f32,
+    /// In-progress horizontal swipe on a song row: (row index, press origin).
+    row_swipe: Option<(usize, egui::Pos2)>,
+    /// Song index awaiting a playlist choice (opened by a left swipe).
+    playlist_picker: Option<usize>,
     /// The adjacent song's roll shown while dragging (becomes the live roll on commit).
     swipe_preview: Option<SwipePreview>,
     /// The old song's roll sliding out after a committed swipe: (roll, exit side −1/+1).
@@ -220,6 +227,8 @@ impl OptimeApp {
             mobile_tab: MobileTab::NowPlaying,
             swipe_offset: 0.0,
             swipe_gain: 1.0,
+            row_swipe: None,
+            playlist_picker: None,
             swipe_preview: None,
             swipe_out: None,
             cpu_history: std::collections::VecDeque::new(),
@@ -751,13 +760,15 @@ impl OptimeApp {
         (snap, advance)
     }
 
-    /// The full song list with like / add-to-playlist context menus (right-click on desktop,
-    /// long-press on touch). Returns `true` if a song was started.
-    fn song_list_ui(&mut self, ui: &mut egui::Ui) -> bool {
+    /// The full song list with like / add-to-playlist menus, status badges, and (on mobile,
+    /// `swipeable`) iOS-style swipe gestures: swipe right to favorite, swipe left to pick a
+    /// playlist. Returns `true` if a song was started.
+    fn song_list_ui(&mut self, ui: &mut egui::Ui, swipeable: bool) -> bool {
         enum Action {
             Play(usize),
             Like(usize),
             Add(usize, usize),
+            PickPlaylist(usize),
         }
         let mut action = None;
         // The Like / Add-to-playlist menu body, shared between the per-row `…` button (works
@@ -785,13 +796,35 @@ impl OptimeApp {
             });
         };
         ui.spacing_mut().item_spacing.y = 0.0;
+        let pointer = ui.input(|i| {
+            (
+                i.pointer.primary_down(),
+                i.pointer.primary_pressed(),
+                i.pointer.primary_released(),
+                i.pointer.latest_pos(),
+            )
+        });
         for (i, song) in self.songs.iter().enumerate() {
             let selected = self.current_song == Some(i);
-            let liked = self.library.is_liked(&TrackRef {
+            let track = TrackRef {
                 source: self.current_source.clone(),
                 sseq_id: song.sseq_id,
                 label: String::new(),
-            });
+            };
+            let liked = self.library.is_liked(&track);
+            let in_playlist = self
+                .library
+                .playlists
+                .iter()
+                .any(|pl| pl.tracks.iter().any(|x| x.same_song(&track)));
+            // Status badges: green playlist marker, accent heart.
+            let mut badges: Vec<(&str, egui::Color32)> = Vec::new();
+            if liked {
+                badges.push(("❤", crate::theme::ACCENT));
+            }
+            if in_playlist {
+                badges.push(("🎵", egui::Color32::from_rgb(0x32, 0xd7, 0x4b)));
+            }
             // Right-to-left so the trailing menu button takes its true size first and the
             // row label fills exactly the remainder — the row can never overflow the panel
             // (overflow makes a resizable SidePanel grow every frame).
@@ -807,13 +840,111 @@ impl OptimeApp {
                         |ui| song_menu(ui, i, liked, &self.library.playlists, &mut action),
                     );
                     let row_w = ui.available_width();
-                    let resp = crate::theme::ios_row(ui, row_w, None, &song.label, selected, false);
+                    let (down, pressed, released, pos) = pointer;
+
+                    // Spotify-style swipe: the row content slides with the finger, revealing
+                    // a solid colored action panel (icon emerging from the screen edge).
+                    let mut offset = 0.0f32;
+                    let mut horizontal = false;
+                    let mut dx = 0.0f32;
+                    if swipeable {
+                        if let Some((row, origin)) = self.row_swipe {
+                            if row == i && (down || released) {
+                                if let Some(p) = pos {
+                                    dx = p.x - origin.x;
+                                    let dy = (p.y - origin.y).abs();
+                                    horizontal = dx.abs() > 12.0 && dx.abs() > dy * 1.5;
+                                    if horizontal && down {
+                                        offset = dx.clamp(-130.0, 130.0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Reserve the row area, paint the reveal behind, then draw the row's
+                    // content into a horizontally shifted, clipped child UI.
+                    let (row_rect, _) =
+                        ui.allocate_exact_size(egui::vec2(row_w, 42.0), egui::Sense::hover());
+                    if offset != 0.0 {
+                        let committed = offset.abs() >= SWIPE_COMMIT;
+                        let (tint, glyph, panel, icon_x) = if offset > 0.0 {
+                            // Swipe right → favorite (accent panel from the left edge).
+                            let panel = egui::Rect::from_min_max(
+                                row_rect.left_top(),
+                                egui::pos2(row_rect.left() + offset, row_rect.bottom()),
+                            );
+                            (
+                                crate::theme::ACCENT,
+                                "❤",
+                                panel,
+                                row_rect.left() + (offset / 2.0).min(40.0),
+                            )
+                        } else {
+                            // Swipe left → add to playlist (green panel from the right).
+                            let panel = egui::Rect::from_min_max(
+                                egui::pos2(row_rect.right() + offset, row_rect.top()),
+                                row_rect.right_bottom(),
+                            );
+                            (
+                                egui::Color32::from_rgb(0x2f, 0xc1, 0x4e),
+                                "➕",
+                                panel,
+                                row_rect.right() - (offset.abs() / 2.0).min(40.0),
+                            )
+                        };
+                        let painter = ui.painter_at(row_rect);
+                        let alpha = if committed { 1.0 } else { 0.75 };
+                        painter.rect_filled(panel, 10.0, tint.linear_multiply(alpha));
+                        if offset.abs() > 28.0 {
+                            painter.text(
+                                egui::pos2(icon_x, row_rect.center().y),
+                                egui::Align2::CENTER_CENTER,
+                                glyph,
+                                egui::FontId::proportional(17.0),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    }
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(row_rect.translate(egui::vec2(offset, 0.0)))
+                            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    );
+                    child.set_clip_rect(row_rect);
+                    let resp = crate::theme::ios_row(
+                        &mut child,
+                        row_w,
+                        None,
+                        &song.label,
+                        &badges,
+                        selected,
+                        false,
+                    );
                     if resp.clicked() {
                         action = Some(Action::Play(i));
                     }
                     resp.context_menu(|ui| {
                         song_menu(ui, i, liked, &self.library.playlists, &mut action)
                     });
+
+                    if swipeable {
+                        if pressed && resp.hovered() {
+                            if let Some(p) = pos {
+                                self.row_swipe = Some((i, p));
+                            }
+                        }
+                        if let Some((row, _)) = self.row_swipe {
+                            if row == i && released {
+                                if horizontal && dx >= SWIPE_COMMIT {
+                                    action = Some(Action::Like(i));
+                                } else if horizontal && dx <= -SWIPE_COMMIT {
+                                    action = Some(Action::PickPlaylist(i));
+                                }
+                                self.row_swipe = None;
+                            }
+                        }
+                    }
                 },
             );
         }
@@ -827,20 +958,88 @@ impl OptimeApp {
                     self.library.toggle_liked(&t);
                 }
             }
-            Some(Action::Add(i, p)) => {
-                if let Some(t) = self.track_ref(i) {
-                    let pl = &mut self.library.playlists[p];
-                    if pl.tracks.iter().any(|x| x.same_song(&t)) {
-                        self.status = format!("Already in {}.", pl.name);
-                    } else {
-                        self.status = format!("Added to {}.", pl.name);
-                        pl.tracks.push(t);
-                    }
-                }
-            }
+            Some(Action::Add(i, p)) => self.add_song_to_playlist(i, p),
+            Some(Action::PickPlaylist(i)) => self.playlist_picker = Some(i),
             None => {}
         }
         false
+    }
+
+    /// Adds song `i` to playlist `p` (deduplicated), reporting the result in the status line.
+    fn add_song_to_playlist(&mut self, i: usize, p: usize) {
+        let Some(t) = self.track_ref(i) else { return };
+        let Some(pl) = self.library.playlists.get_mut(p) else {
+            return;
+        };
+        if pl.tracks.iter().any(|x| x.same_song(&t)) {
+            self.status = format!("Already in {}.", pl.name);
+        } else {
+            self.status = format!("Added to {}.", pl.name);
+            pl.tracks.push(t);
+        }
+    }
+
+    /// The centered "Add to playlist" sheet opened by a left swipe on a song row.
+    fn playlist_picker_ui(&mut self, ctx: &egui::Context) {
+        let Some(i) = self.playlist_picker else {
+            return;
+        };
+        let title = self
+            .songs
+            .get(i)
+            .map(|s| s.label.clone())
+            .unwrap_or_default();
+        let mut close = false;
+        egui::Window::new("Add to playlist")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(title)
+                        .size(13.0)
+                        .color(crate::theme::TEXT_DIM),
+                );
+                ui.add_space(6.0);
+                if self.library.playlists.is_empty() {
+                    ui.label("No playlists yet — create one in Playlists.");
+                }
+                let names: Vec<String> = self
+                    .library
+                    .playlists
+                    .iter()
+                    .map(|pl| pl.name.clone())
+                    .collect();
+                for (p, name) in names.iter().enumerate() {
+                    if crate::theme::ios_row(
+                        ui,
+                        ui.available_width().max(220.0),
+                        Some("🎵"),
+                        name,
+                        &[],
+                        false,
+                        false,
+                    )
+                    .clicked()
+                    {
+                        self.add_song_to_playlist(i, p);
+                        close = true;
+                    }
+                }
+                ui.add_space(8.0);
+                if ui
+                    .add_sized(
+                        egui::vec2(ui.available_width().max(220.0), 32.0),
+                        egui::Button::new("Cancel"),
+                    )
+                    .clicked()
+                {
+                    close = true;
+                }
+            });
+        if close {
+            self.playlist_picker = None;
+        }
     }
 
     /// The library browser (liked / recent / playlists). Returns `true` if playback started.
@@ -860,10 +1059,10 @@ impl OptimeApp {
         ui.spacing_mut().item_spacing.y = 0.0;
         let w = ui.available_width();
         let liked_title = format!("Liked Songs ({})", self.library.liked.len());
-        if ios_row(ui, w, Some("❤"), &liked_title, false, true).clicked() {
+        if ios_row(ui, w, Some("❤"), &liked_title, &[], false, true).clicked() {
             self.library_view = LibraryView::Liked;
         }
-        if ios_row(ui, w, Some("🕘"), "Recently Played", false, true).clicked() {
+        if ios_row(ui, w, Some("🕘"), "Recently Played", &[], false, true).clicked() {
             self.library_view = LibraryView::Recent;
         }
         section_header(ui, "Playlists");
@@ -884,7 +1083,7 @@ impl OptimeApp {
                     }
                     let title = format!("{} ({})", pl.name, pl.tracks.len());
                     let row_w = ui.available_width();
-                    if ios_row(ui, row_w, Some("🎵"), &title, false, true).clicked() {
+                    if ios_row(ui, row_w, Some("🎵"), &title, &[], false, true).clicked() {
                         open = Some(p);
                     }
                 },
@@ -989,7 +1188,8 @@ impl OptimeApp {
                     }
                     let here = current.as_ref().is_some_and(|c| c.same_song(t));
                     let row_w = ui.available_width();
-                    if crate::theme::ios_row(ui, row_w, None, &t.label, here, false).clicked() {
+                    if crate::theme::ios_row(ui, row_w, None, &t.label, &[], here, false).clicked()
+                    {
                         play = Some(i);
                     }
                 },
@@ -1251,6 +1451,9 @@ impl OptimeApp {
                 });
             }
         }
+
+        // The swipe-left "Add to playlist" sheet, shown over whichever screen is active.
+        self.playlist_picker_ui(ctx);
     }
 
     /// The Spotify-style floating mini-player: animated EQ bars, song title, and transport;
@@ -1553,7 +1756,8 @@ impl OptimeApp {
                     for (label, stem) in DEMOS {
                         let selected = active == stem;
                         let w = ui.available_width();
-                        if crate::theme::ios_row(ui, w, Some("💿"), label, selected, true).clicked()
+                        if crate::theme::ios_row(ui, w, Some("💿"), label, &[], selected, true)
+                            .clicked()
                         {
                             requested = Some((*stem, *label));
                         }
@@ -1564,7 +1768,7 @@ impl OptimeApp {
                     }
                 }
                 crate::theme::section_header(ui, "All songs");
-                self.song_list_ui(ui);
+                self.song_list_ui(ui, true);
             });
         });
     }
@@ -1674,7 +1878,7 @@ impl eframe::App for OptimeApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
-                        self.song_list_ui(ui);
+                        self.song_list_ui(ui, false);
                     });
             });
 

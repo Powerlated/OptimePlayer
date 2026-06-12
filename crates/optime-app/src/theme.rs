@@ -19,8 +19,52 @@ pub const TEXT: Color32 = Color32::from_rgb(0xee, 0xee, 0xf2);
 /// Secondary / caption text.
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0x9a, 0x9a, 0xa5);
 
+/// Installs the UI typeface: real SF Pro when it's installed on the system (Apple's license
+/// forbids bundling it), otherwise the embedded Inter — the standard open SF Pro metric-alike —
+/// with egui's defaults kept as fallbacks for emoji/symbol coverage.
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    fonts.font_data.insert(
+        "inter".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/Inter-Regular.ttf")),
+    );
+    let prop = fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+        .expect("proportional family exists");
+    prop.insert(0, "inter".to_owned());
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Use the genuine article when the user has installed it.
+        for candidate in [
+            "C:\\Windows\\Fonts\\SF-Pro.ttf",
+            "C:\\Windows\\Fonts\\SF-Pro-Display-Regular.otf",
+            "C:\\Windows\\Fonts\\SF-Pro-Text-Regular.otf",
+            "/System/Library/Fonts/SFNS.ttf",
+            "/Library/Fonts/SF-Pro.ttf",
+        ] {
+            if let Ok(bytes) = std::fs::read(candidate) {
+                fonts
+                    .font_data
+                    .insert("sf-pro".to_owned(), egui::FontData::from_owned(bytes));
+                fonts
+                    .families
+                    .get_mut(&egui::FontFamily::Proportional)
+                    .expect("proportional family exists")
+                    .insert(0, "sf-pro".to_owned());
+                break;
+            }
+        }
+    }
+
+    ctx.set_fonts(fonts);
+}
+
 /// Applies the theme to the egui context (call once at startup).
 pub fn apply(ctx: &egui::Context) {
+    install_fonts(ctx);
     // Pin the app to dark mode: egui 0.29 keeps separate dark/light styles and follows the
     // OS theme by default, which would swap in the stock light style on light-mode systems.
     ctx.set_theme(egui::ThemePreference::Dark);
@@ -90,14 +134,15 @@ pub fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-/// One iOS-style list row: full-width tappable area, optional leading icon, title, optional
-/// chevron, hairline separator underneath. `width` lets callers reserve space for trailing
-/// widgets (pass `ui.available_width()` otherwise).
+/// One iOS-style list row: full-width tappable area, optional leading icon, title, trailing
+/// status badges (icon + tint), optional chevron, hairline separator underneath. `width` lets
+/// callers reserve space for trailing widgets (pass `ui.available_width()` otherwise).
 pub fn ios_row(
     ui: &mut egui::Ui,
     width: f32,
     icon: Option<&str>,
     title: &str,
+    badges: &[(&str, Color32)],
     selected: bool,
     chevron: bool,
 ) -> egui::Response {
@@ -120,8 +165,20 @@ pub fn ios_row(
         );
         x += 28.0;
     }
-    // Clip the title so it never runs under the chevron / trailing widgets.
-    let title_right = rect.right() - if chevron { 26.0 } else { 10.0 };
+    // Trailing status badges (liked / in-playlist), right-aligned before the chevron.
+    let mut badge_x = rect.right() - if chevron { 28.0 } else { 12.0 };
+    for (glyph, tint) in badges {
+        painter.text(
+            Pos2::new(badge_x, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            *glyph,
+            FontId::proportional(13.0),
+            *tint,
+        );
+        badge_x -= 20.0;
+    }
+    // Clip the title so it never runs under the badges / chevron.
+    let title_right = badge_x - 6.0;
     let title_painter = ui.painter_at(Rect::from_min_max(
         Pos2::new(x, rect.top()),
         Pos2::new(title_right, rect.bottom()),
