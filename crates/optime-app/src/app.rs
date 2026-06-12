@@ -757,29 +757,51 @@ impl OptimeApp {
             Add(usize, usize),
         }
         let mut action = None;
+        // The Like / Add-to-playlist menu body, shared between the per-row `⋯` button (works
+        // by tap — touch has no right-click) and the desktop context menu.
+        let song_menu = |ui: &mut egui::Ui,
+                         i: usize,
+                         liked: bool,
+                         playlists: &[crate::library::Playlist],
+                         action: &mut Option<Action>| {
+            let like_label = if liked { "💔 Unlike" } else { "❤ Like" };
+            if ui.button(like_label).clicked() {
+                *action = Some(Action::Like(i));
+                ui.close_menu();
+            }
+            ui.menu_button("➕ Add to playlist", |ui| {
+                if playlists.is_empty() {
+                    ui.label("No playlists yet — create one in Playlists.");
+                }
+                for (p, pl) in playlists.iter().enumerate() {
+                    if ui.button(&pl.name).clicked() {
+                        *action = Some(Action::Add(i, p));
+                        ui.close_menu();
+                    }
+                }
+            });
+        };
         for (i, song) in self.songs.iter().enumerate() {
             let selected = self.current_song == Some(i);
-            let resp = ui.selectable_label(selected, &song.label);
-            if resp.clicked() {
-                action = Some(Action::Play(i));
-            }
-            resp.context_menu(|ui| {
-                let liked = self.track_ref(i).is_some_and(|t| self.library.is_liked(&t));
-                let like_label = if liked { "💔 Unlike" } else { "❤ Like" };
-                if ui.button(like_label).clicked() {
-                    action = Some(Action::Like(i));
-                    ui.close_menu();
+            let liked = self.library.is_liked(&TrackRef {
+                source: self.current_source.clone(),
+                sseq_id: song.sseq_id,
+                label: String::new(),
+            });
+            ui.horizontal(|ui| {
+                let row_w = ui.available_width();
+                let resp = ui.add_sized(
+                    egui::vec2(row_w - 34.0, ui.spacing().interact_size.y),
+                    egui::SelectableLabel::new(selected, &song.label),
+                );
+                if resp.clicked() {
+                    action = Some(Action::Play(i));
                 }
-                ui.menu_button("➕ Add to playlist", |ui| {
-                    if self.library.playlists.is_empty() {
-                        ui.label("No playlists yet — create one in the Library.");
-                    }
-                    for (p, pl) in self.library.playlists.iter().enumerate() {
-                        if ui.button(&pl.name).clicked() {
-                            action = Some(Action::Add(i, p));
-                            ui.close_menu();
-                        }
-                    }
+                resp.context_menu(|ui| {
+                    song_menu(ui, i, liked, &self.library.playlists, &mut action)
+                });
+                ui.menu_button("⋯", |ui| {
+                    song_menu(ui, i, liked, &self.library.playlists, &mut action)
                 });
             });
         }
@@ -796,7 +818,10 @@ impl OptimeApp {
             Some(Action::Add(i, p)) => {
                 if let Some(t) = self.track_ref(i) {
                     let pl = &mut self.library.playlists[p];
-                    if !pl.tracks.iter().any(|x| x.same_song(&t)) {
+                    if pl.tracks.iter().any(|x| x.same_song(&t)) {
+                        self.status = format!("Already in {}.", pl.name);
+                    } else {
+                        self.status = format!("Added to {}.", pl.name);
                         pl.tracks.push(t);
                     }
                 }
@@ -1255,15 +1280,21 @@ impl OptimeApp {
             });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let spacing = (ui.available_width() - 6.0 * 44.0).max(0.0) / 7.0;
+                // Six identically sized controls, evenly spaced across the row.
+                let btn = egui::vec2(46.0, 40.0);
+                let have_songs = !self.songs.is_empty();
+                let spacing = (ui.available_width() - 6.0 * btn.x).max(0.0) / 7.0;
                 ui.spacing_mut().item_spacing.x = spacing;
                 ui.add_space(spacing);
-                let big = egui::vec2(44.0, 36.0);
-                let shuffle = ui.add_sized(big, egui::Button::new("🔀").selected(self.shuffle));
+                let shuffle = ui.add_sized(btn, egui::Button::new("🔀").selected(self.shuffle));
                 if shuffle.clicked() {
                     self.shuffle = !self.shuffle;
                 }
-                if ui.add_sized(big, egui::Button::new("⏮")).clicked() {
+                if ui
+                    .add_enabled_ui(have_songs, |ui| ui.add_sized(btn, egui::Button::new("⏮")))
+                    .inner
+                    .clicked()
+                {
                     self.step_song(-1);
                 }
                 let pause_icon = if self.paused || self.current_song.is_none() {
@@ -1272,12 +1303,19 @@ impl OptimeApp {
                     "⏸"
                 };
                 if ui
-                    .add_sized(egui::vec2(56.0, 44.0), egui::Button::new(pause_icon))
+                    .add_enabled_ui(have_songs, |ui| {
+                        ui.add_sized(btn, egui::Button::new(pause_icon))
+                    })
+                    .inner
                     .clicked()
                 {
                     self.paused = !self.paused;
                 }
-                if ui.add_sized(big, egui::Button::new("⏭")).clicked() {
+                if ui
+                    .add_enabled_ui(have_songs, |ui| ui.add_sized(btn, egui::Button::new("⏭")))
+                    .inner
+                    .clicked()
+                {
                     self.step_song(1);
                 }
                 let repeat_icon = match self.repeat {
@@ -1286,7 +1324,7 @@ impl OptimeApp {
                 };
                 if ui
                     .add_sized(
-                        big,
+                        btn,
                         egui::Button::new(repeat_icon).selected(self.repeat != RepeatMode::Off),
                     )
                     .on_hover_text("Repeat: off / all / one")
@@ -1294,13 +1332,18 @@ impl OptimeApp {
                 {
                     self.repeat = self.repeat.next();
                 }
-                if let Some(t) = self.current_track_ref() {
-                    let liked = self.library.is_liked(&t);
-                    let heart = if liked { "❤" } else { "🤍" };
-                    if ui
-                        .add_sized(big, egui::Button::new(heart).selected(liked))
-                        .clicked()
-                    {
+                // The heart slot is always present so the row never shifts.
+                let current = self.current_track_ref();
+                let liked = current.as_ref().is_some_and(|t| self.library.is_liked(t));
+                let heart = if liked { "❤" } else { "🤍" };
+                if ui
+                    .add_enabled_ui(current.is_some(), |ui| {
+                        ui.add_sized(btn, egui::Button::new(heart).selected(liked))
+                    })
+                    .inner
+                    .clicked()
+                {
+                    if let Some(t) = current {
                         self.library.toggle_liked(&t);
                     }
                 }

@@ -75,6 +75,12 @@ impl SampleSynthesizer {
         self.instrs.len()
     }
 
+    /// Number of voices currently sounding.
+    #[inline]
+    pub fn active_voice_count(&self) -> usize {
+        self.active_instrs.len()
+    }
+
     /// Immutable access to a voice.
     #[inline]
     pub fn instr(&self, index: usize) -> &SampleInstrument {
