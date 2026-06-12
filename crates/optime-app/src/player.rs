@@ -14,12 +14,17 @@ pub struct AudioState {
     pub config: SynthConfig,
     /// When set, the callback emits silence but keeps the controller intact.
     pub paused: bool,
-    /// User master volume (0..=1), applied by the callback.
+    /// User master volume target (0..=1); the callback smooths toward it (no zipper noise).
     pub volume: f32,
-    /// Master gain applied by the callback; ramped toward zero during an end-of-song fade.
+    /// The callback's smoothed volume state.
+    pub volume_smooth: f32,
+    /// Per-song gain: ramps up quickly after a new controller is installed (click-free song
+    /// switches) and down per `fade_step` for the end-of-song fade.
     pub fade_gain: f32,
-    /// Per-sample gain decrement while fading out (0.0 = not fading).
+    /// Per-sample gain decrement while fading out (0.0 = not fading; the gain then rises to 1).
     pub fade_step: f32,
+    /// Pause ramp: eases toward 0 when paused and back to 1 on resume (no pause pops).
+    pub pause_gain: f32,
     /// Device sample rate, for converting render time into DSP load.
     pub sample_rate: f64,
     /// Smoothed audio-callback load: render time / buffer real-time budget (1.0 = can't keep up).
@@ -35,8 +40,10 @@ impl AudioState {
             config: SynthConfig::default(),
             paused: false,
             volume: 1.0,
+            volume_smooth: 1.0,
             fade_gain: 1.0,
             fade_step: 0.0,
+            pause_gain: 1.0,
             sample_rate: 48_000.0,
             dsp_load: 0.0,
             voices: 0,

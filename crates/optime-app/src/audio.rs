@@ -91,7 +91,67 @@ fn update_meters(st: &mut crate::player::AudioState, t0: f64, frames: usize) {
     st.dsp_load = st.dsp_load * 0.85 + load.clamp(0.0, 2.0) * 0.15;
 }
 
-/// Fills the device buffer from the controller (or silence when idle/paused).
+/// The per-sample gain pipeline: smoothed master volume × song fade (in/out) × pause ramp.
+/// All transitions are ramped inside the callback so no UI action produces a click.
+struct GainRamp {
+    volume: f32,
+    volume_target: f32,
+    /// One-pole smoothing fraction per sample (~10 ms time constant).
+    volume_alpha: f32,
+    song: f32,
+    /// Downward fade step (end-of-song); when 0 the song gain rises instead (fade-in).
+    song_down_step: f32,
+    /// Upward fade-in step (~30 ms).
+    song_up_step: f32,
+    pause: f32,
+    pause_target: f32,
+    /// Pause ramp step (~25 ms).
+    pause_step: f32,
+}
+
+impl GainRamp {
+    fn new(st: &crate::player::AudioState) -> Self {
+        let sr = st.sample_rate.max(1.0) as f32;
+        Self {
+            volume: st.volume_smooth,
+            volume_target: st.volume,
+            volume_alpha: (1.0 / (0.010 * sr)).min(1.0),
+            song: st.fade_gain,
+            song_down_step: st.fade_step,
+            song_up_step: 1.0 / (0.030 * sr),
+            pause: st.pause_gain,
+            pause_target: if st.paused { 0.0 } else { 1.0 },
+            pause_step: 1.0 / (0.025 * sr),
+        }
+    }
+
+    /// Advances every ramp by one sample and returns the combined gain (incl. the 0.5 master).
+    #[inline]
+    fn next(&mut self) -> f32 {
+        self.volume += (self.volume_target - self.volume) * self.volume_alpha;
+        self.song = if self.song_down_step > 0.0 {
+            (self.song - self.song_down_step).max(0.0)
+        } else {
+            (self.song + self.song_up_step).min(1.0)
+        };
+        self.pause = if self.pause < self.pause_target {
+            (self.pause + self.pause_step).min(self.pause_target)
+        } else {
+            (self.pause - self.pause_step).max(self.pause_target)
+        };
+        0.5 * self.volume * self.song * self.pause
+    }
+
+    /// Writes the ramp state back into the shared audio state.
+    fn store(self, st: &mut crate::player::AudioState) {
+        st.volume_smooth = self.volume;
+        st.fade_gain = self.song;
+        st.pause_gain = self.pause;
+    }
+}
+
+/// Fills the device buffer from the controller (or silence when idle / fully paused). While the
+/// pause ramp is still easing out, the controller keeps rendering so the tail fades smoothly.
 fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
     let t0 = now_seconds();
     let Ok(mut guard) = shared.lock() else {
@@ -99,33 +159,35 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         return;
     };
     let st = &mut *guard;
-    if st.paused || st.controller.is_none() {
+    if st.controller.is_none() || (st.paused && st.pause_gain <= 0.0) {
         data.fill(0.0);
+        if !st.paused {
+            st.pause_gain = 1.0;
+        }
+        st.volume_smooth = st.volume;
         st.dsp_load *= 0.85;
         st.voices = 0;
         return;
     }
+    let mut ramp = GainRamp::new(st);
     let config = &st.config;
-    let volume = st.volume;
-    let mut gain = st.fade_gain;
-    let step = st.fade_step;
     let controller = st.controller.as_mut().unwrap();
     if channels == 2 {
         // The common case: render the whole device buffer through the block path.
         controller.fill(data, config);
         for frame in data.chunks_exact_mut(2) {
-            frame[0] *= 0.5 * volume * gain;
-            frame[1] *= 0.5 * volume * gain;
-            gain = (gain - step).max(0.0);
+            let g = ramp.next();
+            frame[0] *= g;
+            frame[1] *= g;
         }
-        st.fade_gain = gain;
+        ramp.store(st);
         update_meters(st, t0, data.len() / 2);
         return;
     }
     for frame in data.chunks_mut(channels.max(1)) {
         let (l, r) = controller.next_sample(config);
-        let (l, r) = (l * 0.5 * volume * gain, r * 0.5 * volume * gain);
-        gain = (gain - step).max(0.0);
+        let g = ramp.next();
+        let (l, r) = (l * g, r * g);
         match frame.len() {
             0 => {}
             1 => frame[0] = (l + r) * 0.5,
@@ -138,6 +200,6 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
             }
         }
     }
-    st.fade_gain = gain;
+    ramp.store(st);
     update_meters(st, t0, data.len() / channels.max(1));
 }

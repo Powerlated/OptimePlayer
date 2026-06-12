@@ -446,7 +446,9 @@ impl OptimeApp {
                     if let Ok(mut st) = audio.shared.lock() {
                         st.config = self.config();
                         st.paused = false;
-                        st.fade_gain = 1.0;
+                        // Start from silence and let the callback fade the new song in
+                        // (~30 ms) — no click on song switches.
+                        st.fade_gain = 0.0;
                         st.fade_step = 0.0;
                         st.controller = Some(controller);
                     }
