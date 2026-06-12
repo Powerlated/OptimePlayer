@@ -12,7 +12,7 @@
 
 use std::time::Instant;
 
-use optime_core::{Controller, ResampleMode, Sdat, SynthConfig};
+use optime_core::{ResampleMode, SoundData, SynthConfig, SynthController};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -24,11 +24,11 @@ fn main() {
         "/../../demos/pokemon-platinum.sdat"
     );
     let bytes = std::fs::read(path).expect("read pokemon-platinum.sdat");
-    let sdats = Sdat::load_all(&bytes);
+    let archives = SoundData::load_all(&bytes);
     // Pick the first archive that actually contains the requested SSEQ.
-    let sdat = sdats
+    let data = archives
         .iter()
-        .find(|s| Controller::new(48_000.0, s, sseq_id).is_some())
+        .find(|s| SynthController::new(48_000.0, s, sseq_id).is_some())
         .expect("an archive containing the requested SSEQ");
 
     let sr = 48_000.0;
@@ -49,7 +49,7 @@ fn main() {
             resample: mode,
             ..SynthConfig::default()
         };
-        let Some(mut controller) = Controller::new(sr, sdat, sseq_id) else {
+        let Some(mut controller) = SynthController::new(sr, data, sseq_id) else {
             eprintln!("SSEQ {sseq_id} not found");
             return;
         };

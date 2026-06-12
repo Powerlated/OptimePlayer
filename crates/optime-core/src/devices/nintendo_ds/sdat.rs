@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::bank::{
+use super::bank::{
     calc_decay_coeff, get_effective_attack, get_sustain_level, InstrumentBank, InstrumentRecord,
     InstrumentRegion, InstrumentType,
 };

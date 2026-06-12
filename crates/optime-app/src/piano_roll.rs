@@ -7,8 +7,8 @@
 //! bar flares as it crosses the cursor — exactly when it sounds.
 //!
 //! Future notes come from the engine's look-ahead [`FsVisController`], whose note buffer this
-//! module ingests each frame. The horizontal scale is in sequence *ticks*, so the scroll speed
-//! tracks tempo automatically.
+//! module ingests each frame. The horizontal scale is in sequencer *steps* (DS: SSEQ ticks;
+//! GBA: MP2K tempo steps), so the scroll speed tracks tempo automatically.
 //!
 //! All rendering is isolated here so the draw layer can later be swapped for a `wgpu` paint
 //! callback (true shader bloom / particles) without touching the app.
@@ -25,22 +25,18 @@ const MIDI_LO: u8 = 21;
 const MIDI_HI: u8 = 108;
 const LANES: usize = (MIDI_HI - MIDI_LO + 1) as usize; // 88
 
-/// Total ticks spanned by the roll width.
+/// Total steps spanned by the roll width.
 const WINDOW_TICKS: f64 = 640.0;
 /// Cursor position as a fraction of the roll width from the keyboard edge.
 const CURSOR_FRAC: f32 = 0.22;
-/// Ticks of look-ahead to keep buffered (must exceed the visible future span).
+/// Steps of look-ahead to keep buffered (must exceed the visible future span).
 pub const RUN_AHEAD_TICKS: u32 = 560;
-/// Spacing of the scrolling vertical time grid, in ticks.
+/// Spacing of the scrolling vertical time grid, in steps.
 const GRID_TICKS: f64 = 96.0;
 /// Minimum bar length so zero/short-duration notes are still visible as they cross.
 const MIN_NOTE_TICKS: f64 = 24.0;
 /// Width of the vertical keyboard, in points.
 const KEYBOARD_W: f32 = 40.0;
-
-/// Sequence ticks per second per unit BPM: `DS_CLOCK_RATE / CYCLES_PER_TICK / 240`.
-/// `(33_513_982 / (64 * 2728)) / 240`.
-const TICK_RATE_PER_BPM: f64 = 0.799_837;
 
 /// `midi % 12` is a black key. Index 0 == C.
 const IS_BLACK: [bool; 12] = [
@@ -88,14 +84,13 @@ impl PianoRoll {
             return;
         }
         if !self.primed {
-            self.display_tick = snap.ticks as f64;
+            self.display_tick = snap.steps as f64;
             self.primed = true;
             return;
         }
-        let rate = TICK_RATE_PER_BPM * snap.bpm.max(1) as f64;
-        self.display_tick += dt.max(0.0) * rate;
+        self.display_tick += dt.max(0.0) * snap.step_rate.max(0.0);
 
-        let target = snap.ticks as f64;
+        let target = snap.steps as f64;
         let err = target - self.display_tick;
         if err.abs() > 96.0 {
             self.display_tick = target; // loop / restart — snap.
@@ -107,18 +102,17 @@ impl PianoRoll {
     /// Rebuilds the note list from the look-ahead controller's buffer.
     pub fn ingest(&mut self, look: &FsVisController) {
         self.notes.clear();
-        let buf = &look.active_notes;
+        let buf = &look.notes;
         for i in 0..buf.entries() {
-            let Some(m) = buf.peek(i) else { continue };
-            let pitch = m.param0;
-            if !(MIDI_LO as i32..=MIDI_HI as i32).contains(&pitch) {
+            let Some(n) = buf.peek(i) else { continue };
+            if !(MIDI_LO..=MIDI_HI).contains(&n.key) {
                 continue;
             }
-            let start = m.timestamp as f64;
-            let end = start + (m.param2.max(0) as f64).max(MIN_NOTE_TICKS);
+            let start = n.timestamp as f64;
+            let end = start + (n.duration as f64).max(MIN_NOTE_TICKS);
             self.notes.push(NoteEvent {
-                track: m.track_num,
-                pitch: pitch as u8,
+                track: n.track,
+                pitch: n.key,
                 start,
                 end,
             });
@@ -253,7 +247,10 @@ impl PianoRoll {
                 Pos2::new(cursor_x, roll.min.y),
                 Pos2::new(cursor_x, roll.max.y),
             ],
-            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 70)),
+            Stroke::new(
+                1.0_f32,
+                Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 70),
+            ),
         );
     }
 

@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use optime_core::{Controller, FsVisController, ResampleMode, Sdat, SynthConfig, TuningSystem};
+use optime_core::{
+    FsVisController, ResampleMode, SoundData, SynthConfig, SynthController, TuningSystem,
+};
 
 #[cfg(target_arch = "wasm32")]
 use crate::web::get_track_ref_from_query_string;
@@ -16,8 +18,8 @@ use crate::{audio::AudioEngine, player, TRACK_COUNT};
 
 /// One entry in the flattened song list.
 struct Song {
-    sdat_index: usize,
-    sseq_id: u32,
+    archive_index: usize,
+    song_id: u32,
     label: String,
 }
 
@@ -75,9 +77,6 @@ enum LibraryView {
     Playlist(usize),
 }
 
-/// Horizontal drag distance (points) that commits a song-row swipe gesture.
-const SWIPE_COMMIT: f32 = 64.0;
-
 /// Demo SDATs available to load. Native reads from `demos/`; web fetches them at runtime.
 const DEMOS: &[(&str, &str)] = &[
     ("Super Mario 64 DS", "super-mario-64-ds"),
@@ -95,7 +94,7 @@ pub struct OptimeApp {
     audio_failed: bool,
     sample_rate: f64,
 
-    sdats: Vec<Sdat>,
+    archives: Vec<SoundData>,
     songs: Vec<Song>,
     current_song: Option<usize>,
 
@@ -123,7 +122,7 @@ pub struct OptimeApp {
     shuffle: bool,
     /// Master volume (0..=1).
     volume: f32,
-    /// Loops completed by the current song (counted from `Controller::jumps`).
+    /// Loops completed by the current song (counted from `SynthController::jumps`).
     loop_count: u32,
     /// xorshift64 state for shuffle.
     rng: u64,
@@ -134,7 +133,7 @@ pub struct OptimeApp {
     library_view: LibraryView,
     /// Text buffer for the "new playlist" name field.
     new_playlist_name: String,
-    /// Source key (demo stem or user file name) of the currently loaded SDATs.
+    /// Source key (demo stem or user file name) of the currently loaded archives.
     current_source: String,
     /// When playing from a playlist/collection: its tracks and the current position.
     queue: Option<(Vec<TrackRef>, usize)>,
@@ -151,10 +150,6 @@ pub struct OptimeApp {
     swipe_offset: f32,
     /// Volume attenuation tied to the swipe: 1.0 centered, → 0.0 as the view leaves the screen.
     swipe_gain: f32,
-    /// In-progress horizontal swipe on a song row: (row index, press origin).
-    row_swipe: Option<(usize, egui::Pos2)>,
-    /// Song index awaiting a playlist choice (opened by a left swipe).
-    playlist_picker: Option<usize>,
     /// The adjacent song's roll shown while dragging (becomes the live roll on commit).
     swipe_preview: Option<SwipePreview>,
     /// The old song's roll sliding out after a committed swipe: (roll, exit side −1/+1).
@@ -203,7 +198,7 @@ impl OptimeApp {
             audio,
             audio_failed: false,
             sample_rate,
-            sdats: Vec::new(),
+            archives: Vec::new(),
             songs: Vec::new(),
             current_song: None,
             stereo_separation: p.stereo_separation,
@@ -232,8 +227,6 @@ impl OptimeApp {
             mobile_tab: MobileTab::NowPlaying,
             swipe_offset: 0.0,
             swipe_gain: 1.0,
-            row_swipe: None,
-            playlist_picker: None,
             swipe_preview: None,
             swipe_out: None,
             cpu_history: std::collections::VecDeque::new(),
@@ -293,7 +286,7 @@ impl OptimeApp {
     fn track_ref(&self, i: usize) -> Option<TrackRef> {
         self.songs.get(i).map(|s| TrackRef {
             source: self.current_source.clone(),
-            sseq_id: s.sseq_id,
+            sseq_id: s.song_id,
             label: s.label.clone(),
         })
     }
@@ -395,26 +388,23 @@ impl OptimeApp {
         }
     }
 
-    /// Parses SDATs from `bytes` and rebuilds the song list. `key` is the persistent source
-    /// identity (demo stem or user file name); `source` is the display name for status text.
+    /// Parses sound archives from `bytes` (DS `.nds`/`.sdat`, or a GBA ROM) and rebuilds the
+    /// song list. `key` is the persistent source identity (demo stem or user file name);
+    /// `source` is the display name for status text.
     fn load_bytes(&mut self, bytes: &[u8], key: &str, source: &str) {
-        let sdats = Sdat::load_all(bytes);
-        if sdats.is_empty() {
-            self.status = format!("No SDAT found in {source}.");
+        let archives = SoundData::load_all(bytes);
+        if archives.is_empty() {
+            self.status = format!("No songs found in {source} (not an SDAT, NDS, or GBA ROM).");
             return;
         }
-        self.sdats = sdats;
+        self.archives = archives;
         self.songs.clear();
-        for (i, sdat) in self.sdats.iter().enumerate() {
-            for &id in &sdat.sseq_list {
-                let name = sdat
-                    .sseq_id_to_name
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("SSEQ {id}"));
+        for (i, data) in self.archives.iter().enumerate() {
+            for id in data.song_ids() {
+                let name = data.song_name(id).unwrap_or_else(|| format!("Song {id}"));
                 self.songs.push(Song {
-                    sdat_index: i,
-                    sseq_id: id,
+                    archive_index: i,
+                    song_id: id,
                     label: format!("{name} (#{id})"),
                 });
             }
@@ -426,7 +416,7 @@ impl OptimeApp {
         // A track was waiting for this source (playlist jump / session restore).
         if let Some(t) = self.pending_play.take() {
             if t.source == self.current_source {
-                if let Some(i) = self.songs.iter().position(|s| s.sseq_id == t.sseq_id) {
+                if let Some(i) = self.songs.iter().position(|s| s.song_id == t.sseq_id) {
                     self.play_song_keep_queue(i);
                     if std::mem::take(&mut self.resume_paused) {
                         self.paused = true;
@@ -450,8 +440,8 @@ impl OptimeApp {
         let Some(song) = self.songs.get(index) else {
             return;
         };
-        let sdat = &self.sdats[song.sdat_index];
-        match Controller::new(self.sample_rate, sdat, song.sseq_id) {
+        let data = &self.archives[song.archive_index];
+        match SynthController::new(self.sample_rate, data, song.song_id) {
             Some(controller) => {
                 self.current_song = Some(index);
                 self.paused = false;
@@ -461,7 +451,7 @@ impl OptimeApp {
                 }
                 self.piano_roll.clear();
                 // Parallel look-ahead runner; we drive it forward ourselves each frame.
-                self.look_ahead = FsVisController::new(sdat, song.sseq_id, 0);
+                self.look_ahead = FsVisController::new(data, song.song_id);
                 self.status = format!("Playing: {}", song.label);
                 if let Some(audio) = &self.audio {
                     if let Ok(mut st) = audio.shared.lock() {
@@ -480,7 +470,7 @@ impl OptimeApp {
 
         #[cfg(target_arch = "wasm32")]
         if let Some(track_ref) = self.current_track_ref() {
-            update_query_string(track_ref);
+            let _ = update_query_string(track_ref);
         }
     }
 
@@ -557,10 +547,10 @@ impl OptimeApp {
     /// roll pre-filled with that song's opening notes via its own look-ahead runner.
     fn build_swipe_preview(&mut self, delta: isize) -> Option<SwipePreview> {
         let target = self.step_target(delta)?;
-        // Resolve the target to an SDAT + SSEQ within the currently loaded archive (a queue
+        // Resolve the target to an archive + song within the currently loaded source (a queue
         // track from another source previews as an empty roll).
         let resolved = match target {
-            StepTarget::List(i) => self.songs.get(i).map(|s| (s.sdat_index, s.sseq_id)),
+            StepTarget::List(i) => self.songs.get(i).map(|s| (s.archive_index, s.song_id)),
             StepTarget::Queue(pos) => self
                 .queue
                 .as_ref()
@@ -569,18 +559,16 @@ impl OptimeApp {
                 .and_then(|t| {
                     self.songs
                         .iter()
-                        .find(|s| s.sseq_id == t.sseq_id)
-                        .map(|s| (s.sdat_index, s.sseq_id))
+                        .find(|s| s.song_id == t.sseq_id)
+                        .map(|s| (s.archive_index, s.song_id))
                 }),
         };
         let mut roll = PianoRoll::default();
-        let look = resolved.and_then(|(sdat_index, sseq_id)| {
-            let mut look = FsVisController::new(&self.sdats[sdat_index], sseq_id, 0)?;
+        let look = resolved.and_then(|(archive_index, song_id)| {
+            let mut look = FsVisController::new(&self.archives[archive_index], song_id)?;
             // Pre-buffer the opening notes (bounded like the live look-ahead drive).
             let mut guard = 0u32;
-            while look.sequence.ticks_elapsed < crate::piano_roll::RUN_AHEAD_TICKS
-                && guard < 200_000
-            {
+            while look.steps_elapsed() < crate::piano_roll::RUN_AHEAD_TICKS && guard < 200_000 {
                 look.tick();
                 guard += 1;
             }
@@ -599,7 +587,7 @@ impl OptimeApp {
     /// sources are auto-fetched; user files must be re-opened manually).
     fn play_ref(&mut self, t: TrackRef) {
         if t.source == self.current_source {
-            if let Some(i) = self.songs.iter().position(|s| s.sseq_id == t.sseq_id) {
+            if let Some(i) = self.songs.iter().position(|s| s.song_id == t.sseq_id) {
                 self.play_song_keep_queue(i);
             } else {
                 self.status = format!("Track not found in current archive: {}", t.label);
@@ -656,7 +644,7 @@ impl OptimeApp {
         {
             std::thread::spawn(move || {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("DS sound", &["nds", "sdat"])
+                    .add_filter("DS / GBA sound", &["nds", "sdat", "gba"])
                     .pick_file()
                 {
                     let key = path
@@ -675,7 +663,7 @@ impl OptimeApp {
         {
             wasm_bindgen_futures::spawn_local(async move {
                 if let Some(handle) = rfd::AsyncFileDialog::new()
-                    .add_filter("DS sound", &["nds", "sdat"])
+                    .add_filter("DS / GBA sound", &["nds", "sdat", "gba"])
                     .pick_file()
                     .await
                 {
@@ -705,8 +693,8 @@ impl OptimeApp {
             return;
         };
         let song = &self.songs[i];
-        let sdat = &self.sdats[song.sdat_index];
-        let samples = player::render_to_samples(sdat, song.sseq_id, &self.config());
+        let data = &self.archives[song.archive_index];
+        let samples = player::render_to_samples(data, song.song_id, &self.config());
         let wav = crate::wav::encode_stereo_i16(&samples, player::EXPORT_SAMPLE_RATE);
         let name = song.label.replace([' ', '#', '(', ')', '/'], "_");
         save_bytes(&format!("{name}.wav"), &wav);
@@ -762,9 +750,9 @@ impl OptimeApp {
 
         if let Some(controller) = &mut st.controller {
             snap.active = true;
-            snap.active_track = controller.active_keyboard_track_num;
-            snap.ticks = controller.sequence.ticks_elapsed;
-            snap.bpm = controller.sequence.tracks[0].bpm;
+            snap.active_track = controller.keyboard_track();
+            snap.steps = controller.steps_elapsed();
+            snap.step_rate = controller.step_rate();
             for t in 0..TRACK_COUNT {
                 for n in 0..128 {
                     snap.notes_on[t][n] = controller.notes_on[t][n] != 0;
@@ -776,15 +764,13 @@ impl OptimeApp {
         (snap, advance)
     }
 
-    /// The full song list with like / add-to-playlist menus, status badges, and (on mobile,
-    /// `swipeable`) iOS-style swipe gestures: swipe right to favorite, swipe left to pick a
-    /// playlist. Returns `true` if a song was started.
-    fn song_list_ui(&mut self, ui: &mut egui::Ui, swipeable: bool) -> bool {
+    /// The full song list with like / add-to-playlist menus and status badges.
+    /// Returns `true` if a song was started.
+    fn song_list_ui(&mut self, ui: &mut egui::Ui) -> bool {
         enum Action {
             Play(usize),
             Like(usize),
             Add(usize, usize),
-            PickPlaylist(usize),
         }
         let mut action = None;
         // The Like / Add-to-playlist menu body, shared between the per-row `…` button (works
@@ -812,19 +798,11 @@ impl OptimeApp {
             });
         };
         ui.spacing_mut().item_spacing.y = 0.0;
-        let pointer = ui.input(|i| {
-            (
-                i.pointer.primary_down(),
-                i.pointer.primary_pressed(),
-                i.pointer.primary_released(),
-                i.pointer.latest_pos(),
-            )
-        });
         for (i, song) in self.songs.iter().enumerate() {
             let selected = self.current_song == Some(i);
             let track = TrackRef {
                 source: self.current_source.clone(),
-                sseq_id: song.sseq_id,
+                sseq_id: song.song_id,
                 label: String::new(),
             };
             let liked = self.library.is_liked(&track);
@@ -886,7 +864,6 @@ impl OptimeApp {
                 }
             }
             Some(Action::Add(i, p)) => self.add_song_to_playlist(i, p),
-            Some(Action::PickPlaylist(i)) => self.playlist_picker = Some(i),
             None => {}
         }
         false
@@ -903,69 +880,6 @@ impl OptimeApp {
         } else {
             self.status = format!("Added to {}.", pl.name);
             pl.tracks.push(t);
-        }
-    }
-
-    /// The centered "Add to playlist" sheet opened by a left swipe on a song row.
-    fn playlist_picker_ui(&mut self, ctx: &egui::Context) {
-        let Some(i) = self.playlist_picker else {
-            return;
-        };
-        let title = self
-            .songs
-            .get(i)
-            .map(|s| s.label.clone())
-            .unwrap_or_default();
-        let mut close = false;
-        egui::Window::new("Add to playlist")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(
-                    egui::RichText::new(title)
-                        .size(13.0)
-                        .color(crate::theme::TEXT_DIM),
-                );
-                ui.add_space(6.0);
-                if self.library.playlists.is_empty() {
-                    ui.label("No playlists yet — create one in Playlists.");
-                }
-                let names: Vec<String> = self
-                    .library
-                    .playlists
-                    .iter()
-                    .map(|pl| pl.name.clone())
-                    .collect();
-                for (p, name) in names.iter().enumerate() {
-                    if crate::theme::ios_row(
-                        ui,
-                        ui.available_width().max(220.0),
-                        Some("🎵"),
-                        name,
-                        &[],
-                        false,
-                        false,
-                    )
-                    .clicked()
-                    {
-                        self.add_song_to_playlist(i, p);
-                        close = true;
-                    }
-                }
-                ui.add_space(8.0);
-                if ui
-                    .add_sized(
-                        egui::vec2(ui.available_width().max(220.0), 32.0),
-                        egui::Button::new("Cancel"),
-                    )
-                    .clicked()
-                {
-                    close = true;
-                }
-            });
-        if close {
-            self.playlist_picker = None;
         }
     }
 
@@ -1378,9 +1292,6 @@ impl OptimeApp {
                 });
             }
         }
-
-        // The swipe-left "Add to playlist" sheet, shown over whichever screen is active.
-        self.playlist_picker_ui(ctx);
     }
 
     /// The Spotify-style floating mini-player: animated EQ bars, song title, and transport;
@@ -1671,7 +1582,7 @@ impl OptimeApp {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Library");
                 ui.add_space(6.0);
-                if ui.button("📂 Open ROM / SDAT…").clicked() {
+                if ui.button("📂 Open ROM / SDAT / GBA…").clicked() {
                     self.open_file_dialog();
                 }
                 crate::theme::section_header(ui, "Demo archives");
@@ -1695,7 +1606,7 @@ impl OptimeApp {
                     }
                 }
                 crate::theme::section_header(ui, "All songs");
-                self.song_list_ui(ui, true);
+                self.song_list_ui(ui);
             });
         });
     }
@@ -1738,11 +1649,11 @@ impl eframe::App for OptimeApp {
         let dt = ctx.input(|i| i.stable_dt) as f64;
         self.piano_roll.advance(&snap, dt, playing);
         if let Some(look) = &mut self.look_ahead {
-            let target = self.piano_roll.display_tick().ceil() as u32
-                + crate::piano_roll::RUN_AHEAD_TICKS;
+            let target =
+                self.piano_roll.display_tick().ceil() as u32 + crate::piano_roll::RUN_AHEAD_TICKS;
             // Bounded catch-up so a stalled/zero-BPM sequence can't spin forever.
             let mut guard = 0u32;
-            while look.sequence.ticks_elapsed < target && guard < 200_000 {
+            while look.steps_elapsed() < target && guard < 200_000 {
                 look.tick();
                 guard += 1;
             }
@@ -1779,7 +1690,7 @@ impl eframe::App for OptimeApp {
                 ui.heading("Optime Player");
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Open ROM / SDAT…").clicked() {
+                    if ui.button("Open ROM / SDAT / GBA…").clicked() {
                         self.open_file_dialog();
                     }
                 });
@@ -1803,7 +1714,7 @@ impl eframe::App for OptimeApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
-                        self.song_list_ui(ui, false);
+                        self.song_list_ui(ui);
                     });
             });
 
@@ -1918,7 +1829,7 @@ impl eframe::App for OptimeApp {
                             if let Some(audio) = &self.audio {
                                 if let Ok(mut st) = audio.shared.lock() {
                                     if let Some(c) = &mut st.controller {
-                                        c.active_keyboard_track_num = active_track;
+                                        c.set_keyboard_track(active_track);
                                     }
                                 }
                             }
@@ -2003,11 +1914,11 @@ fn save_bytes(filename: &str, bytes: &[u8]) {
 /// Maps held computer-keyboard keys to live notes on the controller's active keyboard track.
 fn handle_keyboard(
     ctx: &egui::Context,
-    controller: &mut Controller,
+    controller: &mut SynthController,
     config: &SynthConfig,
     held_notes: &mut [bool; 128],
 ) {
-    let Some(track) = controller.active_keyboard_track_num else {
+    let Some(track) = controller.keyboard_track() else {
         return;
     };
     ctx.input(|i| {
@@ -2029,7 +1940,7 @@ fn handle_keyboard(
                         controller.play_keyboard_note(track, note, 127, 2000, config);
                     } else if !*pressed && held_notes[n] {
                         held_notes[n] = false;
-                        controller.release_keyboard_note(track, note);
+                        controller.release_keyboard_note(track, note, config);
                     }
                 }
             }

@@ -1,7 +1,7 @@
 //! Channel-volume math: the decibel-domain attenuation chain pokediamond runs in
 //! `SND_ExChannelMain` + `SND_CalcChannelVolume`.
 
-use crate::tables::{DECIBEL_SQUARE_TABLE, GET_VOL_TABLE};
+use super::tables::{DECIBEL_SQUARE_TABLE, GET_VOL_TABLE};
 
 /// Decibel-square-table lookup for a 0..127 volume/expression/velocity level (clamped).
 #[inline]

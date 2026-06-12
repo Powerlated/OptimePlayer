@@ -1,6 +1,6 @@
 //! Decoded audio samples and the PCM8/PCM16/IMA-ADPCM/WAV decoders.
 
-use crate::tables::{ADPCM_INDEX_TABLE, ADPCM_STEP_TABLE};
+use crate::devices::nintendo_ds::tables::{ADPCM_INDEX_TABLE, ADPCM_STEP_TABLE};
 use crate::util::{read_u16, read_u32, read_u8};
 
 /// How a sample is interpolated during pitch-shifting / resampling.

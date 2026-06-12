@@ -18,10 +18,11 @@ pub struct VisSnapshot {
     pub notes_kbd: [[bool; 128]; TRACK_COUNT],
     /// The track receiving live keyboard input, if any.
     pub active_track: Option<usize>,
-    /// The sequence's elapsed-tick counter (drives the piano-roll playhead).
-    pub ticks: u32,
-    /// Current tempo (track 0 BPM), for the piano roll's smoothed scroll clock.
-    pub bpm: u32,
+    /// Sequencer steps elapsed (drives the piano-roll playhead).
+    pub steps: u32,
+    /// Current sequencer step rate in steps/second (tempo-dependent), for the piano roll's
+    /// smoothed scroll clock.
+    pub step_rate: f64,
 }
 
 impl Default for VisSnapshot {
@@ -31,8 +32,8 @@ impl Default for VisSnapshot {
             notes_on: [[false; 128]; TRACK_COUNT],
             notes_kbd: [[false; 128]; TRACK_COUNT],
             active_track: None,
-            ticks: 0,
-            bpm: 0,
+            steps: 0,
+            step_rate: 0.0,
         }
     }
 }

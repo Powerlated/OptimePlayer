@@ -1,6 +1,6 @@
 //! Instrument banks (SBNK): per-program records, sample regions, and ADSR coefficient math.
 
-use crate::tables::{ATTACK_COEFF_TABLE, DECIBEL_SQUARE_TABLE};
+use super::tables::{ATTACK_COEFF_TABLE, DECIBEL_SQUARE_TABLE};
 
 /// The kind of an instrument record (its `fRecord` byte).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

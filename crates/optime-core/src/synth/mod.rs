@@ -21,8 +21,8 @@ pub use synthesizer::SampleSynthesizer;
 pub const CROSSOVER_Q: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
 /// Maximum block length (in output samples) accepted by [`SampleSynthesizer::render_block`] and
-/// [`Controller::fill`]'s internal blocking. Sized to cover one full sequencer tick at common
+/// [`SynthController::fill`]'s internal blocking. Sized to cover one full sequencer tick at common
 /// output rates (≈251 samples at 48 kHz) so a block rarely splits.
 ///
-/// [`Controller::fill`]: crate::controller::Controller::fill
+/// [`SynthController::fill`]: crate::synth_controller::SynthController::fill
 pub const MAX_BLOCK: usize = 256;

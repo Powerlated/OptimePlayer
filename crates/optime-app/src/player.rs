@@ -3,13 +3,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use optime_core::{Controller, Sdat, SynthConfig};
+use optime_core::{SoundData, SynthConfig, SynthController};
 
 /// State the audio callback pulls from and the UI mutates. Guarded by a [`Mutex`] so the two
 /// sides can share it (single-threaded on web, two threads on native).
 pub struct AudioState {
     /// The currently-playing controller, if any.
-    pub controller: Option<Controller>,
+    pub controller: Option<SynthController>,
     /// Live synthesis configuration (tuning, stereo, track enables).
     pub config: SynthConfig,
     /// When set, the callback emits silence but keeps the controller intact.
@@ -62,14 +62,14 @@ pub fn new_shared() -> Shared {
 /// The sample rate used for offline WAV rendering (the legacy renderer's fixed rate).
 pub const EXPORT_SAMPLE_RATE: u32 = 32768;
 
-/// Renders an SSEQ to interleaved stereo samples offline, looping twice then fading out, exactly
+/// Renders a song to interleaved stereo samples offline, looping twice then fading out, exactly
 /// like the legacy `renderAndDownloadSeq`.
-pub fn render_to_samples(sdat: &Sdat, sseq_id: u32, config: &SynthConfig) -> Vec<(f32, f32)> {
+pub fn render_to_samples(data: &SoundData, song_id: u32, config: &SynthConfig) -> Vec<(f32, f32)> {
     const FADEOUT_LENGTH: f64 = 10.0;
     const LOOP_COUNT: u32 = 2;
     let sr = EXPORT_SAMPLE_RATE as f64;
 
-    let Some(mut controller) = Controller::new(sr, sdat, sseq_id) else {
+    let Some(mut controller) = SynthController::new(sr, data, song_id) else {
         return Vec::new();
     };
 

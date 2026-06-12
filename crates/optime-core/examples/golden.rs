@@ -6,7 +6,7 @@
 //! Run with `cargo run -p optime-core --example golden` (add `--no-default-features` to capture a
 //! baseline for the scalar gather; the SIMD and scalar builds hash differently by design).
 
-use optime_core::{Controller, ResampleMode, Sdat, SynthConfig, TuningSystem};
+use optime_core::{ResampleMode, SoundData, SynthConfig, SynthController, TuningSystem};
 
 const SAMPLE_RATE: f64 = 32768.0;
 const FRAMES: usize = 32768 * 4; // ~4 seconds of stereo audio per config.
@@ -18,10 +18,10 @@ fn fnv1a(hash: &mut u64, bytes: &[u8]) {
     }
 }
 
-/// Renders `FRAMES` stereo frames of sequence 0 from `sdat` under `config`, folding every output
+/// Renders `FRAMES` stereo frames of song 0 from `data` under `config`, folding every output
 /// f32's raw bits into `hash`.
-fn render_into(hash: &mut u64, sdat: &Sdat, config: &SynthConfig) {
-    let Some(mut ctrl) = Controller::new(SAMPLE_RATE, sdat, 0) else {
+fn render_into(hash: &mut u64, data: &SoundData, config: &SynthConfig) {
+    let Some(mut ctrl) = SynthController::new(SAMPLE_RATE, data, 0) else {
         fnv1a(hash, b"<no-controller>");
         return;
     };
@@ -67,12 +67,12 @@ fn main() {
 
     for path in demos {
         let bytes = std::fs::read(&path).expect("read demo");
-        let sdats = Sdat::load_all(&bytes);
+        let archives = SoundData::load_all(&bytes);
         let name = path.file_name().unwrap().to_string_lossy();
         for (cfg_name, cfg) in configs() {
             let mut hash = 0xcbf2_9ce4_8422_2325u64;
-            for sdat in &sdats {
-                render_into(&mut hash, sdat, &cfg);
+            for data in &archives {
+                render_into(&mut hash, data, &cfg);
             }
             println!("{name:32} {cfg_name:14} {hash:016x}");
         }

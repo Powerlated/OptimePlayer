@@ -1,7 +1,7 @@
 //! The per-note LFO: a faithful port of pokediamond's `SND_GetLfoValue` + `SND_UpdateLfo`,
 //! including the DS fixed-point math.
 
-use crate::tables::snd_sin_idx;
+use super::tables::snd_sin_idx;
 
 /// LFO waveform target.
 pub(super) mod lfo_type {

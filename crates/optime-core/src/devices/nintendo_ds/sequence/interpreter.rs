@@ -1,8 +1,8 @@
 //! The SSEQ bytecode interpreter: one command step per call, plus the control-command
 //! (`0xC0`/`0xD0`), variable/arithmetic (`0xB0`), and loop-end handlers.
 
+use super::MessageType;
 use super::{Sequence, ValType};
-use crate::sequence::MessageType;
 use crate::TRACK_COUNT;
 
 impl Sequence {
@@ -13,8 +13,7 @@ impl Sequence {
     pub fn execute_track(&mut self, idx: usize) {
         let mut opcode = self.read_pc_inc(idx, 1) as u8;
         #[cfg(test)]
-        crate::sequence::OPCODE_SEEN[opcode as usize]
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        super::OPCODE_SEEN[opcode as usize].store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Prefix bytes (pokediamond order: conditional, then random, then variable).
         let mut run_cmd = true;

@@ -1,23 +1,23 @@
-//! The block renderer (`Controller::fill`) must be bit-identical to the per-sample path
-//! (`Controller::next_sample` in a loop): same clock evolution, same voice math, same mixing
+//! The block renderer (`SynthController::fill`) must be bit-identical to the per-sample path
+//! (`SynthController::next_sample` in a loop): same clock evolution, same voice math, same mixing
 //! order. Rendered against a real demo SDAT so the full engine (sequencer, ADSR/LFO ticks,
 //! looping samples, stereo stage) is exercised.
 
 use std::path::PathBuf;
 
-use optime_core::{Controller, ResampleMode, Sdat, SynthConfig};
+use optime_core::{ResampleMode, SoundData, SynthConfig, SynthController};
 
-fn load_demo() -> Sdat {
+fn load_demo() -> SoundData {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../demos/super-mario-64-ds.sdat");
     let bytes = std::fs::read(path).expect("demo file should exist");
-    Sdat::load_all(&bytes).remove(0)
+    SoundData::load_all(&bytes).remove(0)
 }
 
 fn assert_fill_matches_next_sample(config: &SynthConfig, label: &str) {
-    let sdat = load_demo();
+    let data = load_demo();
     let sr = 32768.0;
-    let mut per_sample = Controller::new(sr, &sdat, 0).expect("SSEQ 0");
-    let mut blocked = Controller::new(sr, &sdat, 0).expect("SSEQ 0");
+    let mut per_sample = SynthController::new(sr, &data, 0).expect("SSEQ 0");
+    let mut blocked = SynthController::new(sr, &data, 0).expect("SSEQ 0");
 
     // Uneven chunk sizes so blocks split at chunk boundaries as well as tick boundaries,
     // including a chunk with an odd f32 count (a trailing half frame).

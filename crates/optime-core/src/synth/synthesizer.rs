@@ -6,10 +6,11 @@ use std::sync::Arc;
 use super::delay::DelayLine;
 use super::instrument::SampleInstrument;
 use super::{CROSSOVER_Q, MAX_BLOCK};
-use crate::controller::SynthConfig;
+use crate::devices::VoicePitch;
 use crate::dsp::BiquadFilter;
 use crate::resample::ResampleTables;
 use crate::sample::{ResampleMode, Sample};
+use crate::synth_controller::SynthConfig;
 use crate::tuning::TuningSystem;
 
 /// A polyphonic synthesizer for one sequence track. Holds a fixed pool of voices and mixes the
@@ -93,14 +94,12 @@ impl SampleSynthesizer {
         &mut self.instrs[index]
     }
 
-    /// Starts `sample` on the next round-robin voice and returns its index.
+    /// Starts `sample` at `pitch` on the next round-robin voice and returns its index.
     pub fn play(
         &mut self,
         sample: Arc<Sample>,
-        midi_note: f64,
-        sample_frequency: f64,
+        pitch: VoicePitch,
         volume: f64,
-        meta: u32,
         tuning: TuningSystem,
     ) -> usize {
         let index = self.playing_index;
@@ -111,12 +110,10 @@ impl SampleSynthesizer {
         {
             let instr = &mut self.instrs[index];
             instr.sample = sample;
-            instr.sample_frequency = sample_frequency;
-            instr.set_note(midi_note, tuning);
             instr.set_finetune_lfo(0.0, tuning);
             instr.set_finetune(self.finetune, tuning);
+            instr.set_pitch(pitch, tuning);
             instr.volume = volume;
-            instr.start_time = meta;
             instr.sample_t = 0.0;
             instr.wrapped = false;
             instr.playing = true;
@@ -167,12 +164,12 @@ impl SampleSynthesizer {
     /// Renders `n` samples in one block, adding the track's stereo output into
     /// `acc_l[..n]`/`acc_r[..n]` when `mix` is true. State (voice positions, delay lines,
     /// crossover filters) advances identically either way — `mix: false` matches how
-    /// [`Controller::next_sample`] keeps disabled tracks running without mixing them.
+    /// [`SynthController::next_sample`] keeps disabled tracks running without mixing them.
     ///
     /// Equivalent to `n` calls of [`Self::next_sample`], but voices render the whole block in one
     /// pass (see [`SampleInstrument::advance_block`]). `n` must be at most [`MAX_BLOCK`].
     ///
-    /// [`Controller::next_sample`]: crate::controller::Controller::next_sample
+    /// [`SynthController::next_sample`]: crate::synth_controller::SynthController::next_sample
     pub fn render_block(
         &mut self,
         config: &SynthConfig,
@@ -278,7 +275,15 @@ mod tests {
         let mut synth = SampleSynthesizer::new(sample_rate, 16);
         // DC sample so essentially all energy is in the low (bass) band.
         let sample = Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
-        synth.play(sample, 69.0, 440.0, 1.0, 0, TuningSystem::Equal);
+        synth.play(
+            sample,
+            VoicePitch::Midi {
+                note: 69.0,
+                sample_pitch_hz: 440.0,
+            },
+            1.0,
+            TuningSystem::Equal,
+        );
         // Pan hard left.
         synth.set_pan(0.0, config);
         let mut last = (0.0, 0.0);

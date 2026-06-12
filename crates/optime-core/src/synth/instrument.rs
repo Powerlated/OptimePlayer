@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use super::gather::{gather_sinc, GatherSource};
+use crate::devices::VoicePitch;
 use crate::resample::ResampleTables;
 use crate::sample::{ResampleMode, Sample};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
@@ -14,16 +15,13 @@ pub struct SampleInstrument {
     inv_sample_rate: f64,
     /// The sample this voice is playing.
     pub sample: Arc<Sample>,
-    /// The pitch (Hz) the current sample represents (may differ from `sample.frequency`).
-    pub sample_frequency: f64,
+    /// The voice's base pitch (a MIDI note relative to the sample's pitch, or an absolute
+    /// data rate — see [`VoicePitch`]).
+    pub pitch: VoicePitch,
     /// Current playback gain.
     pub volume: f64,
     /// Whether this voice is sounding.
     pub playing: bool,
-    /// The tick the note started (used to detect voice reuse).
-    pub start_time: u32,
-    /// MIDI note (may be fractional once finetune is applied).
-    pub midi_note: f64,
     /// Fractional sample position.
     pub sample_t: f64,
     /// Whether a looping voice has wrapped past the sample end at least once. Once it has, the
@@ -41,15 +39,16 @@ pub struct SampleInstrument {
 impl SampleInstrument {
     /// Creates an idle voice bound to `sample_rate` playing `sample`.
     pub fn new(sample_rate: f64, sample: Arc<Sample>) -> Self {
-        let sample_frequency = sample.frequency;
+        let pitch = VoicePitch::Midi {
+            note: 0.0,
+            sample_pitch_hz: sample.frequency,
+        };
         Self {
             inv_sample_rate: 1.0 / sample_rate,
             sample,
-            sample_frequency,
+            pitch,
             volume: 1.0,
             playing: false,
-            start_time: 0,
-            midi_note: 0.0,
             sample_t: 0.0,
             wrapped: false,
             finetune: 0.0,
@@ -242,14 +241,21 @@ impl SampleInstrument {
     }
 
     fn recompute_freq(&mut self, tuning: TuningSystem) {
-        self.freq_ratio =
-            midi_note_to_hz(self.midi_note + self.finetune_lfo + self.finetune, tuning)
-                / self.sample_frequency;
+        let tune = self.finetune_lfo + self.finetune;
+        self.freq_ratio = match self.pitch {
+            VoicePitch::Midi {
+                note,
+                sample_pitch_hz,
+            } => midi_note_to_hz(note + tune, tuning) / sample_pitch_hz,
+            // Absolute data rate: the ratio that makes the data step at `hz` samples/second,
+            // with any (rare) detune applied as an equal-tempered factor.
+            VoicePitch::DataRateHz(hz) => hz / self.sample.sample_rate * (tune / 12.0).exp2(),
+        };
     }
 
-    /// Sets the base MIDI note.
-    pub fn set_note(&mut self, midi_note: f64, tuning: TuningSystem) {
-        self.midi_note = midi_note;
+    /// Sets the voice's base pitch.
+    pub fn set_pitch(&mut self, pitch: VoicePitch, tuning: TuningSystem) {
+        self.pitch = pitch;
         self.recompute_freq(tuning);
     }
 
@@ -303,8 +309,14 @@ mod tests {
         n: usize,
     ) -> Vec<f64> {
         let mut instr = SampleInstrument::new(out_rate, sample);
-        instr.sample_frequency = 440.0;
-        instr.set_note(69.0, TuningSystem::Equal); // 440 Hz ⇒ freq_ratio = 1
+        // 440 Hz over a 440 Hz sample pitch ⇒ freq_ratio = 1
+        instr.set_pitch(
+            VoicePitch::Midi {
+                note: 69.0,
+                sample_pitch_hz: 440.0,
+            },
+            TuningSystem::Equal,
+        );
         instr.volume = 1.0;
         instr.playing = true;
         (0..n)
