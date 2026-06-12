@@ -225,6 +225,10 @@ pub(crate) struct Mp2kSequencer {
     mem_acc: [u8; 16],
     /// Sequencer steps executed (the note timeline).
     pub steps: u32,
+    /// The first track that took a loop `GOTO` — the song's single loop reporter, so one
+    /// musical repeat emits exactly one [`Mp2kOp::Looped`] (every track jumps individually,
+    /// and usually in different frames).
+    loop_track: Option<usize>,
     finished: bool,
     finish_reported: bool,
 }
@@ -248,6 +252,7 @@ impl Mp2kSequencer {
             tempo_c: 0,
             mem_acc: [0; 16],
             steps: 0,
+            loop_track: None,
             finished: false,
             finish_reported: false,
         }
@@ -322,16 +327,24 @@ impl Mp2kSequencer {
     }
 
     /// Reads the 4-byte ROM pointer at the track's PC and jumps there (`ply_goto`).
-    /// Emits [`Mp2kOp::Looped`] for backward jumps — MP2K songs loop with a backward `GOTO`.
-    fn goto(&mut self, t: usize, ops: &mut Vec<Mp2kOp>) {
-        let track = &mut self.tracks[t];
-        let target = read_u32(&self.rom, track.cmd_ptr);
+    ///
+    /// `loop_point` marks jumps that signify the song repeating: a plain backward `GOTO` (how
+    /// MP2K songs loop) emits [`Mp2kOp::Looped`]. Pattern calls (`PATT`), counted repeats, and
+    /// `MEMACC` conditionals reuse this jump but are ordinary control flow, not loops.
+    fn goto(&mut self, t: usize, ops: &mut Vec<Mp2kOp>, loop_point: bool) {
+        let target = read_u32(&self.rom, self.tracks[t].cmd_ptr);
         match ptr_to_offset(target, self.rom.len()) {
             Some(offset) => {
-                if offset < track.cmd_ptr {
-                    ops.push(Mp2kOp::Looped);
+                if loop_point && offset < self.tracks[t].cmd_ptr {
+                    // One reporter per song: the first track to loop speaks for all of them.
+                    if self.loop_track.is_none() {
+                        self.loop_track = Some(t);
+                    }
+                    if self.loop_track == Some(t) {
+                        ops.push(Mp2kOp::Looped);
+                    }
                 }
-                track.cmd_ptr = offset;
+                self.tracks[t].cmd_ptr = offset;
             }
             None => self.fine(t, ops),
         }
@@ -410,7 +423,7 @@ impl Mp2kSequencer {
     /// The `0xB1..=0xCE` control commands (`gMPlayJumpTable`, with the `MPlayExtender` patches).
     fn control_command(&mut self, cmd: u8, t: usize, ops: &mut Vec<Mp2kOp>) {
         match cmd {
-            0xB2 => self.goto(t, ops), // GOTO
+            0xB2 => self.goto(t, ops, true), // GOTO: the song's loop point
             0xB3 => {
                 // PATT: call a pattern.
                 let level = self.tracks[t].pattern_level as usize;
@@ -419,7 +432,7 @@ impl Mp2kSequencer {
                 } else {
                     self.tracks[t].pattern_stack[level] = self.tracks[t].cmd_ptr + 4;
                     self.tracks[t].pattern_level += 1;
-                    self.goto(t, ops);
+                    self.goto(t, ops, false);
                 }
             }
             0xB4 => {
@@ -434,14 +447,15 @@ impl Mp2kSequencer {
                 // REPT: repeat a section `count` times (0 = forever).
                 let count = self.read8(self.tracks[t].cmd_ptr);
                 if count == 0 {
+                    // REPT 0: repeat forever — this is the song looping.
                     self.tracks[t].cmd_ptr += 1;
-                    self.goto(t, ops);
+                    self.goto(t, ops, true);
                 } else {
                     self.tracks[t].rep_n = self.tracks[t].rep_n.wrapping_add(1);
                     let rep_n = self.tracks[t].rep_n;
                     self.tracks[t].cmd_ptr += 1;
                     if rep_n < count {
-                        self.goto(t, ops);
+                        self.goto(t, ops, false);
                     } else {
                         self.tracks[t].rep_n = 0;
                         self.tracks[t].cmd_ptr += 4;
@@ -569,7 +583,7 @@ impl Mp2kSequencer {
             _ => return,
         };
         if cond {
-            self.goto(t, ops);
+            self.goto(t, ops, false);
         } else {
             self.tracks[t].cmd_ptr += 4;
         }
@@ -617,5 +631,75 @@ impl Mp2kSequencer {
                 self.tracks[t].exists = false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a two-track ROM where each track calls a backward pattern (`PATT`/`PEND`) every
+    /// iteration and loops with a backward `GOTO`:
+    ///
+    /// ```text
+    /// 0x100: pattern   = VOL 100, PEND
+    /// 0x200: track A   = PATT->0x100, W24, GOTO->0x200
+    /// 0x300: track B   = PATT->0x100, W24, GOTO->0x300
+    /// 0x400: header    = { 2 tracks, voicegroup 0x500, parts A, B }
+    /// ```
+    fn looping_song() -> (Arc<[u8]>, SongHeader) {
+        const PATTERN: usize = 0x100;
+        const TRACK_A: usize = 0x200;
+        const TRACK_B: usize = 0x300;
+        const HEADER: usize = 0x400;
+
+        let mut rom = vec![0u8; 0x600];
+        let ptr = |offset: usize| (0x0800_0000 + offset as u32).to_le_bytes();
+
+        rom[PATTERN..PATTERN + 3].copy_from_slice(&[0xBE, 100, 0xB4]); // VOL, PEND
+
+        for track in [TRACK_A, TRACK_B] {
+            rom[track] = 0xB3; // PATT
+            rom[track + 1..track + 5].copy_from_slice(&ptr(PATTERN));
+            rom[track + 5] = 0x98; // W24
+            rom[track + 6] = 0xB2; // GOTO (the loop point)
+            rom[track + 7..track + 11].copy_from_slice(&ptr(track));
+        }
+
+        rom[HEADER] = 2;
+        rom[HEADER + 4..HEADER + 8].copy_from_slice(&ptr(0x500));
+        rom[HEADER + 8..HEADER + 12].copy_from_slice(&ptr(TRACK_A));
+        rom[HEADER + 12..HEADER + 16].copy_from_slice(&ptr(TRACK_B));
+
+        let header = SongHeader {
+            offset: HEADER,
+            track_count: 2,
+            priority: 0,
+            voicegroup: 0x500,
+        };
+        (Arc::from(rom), header)
+    }
+
+    /// Pattern calls jump backward every iteration but must not count as song loops; only the
+    /// loop `GOTO` does, and only one track reports it (here: once per 24-step iteration).
+    #[test]
+    fn only_the_loop_goto_reports_a_loop_and_only_once() {
+        let (rom, header) = looping_song();
+        let mut seq = Mp2kSequencer::new(rom, &header);
+        let mut ops = Vec::new();
+
+        let mut loops_seen = Vec::new();
+        for frame in 0..100u32 {
+            ops.clear();
+            seq.tick_frame(&mut ops);
+            for op in &ops {
+                if matches!(op, Mp2kOp::Looped) {
+                    loops_seen.push(frame);
+                }
+            }
+        }
+        // Each iteration is W24 (the first frame runs PATT/VOL/PEND/W24, then GOTO fires when
+        // the wait expires): loops at frames 24, 48, 72, 96 — and one report per loop, not two.
+        assert_eq!(loops_seen, vec![24, 48, 72, 96]);
     }
 }
