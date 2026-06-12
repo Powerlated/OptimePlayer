@@ -145,14 +145,13 @@ impl PianoRoll {
         self.draw_lanes(&painter, roll, lane_h);
         self.draw_grid(&painter, roll, &xt);
 
-        // Which pitches are currently under the cursor (for key lighting + lane glow).
+        // Which pitches are currently under the cursor (for key lighting).
         let mut lit: [Option<usize>; 128] = [None; 128];
         for n in &self.notes {
             if n.start <= self.display_tick && self.display_tick <= n.end {
                 lit[n.pitch as usize] = Some(n.track);
             }
         }
-        self.draw_playing_lanes(&painter, roll, lane_h, cursor_x, &lit, dim);
         self.draw_notes(&painter, roll, lane_h, cursor_x, &xt, dim);
         self.draw_cursor(&painter, roll, cursor_x);
         self.draw_keyboard(&painter, rect, roll, lane_h, &lit, dim);
@@ -202,26 +201,7 @@ impl PianoRoll {
         }
     }
 
-    /// Faint full-lane glow from keyboard to cursor for pitches currently sounding.
-    fn draw_playing_lanes(
-        &self,
-        painter: &egui::Painter,
-        roll: Rect,
-        lane_h: f32,
-        cursor_x: f32,
-        lit: &[Option<usize>; 128],
-        dim: f32,
-    ) {
-        for midi in MIDI_LO..=MIDI_HI {
-            if let Some(track) = lit[midi as usize] {
-                let (top, bot) = Self::lane_y(roll, lane_h, midi);
-                let r = Rect::from_min_max(Pos2::new(roll.min.x, top), Pos2::new(cursor_x, bot));
-                painter.rect_filled(r, 0.0, scale_alpha(track_color(track), 0.12 * dim));
-            }
-        }
-    }
-
-    /// The note bars, with layered glow and a flare while crossing the cursor.
+    /// The note bars: flat rounded capsules, brightening while they cross the cursor.
     fn draw_notes(
         &self,
         painter: &egui::Painter,
@@ -244,73 +224,54 @@ impl PianoRoll {
             }
 
             let (top, bot) = Self::lane_y(roll, lane_h, n.pitch);
-            let pad = (lane_h * 0.12).clamp(0.5, 2.0);
+            let pad = (lane_h * 0.14).clamp(0.5, 2.0);
             let bar = Rect::from_min_max(Pos2::new(x0, top + pad), Pos2::new(x1, bot - pad));
 
             let playing = n.start <= self.display_tick && self.display_tick <= n.end;
             let base = track_color(n.track);
             // Upcoming notes (fully right of the cursor) are slightly dimmer.
-            let a = if x_start > cursor_x { 0.7 } else { 1.0 } * dim;
-            let rounding = (bar.height() * 0.4).min(4.0);
+            let a = if x_start > cursor_x { 0.6 } else { 1.0 } * dim;
+            let rounding = (bar.height() * 0.35).min(3.0);
 
-            // Glow halos.
-            painter.rect_filled(
-                bar.expand(lane_h * 0.4),
-                rounding + 3.0,
-                scale_alpha(base, 0.10 * a),
-            );
-            painter.rect_filled(
-                bar.expand(lane_h * 0.16),
-                rounding + 2.0,
-                scale_alpha(base, 0.22 * a),
-            );
-
-            // Core bar.
-            let core = if playing { lighten(base, 0.35) } else { base };
+            // Flat, clean capsule; gently brighter while sounding.
+            let core = if playing { lighten(base, 0.25) } else { base };
             painter.rect_filled(bar, rounding, scale_alpha(core, a));
-            // Glossy top highlight.
-            painter.rect_filled(
-                Rect::from_min_max(
-                    bar.min,
-                    Pos2::new(bar.max.x, bar.min.y + bar.height() * 0.4),
-                ),
-                rounding,
-                scale_alpha(lighten(core, 0.6), 0.5 * a),
-            );
-
-            // Bright flare at the cursor crossing.
             if playing {
-                let fx = cursor_x.clamp(x0, x1);
-                let flare = Rect::from_min_max(
-                    Pos2::new((fx - 2.0).max(x0), top + pad),
-                    Pos2::new((fx + 2.0).min(x1), bot - pad),
+                painter.rect_stroke(
+                    bar,
+                    rounding,
+                    Stroke::new(1.0_f32, scale_alpha(Color32::WHITE, 0.35 * dim)),
                 );
-                painter.rect_filled(flare, 0.0, scale_alpha(Color32::WHITE, 0.85 * dim));
             }
         }
     }
 
-    /// The stationary playhead cursor with a soft glow.
+    /// The stationary playhead: a single hairline.
     fn draw_cursor(&self, painter: &egui::Painter, roll: Rect, cursor_x: f32) {
-        let glow = Rect::from_min_max(
-            Pos2::new(cursor_x - 3.0, roll.min.y),
-            Pos2::new(cursor_x + 3.0, roll.max.y),
-        );
-        painter.rect_filled(
-            glow,
-            0.0,
-            Color32::from_rgba_unmultiplied(0x6c, 0x7a, 0xff, 40),
-        );
         painter.line_segment(
             [
                 Pos2::new(cursor_x, roll.min.y),
                 Pos2::new(cursor_x, roll.max.y),
             ],
-            Stroke::new(1.5_f32, Color32::from_rgb(0x9a, 0xa6, 0xff)),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 70)),
         );
     }
 
-    /// The vertical keyboard down the left edge, lit per the cursor crossing.
+    /// The lower / upper bounds of a *white* key: it expands into the halves of any adjacent
+    /// black-key lanes, like a real piano (Logic-style vertical keyboard).
+    fn white_key_bounds(roll: Rect, lane_h: f32, midi: u8) -> (f32, f32) {
+        let (mut top, mut bot) = Self::lane_y(roll, lane_h, midi);
+        if midi > MIDI_LO && IS_BLACK[((midi - 1) % 12) as usize] {
+            bot += lane_h / 2.0; // expand down over the black lane below
+        }
+        if midi < MIDI_HI && IS_BLACK[((midi + 1) % 12) as usize] {
+            top -= lane_h / 2.0; // expand up over the black lane above
+        }
+        (top, bot)
+    }
+
+    /// The vertical keyboard down the left edge: contiguous white keys with shorter black keys
+    /// overlaid (anchored toward the roll), lit per the cursor crossing.
     fn draw_keyboard(
         &self,
         painter: &egui::Painter,
@@ -321,38 +282,52 @@ impl PianoRoll {
         dim: f32,
     ) {
         let kb = Rect::from_min_max(rect.min, Pos2::new(rect.min.x + KEYBOARD_W, rect.max.y));
-        painter.rect_filled(kb, 0.0, Color32::from_rgb(0x05, 0x06, 0x0a));
 
+        // White keys first: full-width blocks spanning into adjacent black lanes.
         for midi in MIDI_LO..=MIDI_HI {
-            let (top, bot) = Self::lane_y(roll, lane_h, midi);
-            let pc = (midi % 12) as usize;
-            let black = IS_BLACK[pc];
-            let on = lit[midi as usize].map(track_color);
-
-            // White keys span the full width; black keys are shorter, anchored at the inner
-            // (right) edge nearest the roll.
-            let w = if black { KEYBOARD_W * 0.62 } else { KEYBOARD_W };
-            let key = if black {
-                Rect::from_min_max(Pos2::new(kb.max.x - w, top), Pos2::new(kb.max.x, bot))
-            } else {
-                Rect::from_min_max(Pos2::new(kb.min.x, top), Pos2::new(kb.min.x + w, bot))
+            if IS_BLACK[(midi % 12) as usize] {
+                continue;
+            }
+            let (top, bot) = Self::white_key_bounds(roll, lane_h, midi);
+            let key = Rect::from_min_max(
+                Pos2::new(kb.min.x, top.max(kb.min.y)),
+                Pos2::new(kb.max.x, bot.min(kb.max.y)),
+            );
+            let fill = match lit[midi as usize].map(track_color) {
+                Some(c) => lighten(c, 0.35),
+                None => Color32::from_rgb(0xd9, 0xdb, 0xe1),
             };
-            let rest = if black {
-                Color32::from_rgb(0x12, 0x14, 0x1c)
-            } else {
-                Color32::from_rgb(0xcf, 0xd4, 0xe0)
-            };
-            let fill = match on {
-                Some(c) => scale_alpha(lighten(c, 0.2), dim),
-                None => scale_alpha(rest, dim),
-            };
-            painter.rect_filled(key, 0.0, fill);
-            painter.rect_stroke(
-                key,
-                0.0,
-                Stroke::new(0.5_f32, Color32::from_rgb(0x05, 0x06, 0x0a)),
+            painter.rect_filled(key, 0.0, scale_alpha(fill, dim));
+            // Hairline separator at the key's lower edge.
+            painter.line_segment(
+                [Pos2::new(kb.min.x, bot), Pos2::new(kb.max.x, bot)],
+                Stroke::new(0.6_f32, Color32::from_rgba_unmultiplied(0, 0, 0, 90)),
             );
         }
+
+        // Black keys overlaid: shorter, slightly slimmer, anchored at the roll-side edge.
+        for midi in MIDI_LO..=MIDI_HI {
+            if !IS_BLACK[(midi % 12) as usize] {
+                continue;
+            }
+            let (top, bot) = Self::lane_y(roll, lane_h, midi);
+            let inset = (lane_h * 0.08).clamp(0.3, 1.0);
+            let key = Rect::from_min_max(
+                Pos2::new(kb.max.x - KEYBOARD_W * 0.62, top + inset),
+                Pos2::new(kb.max.x, bot - inset),
+            );
+            let fill = match lit[midi as usize].map(track_color) {
+                Some(c) => lighten(c, 0.1),
+                None => Color32::from_rgb(0x16, 0x17, 0x1c),
+            };
+            painter.rect_filled(key, 1.5, scale_alpha(fill, dim));
+        }
+
+        // Subtle edge between keyboard and roll.
+        painter.line_segment(
+            [Pos2::new(kb.max.x, kb.min.y), Pos2::new(kb.max.x, kb.max.y)],
+            Stroke::new(1.0_f32, Color32::from_rgb(0x05, 0x06, 0x0a)),
+        );
     }
 }
 
