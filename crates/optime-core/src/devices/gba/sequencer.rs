@@ -877,4 +877,175 @@ mod tests {
             }
         }
     }
+
+    /// Builds a one-track song from raw `track` bytecode at 0x200 (voicegroup at 0x100 is
+    /// zeroed = a plain DirectSound tone, so notes always resolve).
+    fn one_track_song(track: &[u8]) -> (Arc<[u8]>, SongHeader) {
+        const VOICEGROUP: usize = 0x100;
+        const TRACK: usize = 0x200;
+        const HEADER: usize = 0x400;
+
+        let mut rom = vec![0u8; 0x600];
+        let ptr = |offset: usize| (0x0800_0000 + offset as u32).to_le_bytes();
+        rom[TRACK..TRACK + track.len()].copy_from_slice(track);
+        rom[HEADER] = 1;
+        rom[HEADER + 4..HEADER + 8].copy_from_slice(&ptr(VOICEGROUP));
+        rom[HEADER + 8..HEADER + 12].copy_from_slice(&ptr(TRACK));
+        let header = SongHeader {
+            offset: HEADER,
+            track_count: 1,
+            priority: 0,
+            voicegroup: VOICEGROUP,
+        };
+        (Arc::from(rom), header)
+    }
+
+    /// Runs the sequencer until it finishes (or 200 frames) and returns every op.
+    fn run_song(track: &[u8]) -> Vec<Mp2kOp> {
+        let (rom, header) = one_track_song(track);
+        let mut seq = Mp2kSequencer::new(rom, &header);
+        let mut all = Vec::new();
+        for _ in 0..200 {
+            let before = all.len();
+            seq.tick_frame(&mut all);
+            if all[before..]
+                .iter()
+                .any(|op| matches!(op, Mp2kOp::Finished))
+            {
+                break;
+            }
+        }
+        all
+    }
+
+    fn notes(ops: &[Mp2kOp]) -> Vec<(u8, u8, u8)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                Mp2kOp::Note { note, .. } => Some((note.midi_key, note.velocity, note.gate)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Bytes below 0x80 after a note command repeat it (running status), with each of the
+    /// optional key / velocity / gate-extension bytes layering onto the previous state.
+    #[test]
+    fn notes_use_running_status_and_optional_bytes() {
+        let ops = run_song(&[
+            0xD0, 60, 100,  // N01 key=60 vel=100
+            0x81, // W01
+            62,   // running status: N01 key=62 (velocity kept)
+            0x81, // W01
+            63, 90, 2,    // running status: N01 key=63 vel=90 gate 1+2
+            0x81, // W01
+            0xB1, // FINE
+        ]);
+        assert_eq!(notes(&ops), vec![(60, 100, 1), (62, 100, 1), (63, 90, 3)]);
+    }
+
+    /// `REPT n` runs its section n times in total, then continues — without reporting loops.
+    #[test]
+    fn rept_repeats_counted_times_without_looping() {
+        const TRACK: usize = 0x200;
+        let target = (0x0800_0000u32 + TRACK as u32).to_le_bytes();
+        let ops = run_song(&[
+            0xD0, 60, 100,  // the repeated section: one note
+            0x81, // W01
+            0xB5, 3, target[0], target[1], target[2], target[3], // REPT 3 -> section start
+            0xB1,      // FINE
+        ]);
+        assert_eq!(notes(&ops).len(), 3, "section runs exactly three times");
+        assert!(!ops.iter().any(|op| matches!(op, Mp2kOp::Looped)));
+        assert!(ops.iter().any(|op| matches!(op, Mp2kOp::TrackEnded { .. })));
+    }
+
+    /// `PATT` calls nest (up to three levels) and `PEND` returns to the caller.
+    #[test]
+    fn patt_calls_nest_and_return() {
+        const TRACK: usize = 0x200;
+        // Layout inside the track block: main first, then the outer and inner patterns.
+        let ptr = |off: usize| (0x0800_0000u32 + (TRACK + off) as u32).to_le_bytes();
+        let outer = ptr(11);
+        let inner = ptr(21);
+        let outer_call = [0xB3, outer[0], outer[1], outer[2], outer[3]];
+        let mut track = Vec::new();
+        track.extend_from_slice(&outer_call); // 0x00 main: PATT outer
+        track.extend_from_slice(&outer_call); //      and again
+        track.push(0xB1); // FINE
+        assert_eq!(track.len(), 11);
+        track.extend_from_slice(&[0xB3, inner[0], inner[1], inner[2], inner[3]]); // 0x0B outer: PATT inner
+        track.extend_from_slice(&[0xD0, 72, 100, 0x81, 0xB4]); //      note 72, W01, PEND
+        assert_eq!(track.len(), 21);
+        track.extend_from_slice(&[0xD0, 60, 100, 0x81, 0xB4]); // 0x15 inner: note 60, W01, PEND
+
+        let ops = run_song(&track);
+        assert_eq!(
+            notes(&ops),
+            vec![(60, 100, 1), (72, 100, 1), (60, 100, 1), (72, 100, 1)],
+            "each outer call plays the inner pattern then its own note"
+        );
+        assert!(!ops.iter().any(|op| matches!(op, Mp2kOp::Looped)));
+    }
+
+    /// `MEMACC` byte ops feed its conditional jumps: a true condition jumps, a false one
+    /// skips the 4-byte target and falls through.
+    #[test]
+    fn memacc_conditionals_jump_or_fall_through() {
+        const TRACK: usize = 0x200;
+        let ptr = |off: usize| (0x0800_0000u32 + (TRACK + off) as u32).to_le_bytes();
+        // 0x00: MEMACC SET [0] = 5
+        // 0x04: MEMACC IF_EQ [0] == 7 -> note 99 (false: falls through)
+        // 0x0c: MEMACC IF_EQ [0] == 5 -> skip over note 99 (true: jumps to 0x17)
+        // 0x14: note 99 (must not play)
+        // 0x17: note 60, W01, FINE
+        let skip = ptr(0x17);
+        let dead = ptr(0x14);
+        let ops = run_song(&[
+            0xB9, 0, 0, 5, // SET
+            0xB9, 6, 0, 7, dead[0], dead[1], dead[2], dead[3], // IF_EQ false
+            0xB9, 6, 0, 5, skip[0], skip[1], skip[2], skip[3], // IF_EQ true
+            0xD0, 99, 100, // skipped
+            0xD0, 60, 100, // 0x17
+            0x81, 0xB1,
+        ]);
+        assert_eq!(notes(&ops), vec![(60, 100, 1)]);
+    }
+
+    /// `TEMPO n` sets the step rate to `n*2` tempo units (150 = two steps per frame),
+    /// taking effect on the *next* frame — the current frame's budget was already accumulated.
+    #[test]
+    fn tempo_scales_steps_per_frame() {
+        let (rom, header) = one_track_song(&[
+            0xBB, 150,  // TEMPO: double speed
+            0x98, // W24
+            0xB1,
+        ]);
+        let mut seq = Mp2kSequencer::new(rom, &header);
+        let mut ops = Vec::new();
+        seq.tick_frame(&mut ops);
+        assert_eq!(
+            seq.steps, 1,
+            "the frame the TEMPO lands in still runs one step"
+        );
+        seq.tick_frame(&mut ops);
+        assert_eq!(seq.steps, 3, "subsequent frames run two steps");
+        assert!((seq.steps_per_frame() - 2.0).abs() < 1e-12);
+    }
+
+    /// A `TIE` (gate 0) sounds until `EOT` releases it by key.
+    #[test]
+    fn tie_is_released_by_eot() {
+        let ops = run_song(&[
+            0xCF, 60, 100,  // TIE key=60
+            0x82, // W02
+            0xCE, // EOT (implicit key = last played)
+            0xB1, // FINE
+        ]);
+        assert_eq!(notes(&ops), vec![(60, 100, 0)], "a tie has gate 0");
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Mp2kOp::EndTie { key: 60, .. })),
+            "EOT releases the tied key"
+        );
+    }
 }
