@@ -792,24 +792,30 @@ impl OptimeApp {
                 sseq_id: song.sseq_id,
                 label: String::new(),
             });
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let row_w = (ui.available_width() - 38.0).max(60.0);
-                let resp = crate::theme::ios_row(ui, row_w, None, &song.label, selected, false);
-                if resp.clicked() {
-                    action = Some(Action::Play(i));
-                }
-                resp.context_menu(|ui| {
-                    song_menu(ui, i, liked, &self.library.playlists, &mut action)
-                });
-                // "…" — U+22EF is missing from egui's bundled fonts and renders as tofu.
-                ui.menu_button(
-                    egui::RichText::new("…")
-                        .size(22.0)
-                        .color(crate::theme::TEXT_DIM),
-                    |ui| song_menu(ui, i, liked, &self.library.playlists, &mut action),
-                );
-            });
+            // Right-to-left so the trailing menu button takes its true size first and the
+            // row label fills exactly the remainder — the row can never overflow the panel
+            // (overflow makes a resizable SidePanel grow every frame).
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 42.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    // "…" — U+22EF is missing from egui's bundled fonts and renders as tofu.
+                    ui.menu_button(
+                        egui::RichText::new("…")
+                            .size(22.0)
+                            .color(crate::theme::TEXT_DIM),
+                        |ui| song_menu(ui, i, liked, &self.library.playlists, &mut action),
+                    );
+                    let row_w = ui.available_width();
+                    let resp = crate::theme::ios_row(ui, row_w, None, &song.label, selected, false);
+                    if resp.clicked() {
+                        action = Some(Action::Play(i));
+                    }
+                    resp.context_menu(|ui| {
+                        song_menu(ui, i, liked, &self.library.playlists, &mut action)
+                    });
+                },
+            );
         }
         match action {
             Some(Action::Play(i)) => {
@@ -864,21 +870,25 @@ impl OptimeApp {
         let mut open = None;
         let mut delete = None;
         for (p, pl) in self.library.playlists.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let title = format!("{} ({})", pl.name, pl.tracks.len());
-                let row_w = (ui.available_width() - 34.0).max(60.0);
-                if ios_row(ui, row_w, Some("🎵"), &title, false, true).clicked() {
-                    open = Some(p);
-                }
-                if ui
-                    .add(egui::Button::new("🗑").frame(false))
-                    .on_hover_text("Delete playlist")
-                    .clicked()
-                {
-                    delete = Some(p);
-                }
-            });
+            // RTL: trash button sized first, row fills the exact remainder (no overflow).
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 42.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if ui
+                        .add(egui::Button::new("🗑").frame(false))
+                        .on_hover_text("Delete playlist")
+                        .clicked()
+                    {
+                        delete = Some(p);
+                    }
+                    let title = format!("{} ({})", pl.name, pl.tracks.len());
+                    let row_w = ui.available_width();
+                    if ios_row(ui, row_w, Some("🎵"), &title, false, true).clicked() {
+                        open = Some(p);
+                    }
+                },
+            );
         }
         if let Some(p) = open {
             self.library_view = LibraryView::Playlist(p);
@@ -887,20 +897,25 @@ impl OptimeApp {
             self.library.playlists.remove(p);
         }
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let edit = egui::TextEdit::singleline(&mut self.new_playlist_name)
-                .hint_text("New playlist…")
-                .desired_width((ui.available_width() - 44.0).max(80.0));
-            ui.add(edit);
-            let name = self.new_playlist_name.trim().to_owned();
-            if ui.button("➕").clicked() && !name.is_empty() {
-                self.library.playlists.push(crate::library::Playlist {
-                    name,
-                    tracks: Vec::new(),
-                });
-                self.new_playlist_name.clear();
-            }
-        });
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 30.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                let add = ui.button("➕");
+                let edit = egui::TextEdit::singleline(&mut self.new_playlist_name)
+                    .hint_text("New playlist…")
+                    .desired_width(ui.available_width());
+                ui.add(edit);
+                let name = self.new_playlist_name.trim().to_owned();
+                if add.clicked() && !name.is_empty() {
+                    self.library.playlists.push(crate::library::Playlist {
+                        name,
+                        tracks: Vec::new(),
+                    });
+                    self.new_playlist_name.clear();
+                }
+            },
+        );
     }
 
     /// One open collection (liked / recent / a playlist): play all, play/remove single tracks.
@@ -959,26 +974,26 @@ impl OptimeApp {
         let mut play = None;
         let mut remove = None;
         for (i, t) in tracks.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let here = current.as_ref().is_some_and(|c| c.same_song(t));
-                let row_w = if removable {
-                    (ui.available_width() - 34.0).max(60.0)
-                } else {
-                    ui.available_width()
-                };
-                if crate::theme::ios_row(ui, row_w, None, &t.label, here, false).clicked() {
-                    play = Some(i);
-                }
-                if removable
-                    && ui
-                        .add(egui::Button::new("❌").frame(false))
-                        .on_hover_text("Remove")
-                        .clicked()
-                {
-                    remove = Some(i);
-                }
-            });
+            // RTL: remove button sized first, row fills the exact remainder (no overflow).
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 42.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if removable
+                        && ui
+                            .add(egui::Button::new("❌").frame(false))
+                            .on_hover_text("Remove")
+                            .clicked()
+                    {
+                        remove = Some(i);
+                    }
+                    let here = current.as_ref().is_some_and(|c| c.same_song(t));
+                    let row_w = ui.available_width();
+                    if crate::theme::ios_row(ui, row_w, None, &t.label, here, false).clicked() {
+                        play = Some(i);
+                    }
+                },
+            );
         }
         if let Some(i) = play {
             self.play_queue(tracks.clone(), i);
@@ -1129,10 +1144,12 @@ impl OptimeApp {
         egui::TopBottomPanel::top("m_meters")
             .show_separator_line(false)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.meters_ui(ui);
-                    });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(220.0, 20.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| self.meters_ui(ui),
+                    );
                 });
             });
 
@@ -1654,9 +1671,11 @@ impl eframe::App for OptimeApp {
                 });
                 ui.separator();
                 ui.label("Songs");
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.song_list_ui(ui);
-                });
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        self.song_list_ui(ui);
+                    });
             });
 
         egui::TopBottomPanel::top("transport").show(ctx, |ui| {
@@ -1719,9 +1738,18 @@ impl eframe::App for OptimeApp {
                 {
                     self.export_wav();
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    self.meters_ui(ui);
-                });
+                // Meters live at the right edge; skip them when the bar is too narrow
+                // rather than overlapping the left-to-right content.
+                const METERS_W: f32 = 220.0;
+                if ui.available_width() >= METERS_W {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(METERS_W, 20.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| self.meters_ui(ui),
+                        );
+                    });
+                }
             });
         });
 
@@ -1732,7 +1760,8 @@ impl eframe::App for OptimeApp {
         });
 
         egui::SidePanel::right("settings")
-            .default_width(220.0)
+            .default_width(240.0)
+            .width_range(220.0..=340.0)
             .show(ctx, |ui| {
                 self.settings_ui(ui);
                 ui.separator();
