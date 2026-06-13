@@ -31,6 +31,10 @@ pub struct AudioState {
     pub dsp_load: f32,
     /// Number of currently sounding synthesizer voices.
     pub voices: usize,
+    /// Monotonic time (seconds) the audio callback last ran. Used on the web to detect a
+    /// suspended/stalled `AudioContext` (iOS suspends it on background) so the stream can be
+    /// rebuilt; `f64::NEG_INFINITY` until the first callback fires.
+    pub last_callback: f64,
 }
 
 impl AudioState {
@@ -47,6 +51,7 @@ impl AudioState {
             sample_rate: 48_000.0,
             dsp_load: 0.0,
             voices: 0,
+            last_callback: f64::NEG_INFINITY,
         }
     }
 }

@@ -371,6 +371,39 @@ impl OptimeApp {
         let _ = ctx;
     }
 
+    /// Recovers web audio after iOS suspends the `AudioContext` on background. cpal owns the
+    /// context internally and never resumes it, so when the callback has stalled while we should
+    /// be playing we re-`play()` it each frame (cheap) and, on the next user gesture iOS requires,
+    /// rebuild the stream over the same shared state so playback continues from where it left off.
+    #[cfg(target_arch = "wasm32")]
+    fn keep_audio_alive(&mut self, ctx: &egui::Context) {
+        let should_play = self.current_song.is_some() && !self.paused;
+        let stalled = should_play && self.audio.as_ref().is_some_and(|a| a.callback_age() > 0.4);
+        if !stalled {
+            return;
+        }
+        let interacted = ctx.input(|i| {
+            i.pointer.any_pressed()
+                || i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key { .. }
+                            | egui::Event::Text(_)
+                            | egui::Event::Touch { .. }
+                            | egui::Event::PointerButton { .. }
+                    )
+                })
+        });
+        if let Some(audio) = self.audio.as_mut() {
+            audio.resume();
+            if interacted {
+                audio.rebuild();
+            }
+        }
+        // Keep polling (outside of any pointer animation) until the stream recovers.
+        ctx.request_repaint();
+    }
+
     /// Loads a demo. Native reads from `demos/`; web fetches it (copied into the deploy by
     /// Trunk) into [`Self::pending_file`].
     fn request_demo(&mut self, stem: &str, label: &str) {
@@ -2053,6 +2086,8 @@ impl eframe::App for OptimeApp {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ensure_audio(ctx);
+        #[cfg(target_arch = "wasm32")]
+        self.keep_audio_alive(ctx);
         self.poll_pending_file();
         self.update_library_order(ctx);
 

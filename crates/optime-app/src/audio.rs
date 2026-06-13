@@ -7,57 +7,101 @@ use crate::player::{new_shared, Shared};
 
 /// Owns the live audio output stream and exposes the shared state the UI mutates.
 pub struct AudioEngine {
-    _stream: cpal::Stream,
+    /// The cpal output stream, held alive for its duration. `Option` so it can be dropped
+    /// (closing the web `AudioContext`) before a rebuild — see [`Self::rebuild`]. On native it's
+    /// only kept alive, never read back.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    stream: Option<cpal::Stream>,
     /// The device sample rate; controllers must be built to match it.
     pub sample_rate: f64,
     /// Shared state pulled from by the audio callback.
     pub shared: Shared,
 }
 
+/// Opens the default output device and builds a started stereo f32 stream feeding `shared`.
+/// Returns the stream and the device sample rate.
+fn build_stream(shared: &Shared) -> Option<(cpal::Stream, f64)> {
+    let host = cpal::default_host();
+    let device = host.default_output_device()?;
+    let supported = device.default_output_config().ok()?;
+    let sample_rate = supported.sample_rate().0 as f64;
+    let channels = supported.channels() as usize;
+    let mut config: cpal::StreamConfig = supported.clone().into();
+    config.buffer_size = cpal::BufferSize::Fixed(2048);
+
+    if supported.sample_format() != cpal::SampleFormat::F32 {
+        log::error!(
+            "unsupported output sample format {:?}; expected f32",
+            supported.sample_format()
+        );
+        return None;
+    }
+
+    let cb_shared = shared.clone();
+    let err_fn = |e| log::error!("audio stream error: {e}");
+    let stream = device
+        .build_output_stream(
+            &config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                write_audio(data, channels, &cb_shared);
+            },
+            err_fn,
+            None,
+        )
+        .ok()?;
+    stream.play().ok()?;
+    Some((stream, sample_rate))
+}
+
 impl AudioEngine {
     /// Opens the default output device and starts a stereo f32 stream. Returns `None` if no
     /// device/format is available.
     pub fn new() -> Option<Self> {
-        let host = cpal::default_host();
-        let device = host.default_output_device()?;
-        let supported = device.default_output_config().ok()?;
-        let sample_rate = supported.sample_rate().0 as f64;
-        let channels = supported.channels() as usize;
-        let mut config: cpal::StreamConfig = supported.clone().into();
-        config.buffer_size = cpal::BufferSize::Fixed(2048);
-
         let shared = new_shared();
+        let (stream, sample_rate) = build_stream(&shared)?;
         if let Ok(mut st) = shared.lock() {
             st.sample_rate = sample_rate;
         }
-        let cb_shared = shared.clone();
-
-        if supported.sample_format() != cpal::SampleFormat::F32 {
-            log::error!(
-                "unsupported output sample format {:?}; expected f32",
-                supported.sample_format()
-            );
-            return None;
-        }
-
-        let err_fn = |e| log::error!("audio stream error: {e}");
-        let stream = device
-            .build_output_stream(
-                &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    write_audio(data, channels, &cb_shared);
-                },
-                err_fn,
-                None,
-            )
-            .ok()?;
-        stream.play().ok()?;
-
         Some(Self {
-            _stream: stream,
+            stream: Some(stream),
             sample_rate,
             shared,
         })
+    }
+
+    /// (Re)starts the output stream — on the web this resumes a suspended `AudioContext`. Cheap;
+    /// safe to call on every user interaction. Web-only recovery (see `keep_audio_alive`).
+    #[cfg(target_arch = "wasm32")]
+    pub fn resume(&self) {
+        if let Some(stream) = &self.stream {
+            let _ = stream.play();
+        }
+    }
+
+    /// Seconds since the audio callback last ran (large when the stream is suspended/stalled).
+    #[cfg(target_arch = "wasm32")]
+    pub fn callback_age(&self) -> f64 {
+        let last = self.shared.lock().map(|st| st.last_callback).unwrap_or(0.0);
+        now_seconds() - last
+    }
+
+    /// Drops the current stream (closing its web `AudioContext`) and builds a fresh one over the
+    /// same shared state, so playback continues seamlessly. Used to recover after iOS suspends
+    /// the context on background. Returns `true` on success. Web-only recovery.
+    #[cfg(target_arch = "wasm32")]
+    pub fn rebuild(&mut self) -> bool {
+        self.stream = None; // close the old context first (iOS limits live AudioContexts)
+        match build_stream(&self.shared) {
+            Some((stream, sample_rate)) => {
+                self.sample_rate = sample_rate;
+                if let Ok(mut st) = self.shared.lock() {
+                    st.last_callback = now_seconds();
+                }
+                self.stream = Some(stream);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -159,6 +203,8 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         return;
     };
     let st = &mut *guard;
+    // Heartbeat for the web stall detector (see `AudioEngine::callback_age`).
+    st.last_callback = t0;
     if st.controller.is_none() || (st.paused && st.pause_gain <= 0.0) {
         data.fill(0.0);
         if !st.paused {
