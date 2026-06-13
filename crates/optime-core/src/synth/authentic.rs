@@ -169,9 +169,8 @@ impl AuthenticState {
             return 0.0;
         }
 
-        // Stage the tap window (zeros before the note started) and reconstruct: a clean
-        // band-limited interpolation of the DAC-rate stream ("proper" SRC), anti-aliased when
-        // the output rate is below the DAC rate.
+        // Stage the tap window (zeros before the note started) and reconstruct the DAC-rate
+        // stream to the output rate.
         let n = (k_hi - k_lo + 1) as usize;
         let mut buf = [0.0f32; RING_LEN];
         for (slot, k) in buf[..n].iter_mut().zip(k_lo..) {
@@ -181,10 +180,23 @@ impl AuthenticState {
                 self.ring[k.rem_euclid(RING_LEN as i64) as usize]
             };
         }
-        // fc in cycles per DAC sample: the reconstruction band limit, the output Nyquist when
-        // downsampling, and the user's extra cutoff, whichever is lowest.
-        let fc = (0.5 / r_dac).min(0.5).min(f64::from(cutoff_hz) / dac_hz);
-        resample_sinc(tables, &buf[..n], self.t_dac, fc, false)
+        // Mixer-less voices (PSGs, and every DS voice) are point-sampled straight into the DAC
+        // ring, so the DAC's physical zero-order hold is reproduced here by the band-limited step
+        // gather — a clean band-limited ZOH rather than a raw nearest-neighbour staircase. Sampled
+        // voices already carry the mixer→DAC hold in the ring, so they take the impulse
+        // reconstruction of that held stream.
+        let step = mixer_hz.is_none();
+        // fc in cycles per DAC sample: the reconstruction band limit (the output Nyquist) and the
+        // user's extra cutoff, whichever is lower. Impulse mode never wants a cutoff above the DAC
+        // Nyquist; step mode keeps it (the in-band ZOH images sit above it when upsampling).
+        let nyq = 0.5 / r_dac;
+        let cutoff = f64::from(cutoff_hz) / dac_hz;
+        let fc = if step {
+            nyq.min(cutoff)
+        } else {
+            nyq.min(0.5).min(cutoff)
+        };
+        resample_sinc(tables, &buf[..n], self.t_dac, fc, step)
     }
 
     /// Produces one DAC-rate sample (at grid index `self.next_n`) for the crunchy reconstruction:

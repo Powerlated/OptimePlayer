@@ -783,50 +783,64 @@ mod tests {
     }
 
     #[test]
-    fn authentic_psg_is_nearest_neighbour_at_dac_rate() {
-        // With the output rate equal to the DAC rate, a PSG voice through the Authentic chain
-        // must reproduce plain nearest-neighbour sampling exactly: PSGs bypass the software
-        // mixer, are NN-sampled at the DAC rate, and the final reconstruction is transparent
-        // at ratio 1.
+    fn authentic_psg_is_bandlimited_zoh_at_dac_rate() {
+        // A PSG voice through the Authentic chain is nearest-neighbour *sampled* into the 32768 Hz
+        // DAC ring, but the DAC's physical zero-order hold is then reproduced by a band-limited
+        // step reconstruction — a clean band-limited ZOH, NOT a raw nearest-neighbour staircase.
+        // With out == dac the final stage is the band-limited step gather of the DAC-rate stream;
+        // pin the chain output against that reference and confirm it departs from raw nearest.
+        use crate::resample::{resample_sinc, tap_window};
         let out_rate = 32768.0;
-        let mut s = sine_sample(16, 8, 16384.0);
-        let sm = Arc::get_mut(&mut s).unwrap();
-        sm.is_psg_square = true;
-        let tables = ResampleTables::new(16);
+        let dac = 32768.0;
+        let src_rate = 16384.0;
+        let s = psg_sine_sample(16, 8, src_rate);
+        let half_taps = 16;
+        let tables = ResampleTables::new(half_taps);
         let n = 512;
 
-        let nearest = render(out_rate, s.clone(), ResampleMode::NearestNeighbor, None, n);
-
-        let mut instr = SampleInstrument::new(out_rate, s);
-        // A GBA-style chain: the mixer stage must be bypassed for PSG voices.
-        instr.chain = HardwareChain {
-            mixer_hz: Some(13379.0),
-            dac_hz: 32768.0,
-        };
-        instr.set_pitch(
-            VoicePitch::Midi {
-                note: 69.0,
-                sample_pitch_hz: 440.0,
+        let authentic = run_gba_chain(
+            out_rate,
+            s.clone(),
+            ResampleMode::Authentic {
+                half_taps,
+                cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
             },
-            TuningSystem::Equal,
+            &tables,
+            n,
         );
-        instr.begin_note(1.0, false);
-        instr.playing = true;
-        for (i, &want) in nearest.iter().enumerate() {
-            instr.advance(
-                ResampleMode::Authentic {
-                    half_taps: 16,
-                    cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
-                },
-                Some(&tables),
-                false,
-            );
+
+        // Reference: the nearest-neighbour DAC-rate stream (advance-then-read, like the chain),
+        // band-limited-ZOH reconstructed at ratio 1.
+        let data = &s.data;
+        let len = data.len() as i64;
+        let r = src_rate / dac; // source samples per DAC sample (freq_ratio 1)
+        let mut src_pos = 0.0;
+        let dac_stream: Vec<f32> = (0..n as i64 + half_taps as i64 + 2)
+            .map(|_| {
+                src_pos += r;
+                data[(src_pos.floor() as i64).rem_euclid(len) as usize]
+            })
+            .collect();
+        // out == dac ⇒ fc = output Nyquist = 0.5 (the off cutoff sits above it); t_dac = i.
+        let mut differs = 0;
+        for i in half_taps..n {
+            let (k_lo, k_hi) = tap_window(&tables, i as f64);
+            let slice = &dac_stream[k_lo as usize..=k_hi as usize];
+            let want = resample_sinc(&tables, slice, i as f64, 0.5, true);
             assert!(
-                (instr.output - want).abs() < 1e-9,
-                "sample {i}: authentic={}, nearest={want}",
-                instr.output
+                (authentic[i] - want).abs() < 1e-6,
+                "sample {i}: authentic={}, band-limited ZOH reference={want}",
+                authentic[i]
             );
+            // The DAC sample at this integer position (what plain nearest would emit).
+            if (authentic[i] - f64::from(dac_stream[i])).abs() > 1e-4 {
+                differs += 1;
+            }
         }
+        assert!(
+            differs > 50,
+            "band-limited ZOH must depart from the raw nearest-neighbour staircase (differs={differs})"
+        );
     }
 
     #[test]
