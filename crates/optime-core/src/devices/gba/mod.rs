@@ -11,12 +11,14 @@
 //!                   ─► standardized SynthEvent stream             — into the SynthController
 //! ```
 
+mod extract;
 mod player;
 pub mod rom;
 pub(crate) mod sequencer;
 pub mod tables;
 mod voice;
 
+pub use extract::extract_audio;
 pub use player::GbaPlayer;
 pub use rom::GbaRom;
 

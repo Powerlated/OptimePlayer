@@ -76,6 +76,13 @@ impl GbaRom {
         self.song_count
     }
 
+    /// Builds an audio-only image of this ROM: everything the MP2K engine cannot reach from
+    /// the song table is zeroed, so the result carries no game code or art but plays
+    /// identically. See [`extract_audio`](super::extract_audio).
+    pub fn extract_audio(&self) -> Vec<u8> {
+        super::extract::extract_audio(self)
+    }
+
     /// Parses the header of song `id`, if the entry is valid and non-empty.
     pub fn song_header(&self, id: u32) -> Option<SongHeader> {
         if id as usize >= self.song_count {

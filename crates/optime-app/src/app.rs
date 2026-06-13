@@ -729,6 +729,35 @@ impl OptimeApp {
         self.status = format!("Exported {name}.wav ({} frames).", samples.len());
     }
 
+    /// Whether a GBA ROM is currently loaded (enables the audio-data export button).
+    fn gba_loaded(&self) -> bool {
+        self.archives.iter().any(|a| matches!(a, SoundData::Gba(_)))
+    }
+
+    /// Exports the loaded GBA ROM's audio data as an audio-only `.gba` image: everything the
+    /// MP2K engine can't reach from the song table is stripped, so the file can be shipped
+    /// (e.g. in `demos/`) without bundling the game's code or art.
+    fn export_gba_audio(&mut self) {
+        let Some(rom) = self.archives.iter().find_map(|a| match a {
+            SoundData::Gba(rom) => Some(rom),
+            _ => None,
+        }) else {
+            self.status = "No GBA ROM loaded.".to_owned();
+            return;
+        };
+        let image = rom.extract_audio();
+        let stem = self
+            .current_source
+            .trim_end_matches(".gba")
+            .replace([' ', '#', '(', ')', '/'], "_");
+        let name = format!("{stem}-audio.gba");
+        save_bytes(&name, &image);
+        self.status = format!(
+            "Exported {name} ({:.1} MB of audio-only ROM).",
+            image.len() as f64 / 1_048_576.0
+        );
+    }
+
     /// Pushes UI config into the audio thread and pulls a note snapshot for the visualizer.
     /// Returns the snapshot and whether autoplay should advance to the next song.
     fn sync_audio(&mut self, ctx: &egui::Context) -> (VisSnapshot, bool) {
@@ -1368,6 +1397,20 @@ impl OptimeApp {
                         {
                             self.export_wav();
                         }
+                        if ui
+                            .add_enabled(
+                                self.gba_loaded(),
+                                egui::Button::new("🎵 Export GBA audio data"),
+                            )
+                            .on_hover_text(
+                                "Save an audio-only copy of the loaded GBA ROM: game code, \
+                                 sprites, and everything else are stripped; only the music \
+                                 data the player needs is kept.",
+                            )
+                            .clicked()
+                        {
+                            self.export_gba_audio();
+                        }
                         ui.add_space(4.0);
                         ui.label(egui::RichText::new(&self.status).weak().size(11.0));
                     });
@@ -1859,6 +1902,17 @@ impl eframe::App for OptimeApp {
                     .clicked()
                 {
                     self.export_wav();
+                }
+                if ui
+                    .add_enabled(self.gba_loaded(), egui::Button::new("🎵 Export GBA audio"))
+                    .on_hover_text(
+                        "Save an audio-only copy of the loaded GBA ROM: game code, sprites, \
+                         and everything else are stripped; only the music data the player \
+                         needs is kept.",
+                    )
+                    .clicked()
+                {
+                    self.export_gba_audio();
                 }
                 // Meters live at the right edge; skip them when the bar is too narrow
                 // rather than overlapping the left-to-right content.

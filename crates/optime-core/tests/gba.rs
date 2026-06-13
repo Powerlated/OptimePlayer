@@ -161,6 +161,40 @@ fn lookahead_sees_the_note() {
 }
 
 #[test]
+fn audio_extraction_strips_non_audio_and_plays_identically() {
+    let mut rom = build_rom();
+    // Plant non-audio "game data" the extractor must not ship.
+    rom[0x100] = 0xAB;
+    rom[0x1F0] = 0xCD;
+
+    let data = SoundData::load_all(&rom).remove(0);
+    let SoundData::Gba(gba) = &data else {
+        panic!("expected a GBA archive")
+    };
+    let extracted = gba.extract_audio();
+
+    // The junk bytes are gone (zeroed or truncated away).
+    assert!(extracted.len() <= rom.len());
+    assert_eq!(extracted.get(0x100).copied().unwrap_or(0), 0);
+    assert_eq!(extracted.get(0x1F0).copied().unwrap_or(0), 0);
+
+    // The extracted image is still a loadable GBA archive with the same songs.
+    let stripped = SoundData::load_all(&extracted).remove(0);
+    assert_eq!(stripped.song_ids(), data.song_ids());
+
+    // And it renders bit-identically to the original ROM.
+    let sr = 32768.0;
+    let config = SynthConfig::default();
+    let mut original = SynthController::new(sr, &data, 0).expect("song 0 in the original");
+    let mut audio_only = SynthController::new(sr, &stripped, 0).expect("song 0 in the extract");
+    let mut a = vec![0.0f32; 2 * sr as usize];
+    let mut b = vec![0.0f32; 2 * sr as usize];
+    original.fill(&mut a, &config);
+    audio_only.fill(&mut b, &config);
+    assert_eq!(a, b, "extracted audio must play identically");
+}
+
+#[test]
 fn rejects_non_mp2k_rom() {
     // Valid header byte but no song table anywhere.
     let mut rom = vec![0u8; ROM_LEN];
