@@ -954,6 +954,34 @@ impl OptimeApp {
         (snap, advance)
     }
 
+    /// A read-only visualizer snapshot of whatever controller is *currently* installed — used to
+    /// re-prime after [`Self::handle_song_end`] swaps in a new song, since the snapshot taken in
+    /// [`Self::sync_audio`] still reflects the song that just ended. Without this the piano roll
+    /// would prime at the old song's end step and over-drive the new look-ahead far past the
+    /// visible window (evicting the opening notes from its bounded buffer).
+    fn fresh_vis_snapshot(&self) -> VisSnapshot {
+        let mut snap = VisSnapshot::default();
+        let Some(shared) = self.audio.as_ref().map(|a| a.shared.clone()) else {
+            return snap;
+        };
+        let Ok(st) = shared.lock() else {
+            return snap;
+        };
+        if let Some(controller) = &st.controller {
+            snap.active = true;
+            snap.active_track = controller.keyboard_track();
+            snap.steps = controller.steps_elapsed();
+            snap.step_rate = controller.step_rate();
+            for t in 0..TRACK_COUNT {
+                for n in 0..128 {
+                    snap.notes_on[t][n] = controller.notes_on[t][n] != 0;
+                    snap.notes_kbd[t][n] = controller.notes_on_keyboard[t][n] != 0;
+                }
+            }
+        }
+        snap
+    }
+
     /// The full song list with like / add-to-playlist menus and status badges.
     /// Returns `true` if a song was started.
     fn song_list_ui(&mut self, ui: &mut egui::Ui) -> bool {
@@ -1975,9 +2003,14 @@ impl eframe::App for OptimeApp {
         }
 
         let (snap, advance) = self.sync_audio(ctx);
-        if advance {
+        let snap = if advance {
             self.handle_song_end();
-        }
+            // `snap` reflects the song that just ended; re-read so the piano roll and visualizer
+            // prime at the newly-started song's position (≈ step 0) rather than the old end.
+            self.fresh_vis_snapshot()
+        } else {
+            snap
+        };
         // Re-derived each frame by the Now Playing swipe; full volume everywhere else.
         self.swipe_gain = 1.0;
 
