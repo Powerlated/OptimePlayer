@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use optime_core::Sdat;
+use optime_core::{Sdat, SoundData};
 
 fn demo_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -66,6 +66,27 @@ fn parses_multiple_demos() {
         for &id in &sdat.sseq_list {
             assert!(sdat.sseq_infos[id as usize].is_some(), "{name}: id {id}");
         }
+    }
+}
+
+#[test]
+fn computes_song_lengths() {
+    let bytes = std::fs::read(demo_path("super-mario-64-ds.sdat")).unwrap();
+    let archives = SoundData::load_all(&bytes);
+    let data = &archives[0];
+    let ids = data.song_ids();
+    assert!(!ids.is_empty());
+
+    // Each playable song should resolve to a finite, positive length under the 15-minute cap
+    // (the demo's songs all loop or end well before then).
+    for &id in ids.iter().take(8) {
+        let len = data
+            .song_length_seconds(id)
+            .unwrap_or_else(|| panic!("song {id} should have a length"));
+        assert!(
+            len > 0.0 && len.is_finite() && len < 15.0 * 60.0,
+            "song {id}: implausible length {len}s"
+        );
     }
 }
 

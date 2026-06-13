@@ -67,6 +67,49 @@ impl SoundData {
         }
     }
 
+    /// Playback length of song `id` in seconds, or `None` if the song is missing/malformed.
+    ///
+    /// Defined for the library's length column and length sort:
+    /// - **Repeating** songs (those that loop): the intro plus two passes of the repeating
+    ///   section — i.e. up to the second loop point.
+    /// - **Non-repeating** songs: the full play-through, up to the end.
+    ///
+    /// Computed by running the device sequencer headlessly (no audio) and timing how many
+    /// fixed-rate device ticks elapse before the second [`SynthEvent::Looped`] or the
+    /// [`SynthEvent::Ended`]. A song that neither loops nor ends is capped at 15 minutes.
+    pub fn song_length_seconds(&self, id: u32) -> Option<f64> {
+        let mut player = self.make_player(id)?;
+        let tick_rate = player.tick_rate();
+        let config = SynthConfig::default();
+        let mut feedback = TickFeedback::default();
+        let mut events = Vec::new();
+        let max_ticks = (tick_rate * 15.0 * 60.0) as u64;
+        let mut ticks: u64 = 0;
+        let mut loops = 0u32;
+        let mut end_ticks = None;
+        while ticks < max_ticks {
+            events.clear();
+            player.tick(&mut feedback, &config, &mut events);
+            ticks += 1;
+            for ev in &events {
+                match ev {
+                    SynthEvent::Looped => {
+                        loops += 1;
+                        if loops >= 2 {
+                            end_ticks = Some(ticks);
+                        }
+                    }
+                    SynthEvent::Ended => end_ticks = Some(ticks),
+                    _ => {}
+                }
+            }
+            if end_ticks.is_some() {
+                break;
+            }
+        }
+        Some(end_ticks.unwrap_or(ticks) as f64 / tick_rate)
+    }
+
     /// Creates a player for song `id`.
     pub fn make_player(&self, id: u32) -> Option<DevicePlayer> {
         match self {

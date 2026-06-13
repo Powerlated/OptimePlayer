@@ -146,6 +146,22 @@ pub fn ios_row(
     selected: bool,
     chevron: bool,
 ) -> egui::Response {
+    ios_row_ext(ui, width, icon, title, None, badges, selected, chevron)
+}
+
+/// As [`ios_row`], but with optional `trailing` text drawn in a lower-contrast colour at the
+/// right edge (before any badges) — used for the song length in the library.
+#[allow(clippy::too_many_arguments)]
+pub fn ios_row_ext(
+    ui: &mut egui::Ui,
+    width: f32,
+    icon: Option<&str>,
+    title: &str,
+    trailing: Option<&str>,
+    badges: &[(&str, Color32)],
+    selected: bool,
+    chevron: bool,
+) -> egui::Response {
     let h = 42.0;
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, h), Sense::click());
     let painter = ui.painter_at(rect);
@@ -165,8 +181,19 @@ pub fn ios_row(
         );
         x += 28.0;
     }
-    // Trailing status badges (liked / in-playlist), right-aligned before the chevron.
     let mut badge_x = rect.right() - if chevron { 28.0 } else { 12.0 };
+    // Trailing dim text (e.g. song length), right-aligned before the badges.
+    if let Some(trailing) = trailing {
+        let galley = painter.text(
+            Pos2::new(badge_x, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            trailing,
+            FontId::proportional(13.0),
+            TEXT_DIM,
+        );
+        badge_x -= galley.width() + 8.0;
+    }
+    // Trailing status badges (liked / in-playlist), right-aligned before the chevron.
     for (glyph, tint) in badges {
         painter.text(
             Pos2::new(badge_x, rect.center().y),

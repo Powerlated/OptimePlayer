@@ -32,6 +32,28 @@ impl RepeatMode {
     }
 }
 
+/// How the loaded archive's song list is ordered in the library.
+#[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum SortMode {
+    /// The archive's native listing order.
+    #[default]
+    Default,
+    /// Alphabetical by song name.
+    Name,
+    /// Shortest first, by computed playback length.
+    Length,
+}
+
+impl SortMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::Default => "Default order",
+            SortMode::Name => "Name",
+            SortMode::Length => "Length",
+        }
+    }
+}
+
 /// A song reference that survives restarts: the source archive key (a demo stem, or the file
 /// name of a user-opened ROM/SDAT) plus the SSEQ id within it.
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -144,6 +166,8 @@ pub struct Persisted {
     pub gba_resample: ResampleSettings,
     /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
     pub delay_smoothing_choice: usize,
+    /// How the song list is sorted.
+    pub sort_mode: SortMode,
 }
 
 impl Default for Persisted {
@@ -163,6 +187,7 @@ impl Default for Persisted {
             nds_resample: ResampleSettings::default(),
             gba_resample: ResampleSettings::default(),
             delay_smoothing_choice: 0,
+            sort_mode: SortMode::default(),
         }
     }
 }

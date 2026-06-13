@@ -12,7 +12,7 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
-use crate::library::{Library, Persisted, RepeatMode, ResampleSettings, TrackRef};
+use crate::library::{Library, Persisted, RepeatMode, ResampleSettings, SortMode, TrackRef};
 use crate::piano_roll::PianoRoll;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
@@ -21,7 +21,17 @@ use crate::{audio::AudioEngine, player, TRACK_COUNT};
 struct Song {
     archive_index: usize,
     song_id: u32,
+    /// The bare song name (no `#id` suffix), used as the alphabetical sort key.
+    name: String,
+    /// The display label (`name (#id)`).
     label: String,
+    /// The archive's native listing position, used as the "Default" sort order and as a stable
+    /// tie-breaker for the other sorts.
+    order: usize,
+    /// Playback length in seconds, once computed (lazily, in the background).
+    length: Option<f64>,
+    /// Whether the length has been computed yet (a computed-but-failed length stays `None`).
+    length_computed: bool,
 }
 
 /// Which visualizer the central panel shows.
@@ -132,6 +142,13 @@ pub struct OptimeApp {
 
     /// The user's persistent library (playlists, likes, history).
     library: Library,
+    /// How the song list is ordered (by name, by length, or native order).
+    sort_mode: SortMode,
+    /// Cached computed song lengths, keyed by (source key, song id), so re-sorting and
+    /// reloading don't recompute. `None` = the length couldn't be determined.
+    length_cache: std::collections::HashMap<(String, u32), Option<f64>>,
+    /// Set when the song list needs (re)sorting (after a load or a sort-mode change).
+    needs_sort: bool,
     /// Which library collection the browser shows.
     library_view: LibraryView,
     /// Text buffer for the "new playlist" name field.
@@ -222,6 +239,9 @@ impl OptimeApp {
             loop_count: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
             library: p.library,
+            sort_mode: p.sort_mode,
+            length_cache: std::collections::HashMap::new(),
+            needs_sort: false,
             library_view: LibraryView::Root,
             new_playlist_name: String::new(),
             current_source: String::new(),
@@ -284,6 +304,7 @@ impl OptimeApp {
             nds_resample: self.nds_resample.clone(),
             gba_resample: self.gba_resample.clone(),
             delay_smoothing_choice: self.delay_smoothing_choice,
+            sort_mode: self.sort_mode,
         }
     }
 
@@ -439,15 +460,26 @@ impl OptimeApp {
         for (i, data) in self.archives.iter().enumerate() {
             for id in data.song_ids() {
                 let name = data.song_name(id).unwrap_or_else(|| format!("Song {id}"));
+                let label = format!("{name} (#{id})");
+                // Reuse any previously computed length for this exact song.
+                let (length, length_computed) = match self.length_cache.get(&(key.to_owned(), id)) {
+                    Some(v) => (*v, true),
+                    None => (None, false),
+                };
                 self.songs.push(Song {
                     archive_index: i,
                     song_id: id,
-                    label: format!("{name} (#{id})"),
+                    name,
+                    label,
+                    order: self.songs.len(),
+                    length,
+                    length_computed,
                 });
             }
         }
         self.current_song = None;
         self.current_source = key.to_owned();
+        self.needs_sort = true;
         self.status = format!("Loaded {source}: {} songs.", self.songs.len());
 
         // A track was waiting for this source (playlist jump / session restore).
@@ -462,6 +494,81 @@ impl OptimeApp {
             } else {
                 self.pending_play = Some(t);
             }
+        }
+    }
+
+    /// Keeps the song list ordered and the length column filled: lazily computes a few song
+    /// lengths per frame (cached), and (re)applies the sort once it's safe to. Length sort waits
+    /// until every length is known so the list doesn't reshuffle as values trickle in.
+    fn update_library_order(&mut self, ctx: &egui::Context) {
+        // Compute a bounded number of still-unknown lengths this frame.
+        const LENGTH_BUDGET: usize = 6;
+        let mut did_work = 0;
+        for idx in 0..self.songs.len() {
+            if self.songs[idx].length_computed {
+                continue;
+            }
+            let song_id = self.songs[idx].song_id;
+            let archive_index = self.songs[idx].archive_index;
+            let key = (self.current_source.clone(), song_id);
+            let val = match self.length_cache.get(&key) {
+                Some(v) => *v,
+                None => {
+                    let v = self.archives[archive_index].song_length_seconds(song_id);
+                    self.length_cache.insert(key, v);
+                    v
+                }
+            };
+            self.songs[idx].length = val;
+            self.songs[idx].length_computed = true;
+            did_work += 1;
+            if did_work >= LENGTH_BUDGET {
+                break;
+            }
+        }
+        let all_known = self.songs.iter().all(|s| s.length_computed);
+
+        if self.needs_sort {
+            // Length sort needs every length first; the others can sort right away.
+            if self.sort_mode != SortMode::Length || all_known {
+                self.apply_sort();
+                self.needs_sort = false;
+            }
+        }
+        // Keep stepping until all lengths are known (so the column fills and a pending length
+        // sort eventually lands), and while a sort is still outstanding.
+        if !all_known || self.needs_sort {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Reorders [`Self::songs`] per [`Self::sort_mode`], preserving which song is current.
+    fn apply_sort(&mut self) {
+        let current = self
+            .current_song
+            .and_then(|i| self.songs.get(i))
+            .map(|s| (s.archive_index, s.song_id));
+        match self.sort_mode {
+            SortMode::Default => self.songs.sort_by_key(|s| s.order),
+            SortMode::Name => self.songs.sort_by(|a, b| {
+                a.name
+                    .to_lowercase()
+                    .cmp(&b.name.to_lowercase())
+                    .then(a.order.cmp(&b.order))
+            }),
+            SortMode::Length => self.songs.sort_by(|a, b| {
+                a.length
+                    .unwrap_or(f64::INFINITY)
+                    .partial_cmp(&b.length.unwrap_or(f64::INFINITY))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.order.cmp(&b.order))
+            }),
+        }
+        if let Some((ai, sid)) = current {
+            self.current_song = self
+                .songs
+                .iter()
+                .position(|s| s.archive_index == ai && s.song_id == sid);
         }
     }
 
@@ -863,9 +970,27 @@ impl OptimeApp {
                 }
             });
         };
+        // Sort selector (by native order, name, or computed length).
+        let mut mode = self.sort_mode;
+        ui.horizontal(|ui| {
+            ui.label("Sort:");
+            egui::ComboBox::from_id_salt("song_sort")
+                .selected_text(mode.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut mode, SortMode::Default, SortMode::Default.label());
+                    ui.selectable_value(&mut mode, SortMode::Name, SortMode::Name.label());
+                    ui.selectable_value(&mut mode, SortMode::Length, SortMode::Length.label());
+                });
+        });
+        if mode != self.sort_mode {
+            self.sort_mode = mode;
+            self.needs_sort = true;
+        }
+        ui.add_space(2.0);
         ui.spacing_mut().item_spacing.y = 0.0;
         for (i, song) in self.songs.iter().enumerate() {
             let selected = self.current_song == Some(i);
+            let length = song.length.map(fmt_duration);
             let track = TrackRef {
                 source: self.current_source.clone(),
                 sseq_id: song.song_id,
@@ -901,11 +1026,12 @@ impl OptimeApp {
                     );
                     let row_w = ui.available_width();
 
-                    let resp = crate::theme::ios_row(
+                    let resp = crate::theme::ios_row_ext(
                         ui,
                         row_w,
                         None,
                         &song.label,
+                        length.as_deref(),
                         &badges,
                         selected,
                         false,
@@ -1775,6 +1901,7 @@ impl eframe::App for OptimeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ensure_audio(ctx);
         self.poll_pending_file();
+        self.update_library_order(ctx);
 
         // Arrow-key song navigation (sequence switching).
         let (left, right) = ctx.input(|i| {
@@ -2063,6 +2190,12 @@ fn draw_meter(
 }
 
 /// Saves bytes to disk (native, via dialog) or triggers a browser download (web).
+/// Formats a song length in seconds as `M:SS`.
+fn fmt_duration(secs: f64) -> String {
+    let total = secs.round().max(0.0) as u64;
+    format!("{}:{:02}", total / 60, total % 60)
+}
+
 fn save_bytes(filename: &str, bytes: &[u8]) {
     #[cfg(not(target_arch = "wasm32"))]
     {
