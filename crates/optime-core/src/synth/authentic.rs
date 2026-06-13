@@ -11,6 +11,7 @@
 //! ahead to cover the final reconstruction kernel's tap window; the chain stages before it are
 //! exact integer-rate processes, so no second kernel is needed.
 
+use super::gather::{gather_sinc, GatherSource};
 use crate::devices::HardwareChain;
 use crate::resample::{resample_sinc, tap_window, ResampleTables, MAX_HALF_TAPS};
 use crate::sample::Sample;
@@ -18,13 +19,26 @@ use crate::sample::Sample;
 /// Ring capacity in DAC-rate samples: one full tap window at the widest supported kernel.
 const RING_LEN: usize = 2 * MAX_HALF_TAPS + 2;
 
+/// How a sampled voice's source is taken through the software-mixer → DAC stages of the chain.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reconstruction {
+    /// GBA Authentic: linear interpolation to the mixer rate, nearest-neighbour hold to the DAC
+    /// rate — exactly what the MP2K software mixer and the DAC do.
+    HardwareHold,
+    /// GBA Crunchy Authentic: band-limited sinc reconstruction to the mixer rate, then a
+    /// band-limited zero-order hold (the BLEP step kernel) to the DAC rate.
+    Crunchy,
+}
+
 /// Per-call chain parameters, resolved by the owning voice.
 pub(super) struct ChainParams {
     /// The voice's *resolved* chain: `mixer_hz` must already be `None` for PSG voices and
     /// mixer-less devices (straight nearest-neighbour at the DAC rate).
     pub chain: HardwareChain,
-    /// Extra low-pass on the final reconstruction (the Authentic mode's cutoff slider), Hz.
+    /// Extra low-pass on the final reconstruction (the cutoff slider), Hz.
     pub cutoff_hz: u32,
+    /// How the sampled-voice source → mixer → DAC stages are reconstructed.
+    pub recon: Reconstruction,
     /// Source samples per source-rate second of playback (the voice's pitch ratio).
     pub freq_ratio: f64,
     /// Reciprocal of the output sample rate.
@@ -43,10 +57,18 @@ pub(super) struct AuthenticState {
     /// Source read position, in source samples.
     src_pos: f64,
     /// Mixer-stage accumulator, in mixer samples (a new mixer sample is drawn when it
-    /// crosses 1). Starts at 1 so the very first DAC sample draws one.
+    /// crosses 1). Starts at 1 so the very first DAC sample draws one. ([`Reconstruction::HardwareHold`].)
     mix_acc: f64,
-    /// The mixer-stage output currently held by the NN upsampler.
+    /// The mixer-stage output currently held by the NN upsampler. ([`Reconstruction::HardwareHold`].)
     mix_hold: f64,
+    /// Whether the source has wrapped its loop at least once (selects the periodic gather mapping
+    /// in [`Reconstruction::Crunchy`]).
+    wrapped: bool,
+    /// Synthesized mixer-rate samples for [`Reconstruction::Crunchy`]; index `m` lives at
+    /// `m mod RING_LEN`.
+    mixer_ring: [f32; RING_LEN],
+    /// Next mixer-grid index to synthesize into [`Self::mixer_ring`].
+    next_mixer_n: i64,
 }
 
 impl AuthenticState {
@@ -61,6 +83,9 @@ impl AuthenticState {
             src_pos: 0.0,
             mix_acc: 1.0,
             mix_hold: 0.0,
+            wrapped: false,
+            mixer_ring: [0.0; RING_LEN],
+            next_mixer_n: 0,
         }
     }
 
@@ -96,6 +121,7 @@ impl AuthenticState {
         let &ChainParams {
             chain: HardwareChain { mixer_hz, dac_hz },
             cutoff_hz,
+            recon,
             freq_ratio,
             inv_sample_rate,
         } = params;
@@ -113,21 +139,27 @@ impl AuthenticState {
                     self.fold_src(sample);
                     read_source(sample, self.src_pos.floor() as i64)
                 }
-                // Sampled voice: linear-interpolate to the mixer rate, NN-hold to the DAC rate.
-                Some(mixer_hz) => {
-                    self.mix_acc += mixer_hz / dac_hz;
-                    while self.mix_acc >= 1.0 {
-                        self.mix_acc -= 1.0;
-                        self.src_pos += freq_ratio * sample.sample_rate / mixer_hz;
-                        self.fold_src(sample);
-                        let i = self.src_pos.floor() as i64;
-                        let frac = self.src_pos - i as f64;
-                        let a = read_source(sample, i);
-                        let b = read_source(sample, i + 1);
-                        self.mix_hold = a + (b - a) * frac;
+                // Sampled voice: hardware hold, or the crunchy reconstruction.
+                Some(mixer_hz) => match recon {
+                    Reconstruction::HardwareHold => {
+                        // Linear-interpolate to the mixer rate, NN-hold to the DAC rate.
+                        self.mix_acc += mixer_hz / dac_hz;
+                        while self.mix_acc >= 1.0 {
+                            self.mix_acc -= 1.0;
+                            self.src_pos += freq_ratio * sample.sample_rate / mixer_hz;
+                            self.fold_src(sample);
+                            let i = self.src_pos.floor() as i64;
+                            let frac = self.src_pos - i as f64;
+                            let a = read_source(sample, i);
+                            let b = read_source(sample, i + 1);
+                            self.mix_hold = a + (b - a) * frac;
+                        }
+                        self.mix_hold
                     }
-                    self.mix_hold
-                }
+                    Reconstruction::Crunchy => {
+                        self.synth_dac_crunchy(sample, mixer_hz, dac_hz, freq_ratio, tables)
+                    }
+                },
             };
             self.ring[self.next_n.rem_euclid(RING_LEN as i64) as usize] = v as f32;
             self.next_n += 1;
@@ -155,6 +187,66 @@ impl AuthenticState {
         resample_sinc(tables, &buf[..n], self.t_dac, fc, false)
     }
 
+    /// Produces one DAC-rate sample (at grid index `self.next_n`) for the crunchy reconstruction:
+    /// the source is band-limited-sinc resampled onto the mixer grid (filling [`Self::mixer_ring`]
+    /// as needed), then a band-limited zero-order hold (BLEP step kernel) reads that ring at the
+    /// DAC sample's mixer-grid position.
+    fn synth_dac_crunchy(
+        &mut self,
+        sample: &Sample,
+        mixer_hz: f64,
+        dac_hz: f64,
+        freq_ratio: f64,
+        tables: &ResampleTables,
+    ) -> f64 {
+        // Mixer samples per DAC sample (< 1, an upsampling stage) and source samples per mixer
+        // sample (the pitch ratio carried onto the mixer grid).
+        let r_md = mixer_hz / dac_hz;
+        let r_sm = freq_ratio * sample.sample_rate / mixer_hz;
+        // This DAC sample sits at mixer-grid position `n · r_md`.
+        let t_mixer = self.next_n as f64 * r_md;
+        let (m_lo, m_hi) = tap_window(tables, t_mixer);
+        // After a mode switch the mixer cursor can be far behind the window; skip the gap so the
+        // fill is always bounded to one tap window (a one-window transient on the switch).
+        if self.next_mixer_n < m_lo {
+            self.next_mixer_n = m_lo;
+        }
+        // Synthesize mixer samples up to the window's right edge by reconstructing the source.
+        let fc_src = (0.5 / r_sm).min(0.5);
+        while self.next_mixer_n <= m_hi {
+            self.src_pos += r_sm;
+            self.fold_src(sample);
+            let v = self.gather_source(sample, tables, fc_src);
+            self.mixer_ring[self.next_mixer_n.rem_euclid(RING_LEN as i64) as usize] = v as f32;
+            self.next_mixer_n += 1;
+        }
+        // Band-limited zero-order hold: stage the mixer window (zeros before the start) and gather
+        // it with the BLEP step kernel band-limited to the DAC Nyquist.
+        let n = (m_hi - m_lo + 1) as usize;
+        let mut buf = [0.0f32; RING_LEN];
+        for (slot, m) in buf[..n].iter_mut().zip(m_lo..) {
+            *slot = if m < 0 {
+                0.0
+            } else {
+                self.mixer_ring[m.rem_euclid(RING_LEN as i64) as usize]
+            };
+        }
+        resample_sinc(tables, &buf[..n], t_mixer, 0.5 / r_md, true)
+    }
+
+    /// A clean band-limited sinc read of the looping source at the current [`Self::src_pos`].
+    fn gather_source(&self, sample: &Sample, tables: &ResampleTables, fc: f64) -> f64 {
+        let data_len = sample.data.len() as i64;
+        let src = GatherSource {
+            data: &sample.data,
+            looping: sample.looping,
+            loop_point: sample.loop_point,
+            loop_len: data_len - sample.loop_point,
+            wrapped: self.wrapped,
+        };
+        gather_sinc(&src, tables, self.src_pos, fc, false)
+    }
+
     /// Folds the source position back into the loop body once playback wraps (keeps precision
     /// bounded over arbitrarily long notes, mirroring `SampleInstrument::advance`).
     fn fold_src(&mut self, sample: &Sample) {
@@ -163,6 +255,7 @@ impl AuthenticState {
         if sample.looping && loop_len > 0.0 && self.src_pos >= data_len {
             let lp = sample.loop_point as f64;
             self.src_pos = (self.src_pos - lp) % loop_len + lp;
+            self.wrapped = true;
         }
     }
 }

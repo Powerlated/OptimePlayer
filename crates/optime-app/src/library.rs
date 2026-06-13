@@ -125,6 +125,8 @@ pub struct ResampleSettings {
     pub sampler_cutoff_hz: u32,
     /// Authentic-mode low-pass cutoff (Hz) on the final reconstruction.
     pub authentic_cutoff_hz: u32,
+    /// Crunchy-Authentic-mode low-pass cutoff (Hz) on the final reconstruction.
+    pub crunchy_authentic_cutoff_hz: u32,
     /// Crunchy-mode option: smooth out PSG on/off pops instead of preserving the clicks.
     pub smooth_psg_pops: bool,
 }
@@ -138,6 +140,7 @@ impl Default for ResampleSettings {
             psg_cutoff_hz: d::PSG_CUTOFF_HZ,
             sampler_cutoff_hz: d::SAMPLER_CUTOFF_HZ,
             authentic_cutoff_hz: d::AUTHENTIC_CUTOFF_HZ,
+            crunchy_authentic_cutoff_hz: d::CRUNCHY_AUTHENTIC_CUTOFF_HZ,
             smooth_psg_pops: d::SMOOTH_PSG_POPS,
         }
     }

@@ -45,6 +45,17 @@ pub enum ResampleMode {
         /// ([`CUTOFF_OFF_HZ`](Self::CUTOFF_OFF_HZ) = no extra filtering).
         cutoff_hz: u32,
     },
+    /// Like [`Authentic`](Self::Authentic), but the sampled-voice chain is reconstructed instead
+    /// of point-held: the source is band-limited-sinc resampled up to the software-mixer rate
+    /// (GBA: 13379 Hz) and a band-limited zero-order hold takes that to the DAC rate (32768 Hz),
+    /// before the same final rate conversion to the output. PSG voices are unchanged
+    /// (nearest-neighbour at the DAC rate).
+    CrunchyAuthentic {
+        /// Half-width of every kernel in the chain (≥ 1).
+        half_taps: usize,
+        /// Extra low-pass cutoff (Hz) applied by the final reconstruction stage.
+        cutoff_hz: u32,
+    },
 }
 
 impl ResampleMode {

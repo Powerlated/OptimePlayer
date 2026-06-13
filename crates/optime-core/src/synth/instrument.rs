@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use super::authentic::{AuthenticState, ChainParams};
+use super::authentic::{AuthenticState, ChainParams, Reconstruction};
 use super::gather::{gather_sinc, GatherSource};
 use crate::devices::{HardwareChain, VoicePitch};
 use crate::resample::ResampleTables;
@@ -111,9 +111,14 @@ impl SampleInstrument {
         tables: Option<&ResampleTables>,
         smooth_pops: bool,
     ) {
-        if let ResampleMode::Authentic { cutoff_hz, .. } = mode {
+        let chain_mode = match mode {
+            ResampleMode::Authentic { cutoff_hz, .. } => Some((cutoff_hz, false)),
+            ResampleMode::CrunchyAuthentic { cutoff_hz, .. } => Some((cutoff_hz, true)),
+            _ => None,
+        };
+        if let Some((cutoff_hz, crunchy)) = chain_mode {
             if let Some(tbl) = tables {
-                return self.advance_authentic(tbl, smooth_pops, cutoff_hz);
+                return self.advance_authentic(tbl, smooth_pops, cutoff_hz, crunchy);
             }
             // Tables not yet built; fall back to nearest for this sample.
             return self.advance(ResampleMode::NearestNeighbor, None, smooth_pops);
@@ -211,7 +216,13 @@ impl SampleInstrument {
     /// The Authentic-mode body of [`Self::advance`]: one output sample through the device's
     /// hardware chain (see [`AuthenticState`]). The chain advances even while fully attenuated
     /// so envelope re-opens and one-shot-end detection stay seamless.
-    fn advance_authentic(&mut self, tables: &ResampleTables, smooth_pops: bool, cutoff_hz: u32) {
+    fn advance_authentic(
+        &mut self,
+        tables: &ResampleTables,
+        smooth_pops: bool,
+        cutoff_hz: u32,
+        crunchy: bool,
+    ) {
         // A user switching an already-sounding voice into Authentic mode mid-note: continue
         // from the current source position instead of restarting the waveform.
         if self.authentic.is_fresh() && self.sample_t > 0.0 {
@@ -229,17 +240,21 @@ impl SampleInstrument {
             self.playing = false;
         }
 
-        // PSG voices bypass the software mixer on every device.
+        // PSG voices bypass the software mixer on every device — and the crunchy reconstruction
+        // only changes the sampled-voice path, so a PSG runs the plain nearest-neighbour chain
+        // either way.
+        let is_psg = self.sample.is_psg_square;
         let params = ChainParams {
             chain: HardwareChain {
-                mixer_hz: if self.sample.is_psg_square {
-                    None
-                } else {
-                    self.chain.mixer_hz
-                },
+                mixer_hz: if is_psg { None } else { self.chain.mixer_hz },
                 dac_hz: self.chain.dac_hz,
             },
             cutoff_hz,
+            recon: if crunchy && !is_psg {
+                Reconstruction::Crunchy
+            } else {
+                Reconstruction::HardwareHold
+            },
             freq_ratio: self.freq_ratio,
             inv_sample_rate: self.inv_sample_rate,
         };
@@ -414,9 +429,11 @@ fn effective_gather(mode: ResampleMode, is_psg: bool) -> EffectiveGather {
     match mode {
         ResampleMode::NearestNeighbor => EffectiveGather::Nearest,
         ResampleMode::Linear => EffectiveGather::Linear,
-        // Authentic never reaches the standard gather: `advance` branches into the chain first,
-        // and `advance_block` routes any non-Sinc resolution through per-sample `advance`.
-        ResampleMode::Authentic { .. } => EffectiveGather::Nearest,
+        // The chain modes never reach the standard gather: `advance` branches into the chain
+        // first, and `advance_block` routes any non-Sinc resolution through per-sample `advance`.
+        ResampleMode::Authentic { .. } | ResampleMode::CrunchyAuthentic { .. } => {
+            EffectiveGather::Nearest
+        }
         ResampleMode::SincSampleNyquist { .. } => EffectiveGather::Sinc {
             step_mode: is_psg,
             cutoff_hz: None,
@@ -875,6 +892,130 @@ mod tests {
                 instr.output
             );
         }
+    }
+
+    /// A [`sine_sample`] flagged as a PSG square voice.
+    fn psg_sine_sample(period: usize, periods: usize, src_rate: f64) -> Arc<Sample> {
+        let len = period * periods;
+        let data: Vec<f32> = (0..len)
+            .map(|k| (2.0 * PI * k as f64 / period as f64).sin() as f32)
+            .collect();
+        let mut s = Sample::new(data, 440.0, src_rate, true, 0);
+        s.is_psg_square = true;
+        Arc::new(s)
+    }
+
+    /// Runs one GBA-chain voice (`mixer_hz = 13379`) for `n` output samples at `out_rate`.
+    fn run_gba_chain(
+        out_rate: f64,
+        sample: Arc<Sample>,
+        mode: ResampleMode,
+        tables: &ResampleTables,
+        n: usize,
+    ) -> Vec<f64> {
+        let mut instr = SampleInstrument::new(out_rate, sample);
+        instr.chain = HardwareChain {
+            mixer_hz: Some(13379.0),
+            dac_hz: 32768.0,
+        };
+        instr.set_pitch(
+            VoicePitch::Midi {
+                note: 69.0,
+                sample_pitch_hz: 440.0,
+            },
+            TuningSystem::Equal,
+        );
+        instr.begin_note(1.0, false);
+        instr.playing = true;
+        (0..n)
+            .map(|_| {
+                instr.advance(mode, Some(tables), false);
+                instr.output
+            })
+            .collect()
+    }
+
+    #[test]
+    fn crunchy_authentic_psg_matches_authentic() {
+        // A PSG voice is untouched by the crunchy reconstruction (it bypasses the software mixer),
+        // so GBA Crunchy Authentic must produce bit-identical output to GBA Authentic for one.
+        let tables = ResampleTables::new(16);
+        let s = psg_sine_sample(16, 8, 16384.0);
+        let n = 512;
+        let auth = run_gba_chain(
+            32768.0,
+            s.clone(),
+            ResampleMode::Authentic {
+                half_taps: 16,
+                cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+            },
+            &tables,
+            n,
+        );
+        let crunchy = run_gba_chain(
+            32768.0,
+            s,
+            ResampleMode::CrunchyAuthentic {
+                half_taps: 16,
+                cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+            },
+            &tables,
+            n,
+        );
+        for (i, (a, b)) in auth.iter().zip(&crunchy).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-12,
+                "sample {i}: authentic={a}, crunchy={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn crunchy_authentic_reconstructs_sampled_voice() {
+        // A sampled (non-PSG) sine through the crunchy chain must still pass its fundamental, and
+        // it must differ from the hardware-hold (linear + NN) chain — proving the sinc
+        // reconstruction and band-limited ZOH stages are actually engaged for sampled voices.
+        let out_rate = 32768.0;
+        let src_rate = 8192.0;
+        let sample = sine_sample(16, 8, src_rate); // 512 Hz fundamental
+        let tables = ResampleTables::new(32);
+        let warmup = 128;
+        let n = 2048; // 512 Hz lands on a bin (rate/n = 16 Hz)
+        let off = ResampleMode::CUTOFF_OFF_HZ;
+        let crunchy = run_gba_chain(
+            out_rate,
+            sample.clone(),
+            ResampleMode::CrunchyAuthentic {
+                half_taps: 32,
+                cutoff_hz: off,
+            },
+            &tables,
+            warmup + n,
+        );
+        let hardware = run_gba_chain(
+            out_rate,
+            sample,
+            ResampleMode::Authentic {
+                half_taps: 32,
+                cutoff_hz: off,
+            },
+            &tables,
+            warmup + n,
+        );
+        let fund = amp_at(&crunchy[warmup..], 512.0, out_rate);
+        assert!(
+            fund > 0.8,
+            "crunchy chain should pass the fundamental: {fund}"
+        );
+        let max_diff = crunchy
+            .iter()
+            .zip(&hardware)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_diff > 1e-6,
+            "crunchy reconstruction should differ from the hardware-hold chain: {max_diff}"
+        );
     }
 
     #[test]

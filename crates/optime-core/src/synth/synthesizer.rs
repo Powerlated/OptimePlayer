@@ -163,7 +163,8 @@ impl SampleSynthesizer {
         let needed_taps = match config.resample {
             ResampleMode::SincSampleNyquist { half_taps }
             | ResampleMode::SincOutputNyquist { half_taps, .. }
-            | ResampleMode::Authentic { half_taps, .. } => Some(half_taps),
+            | ResampleMode::Authentic { half_taps, .. }
+            | ResampleMode::CrunchyAuthentic { half_taps, .. } => Some(half_taps),
             _ => None,
         };
         if let Some(ht) = needed_taps {
