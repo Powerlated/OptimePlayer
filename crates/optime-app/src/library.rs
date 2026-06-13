@@ -114,7 +114,7 @@ impl Default for ResampleSettings {
             sinc_taps: 32,
             psg_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
             sampler_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
-            authentic_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
+            authentic_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ_GBA_AUTHENTIC,
             smooth_psg_pops: false,
         }
     }

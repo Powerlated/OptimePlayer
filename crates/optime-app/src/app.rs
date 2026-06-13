@@ -78,14 +78,15 @@ enum LibraryView {
     Playlist(usize),
 }
 
-/// Demo SDATs available to load. Native reads from `demos/`; web fetches them at runtime.
+/// Demo files available to load. Native reads from `demos/`; web fetches them at runtime.
 const DEMOS: &[(&str, &str)] = &[
-    ("Super Mario 64 DS", "super-mario-64-ds"),
-    ("New Super Mario Bros.", "new-super-mario-bros"),
-    ("Pokémon Platinum", "pokemon-platinum"),
-    ("Pokémon HeartGold", "pokemon-heartgold"),
-    ("Pokémon Black 2", "pokemon-black-2"),
-    ("Ace Attorney", "ace-attorney"),
+    ("Super Mario 64 DS", "super-mario-64-ds.sdat"),
+    ("New Super Mario Bros.", "new-super-mario-bros.sdat"),
+    ("Pokémon Emerald", "pokemon-emerald.gbaaudio"),
+    ("Pokémon Platinum", "pokemon-platinum.sdat"),
+    ("Pokémon HeartGold", "pokemon-heartgold.sdat"),
+    ("Pokémon Black 2", "pokemon-black-2.sdat"),
+    ("Ace Attorney", "ace-attorney.sdat"),
 ];
 
 /// The application state.
@@ -335,12 +336,12 @@ impl OptimeApp {
         let _ = ctx;
     }
 
-    /// Loads a demo SDAT. Native reads from `demos/`; web fetches it (copied into the deploy by
+    /// Loads a demo. Native reads from `demos/`; web fetches it (copied into the deploy by
     /// Trunk) into [`Self::pending_file`].
     fn request_demo(&mut self, stem: &str, label: &str) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            match std::fs::read(format!("demos/{stem}.sdat")) {
+            match std::fs::read(format!("demos/{stem}")) {
                 Ok(bytes) => self.load_bytes(&bytes, stem, label),
                 Err(_) => self.status = format!("Demo '{label}' not found in demos/."),
             }
@@ -350,7 +351,7 @@ impl OptimeApp {
             self.status = format!("Loading {label}…");
             let inbox = self.pending_file.clone();
             let key = stem.to_owned();
-            let url = format!("{stem}.sdat");
+            let url = format!("{stem}");
             wasm_bindgen_futures::spawn_local(async move {
                 if let Some(bytes) = crate::web::fetch_bytes(&url).await {
                     if let Ok(mut slot) = inbox.lock() {
@@ -679,7 +680,7 @@ impl OptimeApp {
         {
             std::thread::spawn(move || {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("DS / GBA sound", &["nds", "sdat", "gba"])
+                    .add_filter("DS / GBA sound", &["nds", "sdat", "gba", "gbaaudio"])
                     .pick_file()
                 {
                     let key = path

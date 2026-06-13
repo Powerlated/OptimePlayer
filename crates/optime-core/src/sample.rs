@@ -48,9 +48,11 @@ pub enum ResampleMode {
 }
 
 impl ResampleMode {
-    /// A cutoff high enough to never bite below any practical output Nyquist — the "no extra
-    /// filtering" slider position.
-    pub const CUTOFF_OFF_HZ: u32 = 24_000;
+    /// This makes things far more listenable
+    pub const CUTOFF_OFF_HZ: u32 = 15_000;
+
+    /// This makes GBA authentic mode far more listenable
+    pub const CUTOFF_OFF_HZ_GBA_AUTHENTIC: u32 = 15_000;
 }
 
 /// A decoded waveform plus the metadata needed to play it back at the correct pitch.
