@@ -129,7 +129,10 @@ fn renders_audio_in_authentic_mode() {
     let sr = 48_000.0;
     let mut controller = SynthController::new(sr, &data, 0).expect("song 0 should load");
     let config = SynthConfig {
-        resample: optime_core::ResampleMode::Authentic { half_taps: 16 },
+        resample: optime_core::ResampleMode::Authentic {
+            half_taps: 16,
+            cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
+        },
         ..SynthConfig::default()
     };
 

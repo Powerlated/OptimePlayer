@@ -18,6 +18,19 @@ use crate::sample::Sample;
 /// Ring capacity in DAC-rate samples: one full tap window at the widest supported kernel.
 const RING_LEN: usize = 2 * MAX_HALF_TAPS + 2;
 
+/// Per-call chain parameters, resolved by the owning voice.
+pub(super) struct ChainParams {
+    /// The voice's *resolved* chain: `mixer_hz` must already be `None` for PSG voices and
+    /// mixer-less devices (straight nearest-neighbour at the DAC rate).
+    pub chain: HardwareChain,
+    /// Extra low-pass on the final reconstruction (the Authentic mode's cutoff slider), Hz.
+    pub cutoff_hz: u32,
+    /// Source samples per source-rate second of playback (the voice's pitch ratio).
+    pub freq_ratio: f64,
+    /// Reciprocal of the output sample rate.
+    pub inv_sample_rate: f64,
+}
+
 /// The running chain state of one voice.
 #[derive(Clone)]
 pub(super) struct AuthenticState {
@@ -71,20 +84,21 @@ impl AuthenticState {
 
     /// Advances the chain by one output sample and returns the reconstructed (unscaled) value.
     ///
-    /// `chain` is the voice's *resolved* chain: `mixer_hz` must already be `None` for PSG
-    /// voices and mixer-less devices (straight nearest-neighbour at the DAC rate). With
-    /// `gather` false the final reconstruction is skipped (returning 0) for fully attenuated
-    /// voices while the chain still advances.
+    /// With `gather` false the final reconstruction is skipped (returning 0) for fully
+    /// attenuated voices while the chain still advances.
     pub fn advance(
         &mut self,
         sample: &Sample,
-        freq_ratio: f64,
-        chain: HardwareChain,
-        inv_sample_rate: f64,
+        params: &ChainParams,
         tables: &ResampleTables,
         gather: bool,
     ) -> f64 {
-        let HardwareChain { mixer_hz, dac_hz } = chain;
+        let &ChainParams {
+            chain: HardwareChain { mixer_hz, dac_hz },
+            cutoff_hz,
+            freq_ratio,
+            inv_sample_rate,
+        } = params;
         // DAC samples per output sample.
         let r_dac = dac_hz * inv_sample_rate;
         self.t_dac += r_dac;
@@ -135,7 +149,9 @@ impl AuthenticState {
                 self.ring[k.rem_euclid(RING_LEN as i64) as usize]
             };
         }
-        let fc = (0.5 / r_dac).min(0.5);
+        // fc in cycles per DAC sample: the reconstruction band limit, the output Nyquist when
+        // downsampling, and the user's extra cutoff, whichever is lowest.
+        let fc = (0.5 / r_dac).min(0.5).min(f64::from(cutoff_hz) / dac_hz);
         resample_sinc(tables, &buf[..n], self.t_dac, fc, false)
     }
 

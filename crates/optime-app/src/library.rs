@@ -88,6 +88,38 @@ impl Library {
     }
 }
 
+/// Per-device resampling settings — each console keeps its own, so e.g. the DS can play
+/// Crunchy while the GBA plays Authentic.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ResampleSettings {
+    /// Mode index: 0=Nearest, 1=Linear, 2=Crunchy sinc, 3=Clean sinc, 4=Authentic.
+    pub choice: usize,
+    /// Total source-tap count for the sinc/reconstruction kernel.
+    pub sinc_taps: usize,
+    /// Crunchy-mode low-pass cutoff (Hz) for PSG voices.
+    pub psg_cutoff_hz: u32,
+    /// Crunchy-mode low-pass cutoff (Hz) for DirectSound/sampled voices.
+    pub sampler_cutoff_hz: u32,
+    /// Authentic-mode low-pass cutoff (Hz) on the final reconstruction.
+    pub authentic_cutoff_hz: u32,
+    /// Crunchy-mode option: smooth out PSG on/off pops instead of preserving the clicks.
+    pub smooth_psg_pops: bool,
+}
+
+impl Default for ResampleSettings {
+    fn default() -> Self {
+        Self {
+            choice: 2,
+            sinc_taps: 32,
+            psg_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
+            sampler_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
+            authentic_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
+            smooth_psg_pops: false,
+        }
+    }
+}
+
 /// The full app state saved to (and restored from) eframe storage.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -106,14 +138,10 @@ pub struct Persisted {
     pub bass_mono_freq: f32,
     pub tuning_choice: usize,
     pub pure_tonic: i32,
-    pub resample_choice: usize,
-    pub sinc_taps: usize,
-    /// Crunchy-mode low-pass cutoff (Hz) for PSG voices.
-    pub psg_cutoff_hz: u32,
-    /// Crunchy-mode low-pass cutoff (Hz) for DirectSound/sampled voices.
-    pub sampler_cutoff_hz: u32,
-    /// Smooth out PSG on/off pops instead of preserving the hardware clicks.
-    pub smooth_psg_pops: bool,
+    /// Nintendo DS resampling settings.
+    pub nds_resample: ResampleSettings,
+    /// GBA resampling settings.
+    pub gba_resample: ResampleSettings,
     /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
     pub delay_smoothing_choice: usize,
 }
@@ -132,11 +160,8 @@ impl Default for Persisted {
             bass_mono_freq: 200.0,
             tuning_choice: 0,
             pure_tonic: 0,
-            resample_choice: 2,
-            sinc_taps: 32,
-            psg_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
-            sampler_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
-            smooth_psg_pops: false,
+            nds_resample: ResampleSettings::default(),
+            gba_resample: ResampleSettings::default(),
             delay_smoothing_choice: 0,
         }
     }

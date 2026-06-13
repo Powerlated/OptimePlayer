@@ -41,6 +41,9 @@ pub enum ResampleMode {
     Authentic {
         /// Half-width of the final-stage reconstruction kernel in DAC samples (≥ 1).
         half_taps: usize,
+        /// Extra low-pass cutoff (Hz) applied by the final reconstruction stage
+        /// ([`CUTOFF_OFF_HZ`](Self::CUTOFF_OFF_HZ) = no extra filtering).
+        cutoff_hz: u32,
     },
 }
 

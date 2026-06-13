@@ -901,6 +901,49 @@ mod tests {
         (right as u8, left as u8)
     }
 
+    /// The pan-law agreement between this device core and the SynthController.
+    ///
+    /// The hardware computes *per-side* channel envelopes (`env_l`, `env_r`). The controller's
+    /// stereo stage is linear — `l = volume·(1−pan)`, `r = volume·pan` — so the device emits
+    /// `volume = (env_l+env_r)/512` per voice and `pan = mr/(mr+ml)` per track
+    /// (`refresh_changed_tracks`/`envelope_frame`). For the non-rhythm voices that share the
+    /// track's mixer volumes, that composition must land on the hardware's own per-side values
+    /// `env_l/512`, `env_r/512` (up to the integer quantization and the engine's inherent
+    /// 127-left/128-right asymmetry). Rhythm voices with a fixed per-voice pan keep their pan
+    /// inside the per-voice volume instead — the track pan is the agreed approximation there.
+    #[test]
+    fn pan_law_composition_matches_per_side_envelopes() {
+        for velocity in [1u8, 64, 100, 127] {
+            for vol_ml in [1u8, 30, 90, 178, 255] {
+                for vol_mr in [1u8, 30, 90, 178, 255] {
+                    for env in [40u8, 128, 255] {
+                        // The device's per-voice emission (envelope_frame).
+                        let (right_vol, left_vol) = chn_vol_set(velocity, None, vol_mr, vol_ml);
+                        let uvol = (u32::from(env) * (MASTER_VOLUME + 1)) >> 4;
+                        let env_r = (u32::from(right_vol) * uvol) >> 8;
+                        let env_l = (u32::from(left_vol) * uvol) >> 8;
+                        let volume = (env_l + env_r) as f64 / 512.0;
+                        // The device's per-track pan (refresh_changed_tracks).
+                        let (mr, ml) = (f64::from(vol_mr), f64::from(vol_ml));
+                        let pan = mr / (mr + ml);
+                        // The controller's linear stereo stage (SampleSynthesizer::apply_stereo).
+                        let l = volume * (1.0 - pan);
+                        let r = volume * pan;
+
+                        let want_l = env_l as f64 / 512.0;
+                        let want_r = env_r as f64 / 512.0;
+                        let tol = 0.01;
+                        assert!(
+                            (l - want_l).abs() < tol && (r - want_r).abs() < tol,
+                            "vel={velocity} ml={vol_ml} mr={vol_mr} env={env}: \
+                             got ({l:.4}, {r:.4}), hardware ({want_l:.4}, {want_r:.4})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn chn_vol_set_matches_pokeemerald() {
         for velocity in [0u8, 1, 64, 100, 127, 255] {

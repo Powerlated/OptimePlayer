@@ -12,7 +12,7 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
-use crate::library::{Library, Persisted, RepeatMode, TrackRef};
+use crate::library::{Library, Persisted, RepeatMode, ResampleSettings, TrackRef};
 use crate::piano_roll::PianoRoll;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
@@ -108,18 +108,9 @@ pub struct OptimeApp {
     pure_tonic: i32,
     track_enables: [bool; TRACK_COUNT],
 
-    /// Resampling mode index: 0=Nearest, 1=Linear, 2=SincOutputNyquist (crunchy),
-    /// 3=SincSampleNyquist (clean), 4=Authentic (hardware chain).
-    resample_choice: usize,
-    /// Total source-tap count for the sinc kernel (the kernel spans `sinc_taps` source samples,
-    /// i.e. `sinc_taps / 2` per side, regardless of the resampling ratio).
-    sinc_taps: usize,
-    /// Crunchy-mode low-pass cutoff (Hz) for PSG voices.
-    psg_cutoff_hz: u32,
-    /// Crunchy-mode low-pass cutoff (Hz) for DirectSound/sampled voices.
-    sampler_cutoff_hz: u32,
-    /// Smooth out PSG on/off pops instead of preserving the hardware clicks.
-    smooth_psg_pops: bool,
+    /// Per-device resampling settings (the device of the current song picks which applies).
+    nds_resample: ResampleSettings,
+    gba_resample: ResampleSettings,
     /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
     delay_smoothing_choice: usize,
 
@@ -218,11 +209,8 @@ impl OptimeApp {
             tuning_choice: p.tuning_choice,
             pure_tonic: p.pure_tonic,
             track_enables: [true; TRACK_COUNT],
-            resample_choice: p.resample_choice,
-            sinc_taps: p.sinc_taps,
-            psg_cutoff_hz: p.psg_cutoff_hz,
-            sampler_cutoff_hz: p.sampler_cutoff_hz,
-            smooth_psg_pops: p.smooth_psg_pops,
+            nds_resample: p.nds_resample,
+            gba_resample: p.gba_resample,
             delay_smoothing_choice: p.delay_smoothing_choice,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
@@ -291,11 +279,8 @@ impl OptimeApp {
             bass_mono_freq: self.bass_mono_freq,
             tuning_choice: self.tuning_choice,
             pure_tonic: self.pure_tonic,
-            resample_choice: self.resample_choice,
-            sinc_taps: self.sinc_taps,
-            psg_cutoff_hz: self.psg_cutoff_hz,
-            sampler_cutoff_hz: self.sampler_cutoff_hz,
-            smooth_psg_pops: self.smooth_psg_pops,
+            nds_resample: self.nds_resample.clone(),
+            gba_resample: self.gba_resample.clone(),
             delay_smoothing_choice: self.delay_smoothing_choice,
         }
     }
@@ -376,6 +361,25 @@ impl OptimeApp {
         }
     }
 
+    /// Whether the active (current song's, else first loaded) archive is a GBA ROM — selects
+    /// which device's resampling settings apply.
+    fn active_device_is_gba(&self) -> bool {
+        let idx = self
+            .current_song
+            .and_then(|i| self.songs.get(i))
+            .map_or(0, |s| s.archive_index);
+        matches!(self.archives.get(idx), Some(SoundData::Gba(_)))
+    }
+
+    /// The resampling settings of the active device.
+    fn active_resample(&self) -> &ResampleSettings {
+        if self.active_device_is_gba() {
+            &self.gba_resample
+        } else {
+            &self.nds_resample
+        }
+    }
+
     /// The active synth config built from the UI mirrors.
     fn config(&self) -> SynthConfig {
         let tuning = if self.tuning_choice == 0 {
@@ -385,21 +389,24 @@ impl OptimeApp {
                 tonic: self.pure_tonic,
             }
         };
-        let resample = match self.resample_choice {
+        let rs = self.active_resample();
+        let half_taps = (rs.sinc_taps / 2).max(1);
+        let resample = match rs.choice {
             1 => ResampleMode::Linear,
             2 => ResampleMode::SincOutputNyquist {
-                half_taps: (self.sinc_taps / 2).max(1),
-                psg_cutoff_hz: self.psg_cutoff_hz,
-                sampler_cutoff_hz: self.sampler_cutoff_hz,
+                half_taps,
+                psg_cutoff_hz: rs.psg_cutoff_hz,
+                sampler_cutoff_hz: rs.sampler_cutoff_hz,
             },
-            3 => ResampleMode::SincSampleNyquist {
-                half_taps: (self.sinc_taps / 2).max(1),
-            },
+            3 => ResampleMode::SincSampleNyquist { half_taps },
             4 => ResampleMode::Authentic {
-                half_taps: (self.sinc_taps / 2).max(1),
+                half_taps,
+                cutoff_hz: rs.authentic_cutoff_hz,
             },
             _ => ResampleMode::NearestNeighbor,
         };
+        // Pop smoothing is a crunchy-mode option; the other modes keep the hardware edges.
+        let smooth_psg_pops = rs.smooth_psg_pops && rs.choice == 2;
         SynthConfig {
             stereo_separation: self.stereo_separation,
             force_stereo_separation: self.force_stereo_separation,
@@ -408,7 +415,7 @@ impl OptimeApp {
             tuning,
             track_enables: self.track_enables,
             resample,
-            smooth_psg_pops: self.smooth_psg_pops,
+            smooth_psg_pops,
             delay_smoothing: match self.delay_smoothing_choice {
                 1 => DelaySmoothing::HoldDuringNotes,
                 _ => DelaySmoothing::None,
@@ -1190,87 +1197,107 @@ impl OptimeApp {
             });
         });
         ui.separator();
-        ui.label("Resampling");
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("resample")
-                .selected_text(match self.resample_choice {
-                    1 => "Linear",
-                    2 => "Sinc – output Nyquist (crunch)",
-                    3 => "Sinc – sample Nyquist (clean)",
-                    4 => "Authentic (hardware chain)",
-                    _ => "Nearest (DS hardware)",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.resample_choice, 0, "Nearest (DS hardware)");
-                    ui.selectable_value(&mut self.resample_choice, 1, "Linear");
-                    ui.selectable_value(
-                        &mut self.resample_choice,
-                        2,
-                        "Sinc – output Nyquist (crunch)",
-                    );
-                    ui.selectable_value(
-                        &mut self.resample_choice,
-                        3,
-                        "Sinc – sample Nyquist (clean)",
-                    );
-                    ui.selectable_value(&mut self.resample_choice, 4, "Authentic (hardware chain)")
-                        .on_hover_text(
-                            "Reproduce the console's output chain exactly: GBA DirectSound is \
-                             linear-interpolated to the 13379 Hz mixer, nearest-neighbour held \
-                             at the 32768 Hz DAC, then properly converted to the output rate; \
-                             PSGs are nearest-neighbour sampled at the DAC rate.",
-                        );
-                });
-            if ui
-                .add_enabled(
-                    matches!(self.resample_choice, 2 | 3),
-                    egui::Button::new("📈"),
+        // Resampling settings are per device: the section edits the settings of whichever
+        // console the current song plays on, so e.g. the DS can stay Crunchy while the GBA
+        // plays Authentic.
+        let is_gba = self.active_device_is_gba();
+        ui.label(if is_gba {
+            "Resampling (GBA)"
+        } else {
+            "Resampling (Nintendo DS)"
+        });
+        let mut open_sinc_plot = false;
+        {
+            let rs = if is_gba {
+                &mut self.gba_resample
+            } else {
+                &mut self.nds_resample
+            };
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("resample")
+                    .selected_text(match rs.choice {
+                        1 => "Linear",
+                        2 => "Sinc – output Nyquist (crunch)",
+                        3 => "Sinc – sample Nyquist (clean)",
+                        4 => "Authentic (hardware chain)",
+                        _ => "Nearest neighbour",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut rs.choice, 0, "Nearest neighbour");
+                        ui.selectable_value(&mut rs.choice, 1, "Linear");
+                        ui.selectable_value(&mut rs.choice, 2, "Sinc – output Nyquist (crunch)");
+                        ui.selectable_value(&mut rs.choice, 3, "Sinc – sample Nyquist (clean)");
+                        ui.selectable_value(&mut rs.choice, 4, "Authentic (hardware chain)")
+                            .on_hover_text(
+                                "Reproduce the console's output chain exactly: GBA DirectSound \
+                                 is linear-interpolated to the 13379 Hz mixer, \
+                                 nearest-neighbour held at the 32768 Hz DAC, then properly \
+                                 converted to the output rate; PSGs are nearest-neighbour \
+                                 sampled at the DAC rate.",
+                            );
+                    });
+                if ui
+                    .add_enabled(matches!(rs.choice, 2 | 3), egui::Button::new("📈"))
+                    .on_hover_text("Analyze sinc kernel")
+                    .clicked()
+                {
+                    open_sinc_plot = true;
+                }
+            });
+            // Only the options of the selected mode are shown.
+            if rs.choice >= 2 {
+                ui.add(
+                    egui::Slider::new(&mut rs.sinc_taps, 4..=128)
+                        .step_by(2.0)
+                        .text("Sinc taps")
+                        .logarithmic(false),
                 )
-                .on_hover_text("Analyze sinc kernel")
-                .clicked()
-            {
-                self.sinc_plot_open = true;
+                .on_hover_text(
+                    "Number of source samples the kernel spans — fixed regardless of pitch, \
+                     so CPU cost is constant per voice. More taps → sharper cutoff and better \
+                     stopband rejection, at higher CPU cost.",
+                );
             }
-        });
-        let is_sinc = self.resample_choice >= 2;
-        ui.add_enabled_ui(is_sinc, |ui| {
-            ui.add(
-                egui::Slider::new(&mut self.sinc_taps, 4..=128)
-                    .step_by(2.0)
-                    .text("Sinc taps")
-                    .logarithmic(false),
-            )
-            .on_hover_text(
-                "Number of source samples the kernel spans — fixed regardless of pitch, \
-                 so CPU cost is constant per voice. More taps → sharper cutoff and better \
-                 stopband rejection, at higher CPU cost.",
-            );
-        });
-        // The crunchy mode's per-kind cutoff sliders (parked at the top = no extra filtering).
-        ui.add_enabled_ui(self.resample_choice == 2, |ui| {
-            ui.add(
-                egui::Slider::new(&mut self.psg_cutoff_hz, 1000..=ResampleMode::CUTOFF_OFF_HZ)
-                    .text("PSG cutoff")
+            if rs.choice == 2 {
+                ui.add(
+                    egui::Slider::new(&mut rs.psg_cutoff_hz, 1000..=ResampleMode::CUTOFF_OFF_HZ)
+                        .text("PSG cutoff")
+                        .suffix(" Hz")
+                        .logarithmic(true),
+                )
+                .on_hover_text("Low-pass cutoff for the PSG (square/wave/noise) channels.");
+                ui.add(
+                    egui::Slider::new(
+                        &mut rs.sampler_cutoff_hz,
+                        1000..=ResampleMode::CUTOFF_OFF_HZ,
+                    )
+                    .text("Sampler cutoff")
                     .suffix(" Hz")
                     .logarithmic(true),
-            )
-            .on_hover_text("Low-pass cutoff for the PSG (square/wave/noise) channels.");
-            ui.add(
-                egui::Slider::new(
-                    &mut self.sampler_cutoff_hz,
-                    1000..=ResampleMode::CUTOFF_OFF_HZ,
                 )
-                .text("Sampler cutoff")
-                .suffix(" Hz")
-                .logarithmic(true),
-            )
-            .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
-        });
-        ui.checkbox(&mut self.smooth_psg_pops, "Smooth PSG pops")
-            .on_hover_text(
-                "Slew PSG channel gains over ~2 ms so notes turning abruptly on and off \
-                 don't click. Unchecked preserves the hardware's hard edges.",
-            );
+                .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
+                ui.checkbox(&mut rs.smooth_psg_pops, "Smooth PSG pops")
+                    .on_hover_text(
+                        "Slew PSG channel gains over ~2 ms so notes turning abruptly on and \
+                         off don't click. Unchecked preserves the hardware's hard edges.",
+                    );
+            }
+            if rs.choice == 4 {
+                ui.add(
+                    egui::Slider::new(
+                        &mut rs.authentic_cutoff_hz,
+                        1000..=ResampleMode::CUTOFF_OFF_HZ,
+                    )
+                    .text("Cutoff")
+                    .suffix(" Hz")
+                    .logarithmic(true),
+                )
+                .on_hover_text("Low-pass cutoff applied by the final reconstruction stage.");
+            }
+        }
+        if open_sinc_plot {
+            self.sinc_plot_open = true;
+        }
         ui.separator();
         ui.label("Tuning system");
         egui::ComboBox::from_id_salt("tuning")
@@ -1792,7 +1819,7 @@ impl eframe::App for OptimeApp {
             self.sample_rate,
             self.bass_mono_freq as f64,
         );
-        if self.resample_choice >= 2 {
+        if self.active_resample().choice >= 2 {
             let resample_mode = self.config().resample;
             crate::filter_plot::show_sinc_window(ctx, &mut self.sinc_plot_open, resample_mode);
         }

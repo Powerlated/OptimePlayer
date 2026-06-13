@@ -92,7 +92,10 @@ fn fill_matches_next_sample_smoothed_psg_pops() {
 #[test]
 fn fill_matches_next_sample_authentic() {
     let config = SynthConfig {
-        resample: ResampleMode::Authentic { half_taps: 8 },
+        resample: ResampleMode::Authentic {
+            half_taps: 8,
+            cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+        },
         stereo_separation: true,
         ..SynthConfig::default()
     };

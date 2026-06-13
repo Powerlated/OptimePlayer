@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use super::authentic::AuthenticState;
+use super::authentic::{AuthenticState, ChainParams};
 use super::gather::{gather_sinc, GatherSource};
 use crate::devices::{HardwareChain, VoicePitch};
 use crate::resample::ResampleTables;
@@ -111,9 +111,9 @@ impl SampleInstrument {
         tables: Option<&ResampleTables>,
         smooth_pops: bool,
     ) {
-        if matches!(mode, ResampleMode::Authentic { .. }) {
+        if let ResampleMode::Authentic { cutoff_hz, .. } = mode {
             if let Some(tbl) = tables {
-                return self.advance_authentic(tbl, smooth_pops);
+                return self.advance_authentic(tbl, smooth_pops, cutoff_hz);
             }
             // Tables not yet built; fall back to nearest for this sample.
             return self.advance(ResampleMode::NearestNeighbor, None, smooth_pops);
@@ -211,7 +211,7 @@ impl SampleInstrument {
     /// The Authentic-mode body of [`Self::advance`]: one output sample through the device's
     /// hardware chain (see [`AuthenticState`]). The chain advances even while fully attenuated
     /// so envelope re-opens and one-shot-end detection stay seamless.
-    fn advance_authentic(&mut self, tables: &ResampleTables, smooth_pops: bool) {
+    fn advance_authentic(&mut self, tables: &ResampleTables, smooth_pops: bool, cutoff_hz: u32) {
         // A user switching an already-sounding voice into Authentic mode mid-note: continue
         // from the current source position instead of restarting the waveform.
         if self.authentic.is_fresh() && self.sample_t > 0.0 {
@@ -230,22 +230,22 @@ impl SampleInstrument {
         }
 
         // PSG voices bypass the software mixer on every device.
-        let chain = HardwareChain {
-            mixer_hz: if self.sample.is_psg_square {
-                None
-            } else {
-                self.chain.mixer_hz
+        let params = ChainParams {
+            chain: HardwareChain {
+                mixer_hz: if self.sample.is_psg_square {
+                    None
+                } else {
+                    self.chain.mixer_hz
+                },
+                dac_hz: self.chain.dac_hz,
             },
-            dac_hz: self.chain.dac_hz,
+            cutoff_hz,
+            freq_ratio: self.freq_ratio,
+            inv_sample_rate: self.inv_sample_rate,
         };
-        let result = self.authentic.advance(
-            &self.sample,
-            self.freq_ratio,
-            chain,
-            self.inv_sample_rate,
-            tables,
-            self.gain != 0.0,
-        );
+        let result = self
+            .authentic
+            .advance(&self.sample, &params, tables, self.gain != 0.0);
         self.sample_t = self.authentic.src_pos();
         self.output = result * self.gain;
     }
@@ -797,7 +797,10 @@ mod tests {
         instr.playing = true;
         for (i, &want) in nearest.iter().enumerate() {
             instr.advance(
-                ResampleMode::Authentic { half_taps: 16 },
+                ResampleMode::Authentic {
+                    half_taps: 16,
+                    cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+                },
                 Some(&tables),
                 false,
             );
@@ -852,7 +855,10 @@ mod tests {
 
         for i in 0..n {
             instr.advance(
-                ResampleMode::Authentic { half_taps: 16 },
+                ResampleMode::Authentic {
+                    half_taps: 16,
+                    cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+                },
                 Some(&tables),
                 false,
             );
