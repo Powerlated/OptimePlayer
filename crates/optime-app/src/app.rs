@@ -82,6 +82,7 @@ enum LibraryView {
 const DEMOS: &[(&str, &str)] = &[
     ("Super Mario 64 DS", "super-mario-64-ds.sdat"),
     ("New Super Mario Bros.", "new-super-mario-bros.sdat"),
+    ("Mother 3", "mother-3.gbaaudio"),
     ("Pokémon Emerald", "pokemon-emerald.gbaaudio"),
     ("Pokémon Platinum", "pokemon-platinum.sdat"),
     ("Pokémon HeartGold", "pokemon-heartgold.sdat"),
