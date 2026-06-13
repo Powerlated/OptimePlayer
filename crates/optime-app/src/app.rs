@@ -1220,7 +1220,7 @@ impl OptimeApp {
                         1 => "Linear",
                         2 => "Sinc – output Nyquist (crunch)",
                         3 => "Sinc – sample Nyquist (clean)",
-                        4 => "Authentic (hardware chain)",
+                        4 => "GBA Authentic (GBA hardware chain)",
                         _ => "Nearest neighbour",
                     })
                     .show_ui(ui, |ui| {
@@ -1228,7 +1228,7 @@ impl OptimeApp {
                         ui.selectable_value(&mut rs.choice, 1, "Linear");
                         ui.selectable_value(&mut rs.choice, 2, "Sinc – output Nyquist (crunch)");
                         ui.selectable_value(&mut rs.choice, 3, "Sinc – sample Nyquist (clean)");
-                        ui.selectable_value(&mut rs.choice, 4, "Authentic (hardware chain)")
+                        ui.selectable_value(&mut rs.choice, 4, "GBA Authentic (GBA hardware chain)")
                             .on_hover_text(
                                 "Reproduce the console's output chain exactly: GBA DirectSound \
                                  is linear-interpolated to the 13379 Hz mixer, \
