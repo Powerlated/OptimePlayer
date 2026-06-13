@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::delay::DelayLine;
 use super::instrument::SampleInstrument;
 use super::{CROSSOVER_Q, MAX_BLOCK};
-use crate::devices::VoicePitch;
+use crate::devices::{HardwareChain, VoicePitch};
 use crate::dsp::BiquadFilter;
 use crate::resample::ResampleTables;
 use crate::sample::{ResampleMode, Sample};
@@ -42,11 +42,16 @@ pub struct SampleSynthesizer {
 }
 
 impl SampleSynthesizer {
-    /// Creates a synthesizer with `instrs_available` voices at `sample_rate`.
-    pub fn new(sample_rate: f64, instrs_available: usize) -> Self {
+    /// Creates a synthesizer with `instrs_available` voices at `sample_rate`. `chain` is the
+    /// device's hardware output chain, reproduced by the Authentic resample mode.
+    pub fn new(sample_rate: f64, instrs_available: usize, chain: HardwareChain) -> Self {
         let empty = Arc::new(Sample::new(vec![0.0], 440.0, sample_rate, false, 0));
         let instrs = (0..instrs_available)
-            .map(|_| SampleInstrument::new(sample_rate, empty.clone()))
+            .map(|_| {
+                let mut instr = SampleInstrument::new(sample_rate, empty.clone());
+                instr.chain = chain;
+                instr
+            })
             .collect();
         let delay_len = (sample_rate * 0.1).round() as usize;
         let crossover_freq = 200.0;
@@ -154,7 +159,8 @@ impl SampleSynthesizer {
     fn ensure_tables(&mut self, config: &SynthConfig) {
         let needed_taps = match config.resample {
             ResampleMode::SincSampleNyquist { half_taps }
-            | ResampleMode::SincOutputNyquist { half_taps, .. } => Some(half_taps),
+            | ResampleMode::SincOutputNyquist { half_taps, .. }
+            | ResampleMode::Authentic { half_taps } => Some(half_taps),
             _ => None,
         };
         if let Some(ht) = needed_taps {
@@ -297,7 +303,11 @@ mod tests {
     /// Plays a constant-amplitude looping sample hard-left, settles, and returns `(val_l, val_r)`.
     fn run_dc(config: &SynthConfig) -> (f64, f64) {
         let sample_rate = 32768.0;
-        let mut synth = SampleSynthesizer::new(sample_rate, 16);
+        let chain = HardwareChain {
+            mixer_hz: None,
+            dac_hz: 32768.0,
+        };
+        let mut synth = SampleSynthesizer::new(sample_rate, 16, chain);
         // DC sample so essentially all energy is in the low (bass) band.
         let sample = Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
         synth.play(

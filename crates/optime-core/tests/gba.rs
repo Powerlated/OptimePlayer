@@ -110,6 +110,26 @@ fn renders_audio_and_ends() {
 }
 
 #[test]
+fn renders_audio_in_authentic_mode() {
+    let rom = build_rom();
+    let data = SoundData::load_all(&rom).remove(0);
+    let sr = 48_000.0;
+    let mut controller = SynthController::new(sr, &data, 0).expect("song 0 should load");
+    let config = SynthConfig {
+        resample: optime_core::ResampleMode::Authentic { half_taps: 16 },
+        ..SynthConfig::default()
+    };
+
+    let mut out = vec![0.0f32; 2 * sr as usize];
+    controller.fill(&mut out, &config);
+    let peak = out.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    assert!(
+        peak > 0.01,
+        "the note should be audible through the hardware chain, peak={peak}"
+    );
+}
+
+#[test]
 fn lookahead_sees_the_note() {
     let rom = build_rom();
     let data = SoundData::load_all(&rom).remove(0);

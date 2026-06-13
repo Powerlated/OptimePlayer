@@ -32,6 +32,16 @@ pub enum ResampleMode {
         /// Low-pass cutoff (Hz) for sampled (DirectSound) voices.
         sampler_cutoff_hz: u32,
     },
+    /// Reproduce the device's fixed-rate hardware output chain
+    /// ([`HardwareChain`](crate::devices::HardwareChain)): sampled voices are
+    /// linear-interpolated to the software-mixer rate (GBA: 13379 Hz), nearest-neighbour held at
+    /// the DAC rate (32768 Hz), and properly rate-converted to the output rate; PSG voices are
+    /// nearest-neighbour sampled straight at the DAC rate. Indistinguishable from hardware
+    /// output by construction.
+    Authentic {
+        /// Half-width of the final-stage reconstruction kernel in DAC samples (≥ 1).
+        half_taps: usize,
+    },
 }
 
 impl ResampleMode {

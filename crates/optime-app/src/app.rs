@@ -107,7 +107,8 @@ pub struct OptimeApp {
     pure_tonic: i32,
     track_enables: [bool; TRACK_COUNT],
 
-    /// Resampling mode index: 0=Nearest, 1=Linear, 2=SincOutputNyquist, 3=SincSampleNyquist.
+    /// Resampling mode index: 0=Nearest, 1=Linear, 2=SincOutputNyquist (crunchy),
+    /// 3=SincSampleNyquist (clean), 4=Authentic (hardware chain).
     resample_choice: usize,
     /// Total source-tap count for the sinc kernel (the kernel spans `sinc_taps` source samples,
     /// i.e. `sinc_taps / 2` per side, regardless of the resampling ratio).
@@ -387,6 +388,9 @@ impl OptimeApp {
                 sampler_cutoff_hz: self.sampler_cutoff_hz,
             },
             3 => ResampleMode::SincSampleNyquist {
+                half_taps: (self.sinc_taps / 2).max(1),
+            },
+            4 => ResampleMode::Authentic {
                 half_taps: (self.sinc_taps / 2).max(1),
             },
             _ => ResampleMode::NearestNeighbor,
@@ -1137,6 +1141,7 @@ impl OptimeApp {
                     1 => "Linear",
                     2 => "Sinc – output Nyquist (crunch)",
                     3 => "Sinc – sample Nyquist (clean)",
+                    4 => "Authentic (hardware chain)",
                     _ => "Nearest (DS hardware)",
                 })
                 .show_ui(ui, |ui| {
@@ -1152,9 +1157,19 @@ impl OptimeApp {
                         3,
                         "Sinc – sample Nyquist (clean)",
                     );
+                    ui.selectable_value(&mut self.resample_choice, 4, "Authentic (hardware chain)")
+                        .on_hover_text(
+                            "Reproduce the console's output chain exactly: GBA DirectSound is \
+                             linear-interpolated to the 13379 Hz mixer, nearest-neighbour held \
+                             at the 32768 Hz DAC, then properly converted to the output rate; \
+                             PSGs are nearest-neighbour sampled at the DAC rate.",
+                        );
                 });
             if ui
-                .add_enabled(self.resample_choice >= 2, egui::Button::new("📈"))
+                .add_enabled(
+                    matches!(self.resample_choice, 2 | 3),
+                    egui::Button::new("📈"),
+                )
                 .on_hover_text("Analyze sinc kernel")
                 .clicked()
             {

@@ -3,8 +3,9 @@
 
 use std::sync::Arc;
 
+use super::authentic::AuthenticState;
 use super::gather::{gather_sinc, GatherSource};
-use crate::devices::VoicePitch;
+use crate::devices::{HardwareChain, VoicePitch};
 use crate::resample::ResampleTables;
 use crate::sample::{ResampleMode, Sample};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
@@ -31,6 +32,10 @@ pub struct SampleInstrument {
     gain: f64,
     /// Set by [`Self::begin_fade_out`]: the voice slews to silence and then stops itself.
     fading_out: bool,
+    /// The device's hardware output chain, reproduced by [`ResampleMode::Authentic`].
+    pub chain: HardwareChain,
+    /// Running chain state for the Authentic mode (reset by [`Self::begin_note`]).
+    authentic: AuthenticState,
     /// Fractional sample position.
     pub sample_t: f64,
     /// Whether a looping voice has wrapped past the sample end at least once. Once it has, the
@@ -60,6 +65,12 @@ impl SampleInstrument {
             playing: false,
             gain: 1.0,
             fading_out: false,
+            // The DS-style chain; SampleSynthesizer overwrites this with the device's own.
+            chain: HardwareChain {
+                mixer_hz: None,
+                dac_hz: 32768.0,
+            },
+            authentic: AuthenticState::new(),
             sample_t: 0.0,
             wrapped: false,
             finetune: 0.0,
@@ -79,6 +90,7 @@ impl SampleInstrument {
             volume
         };
         self.fading_out = false;
+        self.authentic = AuthenticState::new();
     }
 
     /// Starts a short fade to silence; the voice flips [`Self::playing`] off once it lands.
@@ -99,6 +111,14 @@ impl SampleInstrument {
         tables: Option<&ResampleTables>,
         smooth_pops: bool,
     ) {
+        if matches!(mode, ResampleMode::Authentic { .. }) {
+            if let Some(tbl) = tables {
+                return self.advance_authentic(tbl, smooth_pops);
+            }
+            // Tables not yet built; fall back to nearest for this sample.
+            return self.advance(ResampleMode::NearestNeighbor, None, smooth_pops);
+        }
+
         // r = source samples advanced per output sample (pitch-shifted playback speed).
         let r = self.freq_ratio * self.sample.sample_rate * self.inv_sample_rate;
         self.sample_t += r;
@@ -185,6 +205,48 @@ impl SampleInstrument {
             }
         };
 
+        self.output = result * self.gain;
+    }
+
+    /// The Authentic-mode body of [`Self::advance`]: one output sample through the device's
+    /// hardware chain (see [`AuthenticState`]). The chain advances even while fully attenuated
+    /// so envelope re-opens and one-shot-end detection stay seamless.
+    fn advance_authentic(&mut self, tables: &ResampleTables, smooth_pops: bool) {
+        // A user switching an already-sounding voice into Authentic mode mid-note: continue
+        // from the current source position instead of restarting the waveform.
+        if self.authentic.is_fresh() && self.sample_t > 0.0 {
+            self.authentic.seed(self.sample_t);
+        }
+
+        // The same gain resolution as the standard path.
+        let target = if self.fading_out { 0.0 } else { self.volume };
+        self.gain = if smooth_pops && self.sample.is_psg_square {
+            slew_toward(self.gain, target, self.inv_sample_rate / POP_SLEW_SECONDS)
+        } else {
+            target
+        };
+        if self.fading_out && self.gain == 0.0 {
+            self.playing = false;
+        }
+
+        // PSG voices bypass the software mixer on every device.
+        let chain = HardwareChain {
+            mixer_hz: if self.sample.is_psg_square {
+                None
+            } else {
+                self.chain.mixer_hz
+            },
+            dac_hz: self.chain.dac_hz,
+        };
+        let result = self.authentic.advance(
+            &self.sample,
+            self.freq_ratio,
+            chain,
+            self.inv_sample_rate,
+            tables,
+            self.gain != 0.0,
+        );
+        self.sample_t = self.authentic.src_pos();
         self.output = result * self.gain;
     }
 
@@ -352,6 +414,9 @@ fn effective_gather(mode: ResampleMode, is_psg: bool) -> EffectiveGather {
     match mode {
         ResampleMode::NearestNeighbor => EffectiveGather::Nearest,
         ResampleMode::Linear => EffectiveGather::Linear,
+        // Authentic never reaches the standard gather: `advance` branches into the chain first,
+        // and `advance_block` routes any non-Sinc resolution through per-sample `advance`.
+        ResampleMode::Authentic { .. } => EffectiveGather::Nearest,
         ResampleMode::SincSampleNyquist { .. } => EffectiveGather::Sinc {
             step_mode: is_psg,
             cutoff_hz: None,
@@ -696,6 +761,112 @@ mod tests {
             assert!(
                 (a_other - a_open).abs() < 0.05 * a_open,
                 "is_psg={is_psg}: the other kind's slider must not apply: {a_other} vs {a_open}"
+            );
+        }
+    }
+
+    #[test]
+    fn authentic_psg_is_nearest_neighbour_at_dac_rate() {
+        // With the output rate equal to the DAC rate, a PSG voice through the Authentic chain
+        // must reproduce plain nearest-neighbour sampling exactly: PSGs bypass the software
+        // mixer, are NN-sampled at the DAC rate, and the final reconstruction is transparent
+        // at ratio 1.
+        let out_rate = 32768.0;
+        let mut s = sine_sample(16, 8, 16384.0);
+        let sm = Arc::get_mut(&mut s).unwrap();
+        sm.is_psg_square = true;
+        let tables = ResampleTables::new(16);
+        let n = 512;
+
+        let nearest = render(out_rate, s.clone(), ResampleMode::NearestNeighbor, None, n);
+
+        let mut instr = SampleInstrument::new(out_rate, s);
+        // A GBA-style chain: the mixer stage must be bypassed for PSG voices.
+        instr.chain = HardwareChain {
+            mixer_hz: Some(13379.0),
+            dac_hz: 32768.0,
+        };
+        instr.set_pitch(
+            VoicePitch::Midi {
+                note: 69.0,
+                sample_pitch_hz: 440.0,
+            },
+            TuningSystem::Equal,
+        );
+        instr.begin_note(1.0, false);
+        instr.playing = true;
+        for (i, &want) in nearest.iter().enumerate() {
+            instr.advance(
+                ResampleMode::Authentic { half_taps: 16 },
+                Some(&tables),
+                false,
+            );
+            assert!(
+                (instr.output - want).abs() < 1e-9,
+                "sample {i}: authentic={}, nearest={want}",
+                instr.output
+            );
+        }
+    }
+
+    #[test]
+    fn authentic_chain_matches_reference_stages() {
+        // A sampled (non-PSG) voice with the output rate equal to the DAC rate: the Authentic
+        // output must equal the two integer-rate hardware stages computed directly — linear
+        // interpolation onto the 13379 Hz mixer grid, nearest-neighbour hold onto the
+        // 32768 Hz DAC grid (the reconstruction is transparent at ratio 1).
+        let out_rate = 32768.0;
+        let (mixer, dac) = (13379.0, 32768.0);
+        let src_rate = 8192.0;
+        let sample = sine_sample(16, 8, src_rate); // looping, loop_point 0
+        let tables = ResampleTables::new(16);
+        let n = 512usize;
+
+        let mut instr = SampleInstrument::new(out_rate, sample.clone());
+        instr.chain = HardwareChain {
+            mixer_hz: Some(mixer),
+            dac_hz: dac,
+        };
+        instr.set_pitch(
+            VoicePitch::Midi {
+                note: 69.0,
+                sample_pitch_hz: 440.0,
+            },
+            TuningSystem::Equal,
+        );
+        instr.begin_note(1.0, false);
+        instr.playing = true;
+
+        // Reference chain (loop_point 0 ⇒ source reads are simply modulo the length).
+        let data = &sample.data;
+        let len = data.len() as i64;
+        let lerp = |pos: f64| -> f64 {
+            let i = pos.floor() as i64;
+            let frac = pos - i as f64;
+            let a = f64::from(data[(i.rem_euclid(len)) as usize]);
+            let b = f64::from(data[((i + 1).rem_euclid(len)) as usize]);
+            a + (b - a) * frac
+        };
+        let r_mix = src_rate / mixer; // freq_ratio = 1
+        let (mut src_pos, mut mix_acc, mut hold) = (0.0f64, 1.0f64, 0.0f64);
+
+        for i in 0..n {
+            instr.advance(
+                ResampleMode::Authentic { half_taps: 16 },
+                Some(&tables),
+                false,
+            );
+            mix_acc += mixer / dac;
+            while mix_acc >= 1.0 {
+                mix_acc -= 1.0;
+                src_pos += r_mix;
+                hold = lerp(src_pos);
+            }
+            // The ring stores f32, so allow its rounding.
+            assert!(
+                (instr.output - hold).abs() < 1e-6,
+                "sample {i}: authentic={}, reference={hold}",
+                instr.output
             );
         }
     }

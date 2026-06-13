@@ -25,3 +25,7 @@ pub const GBA_CLOCK_RATE: u64 = 16_777_216;
 
 /// CPU cycles per LCD refresh — the MP2K engine runs once per VBlank (≈59.7275 Hz).
 pub const CYCLES_PER_FRAME: u64 = 280_896;
+
+/// The software mixer rate (`SOUND_MODE_FREQ_13379`) — the playback rate of fixed-frequency
+/// voices and the rate every DirectSound voice is mixed at on hardware.
+pub const ENGINE_RATE: f64 = 13379.0;

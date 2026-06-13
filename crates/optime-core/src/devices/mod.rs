@@ -18,7 +18,7 @@ pub mod gba;
 mod messages;
 pub mod nintendo_ds;
 
-pub use messages::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
+pub use messages::{HardwareChain, SynthEvent, TickFeedback, VoiceId, VoicePitch};
 
 use crate::synth_controller::SynthConfig;
 
@@ -100,6 +100,24 @@ impl DevicePlayer {
     /// Device ticks per second.
     pub fn tick_rate(&self) -> f64 {
         self.clock_rate() / self.cycles_per_tick()
+    }
+
+    /// The fixed-rate hardware output chain of this console, reproduced by the Authentic
+    /// resample mode.
+    pub fn hardware_chain(&self) -> HardwareChain {
+        match self {
+            // The DS resamples every channel directly at its 32768 Hz mixer/DAC rate.
+            DevicePlayer::NintendoDs(_) => HardwareChain {
+                mixer_hz: None,
+                dac_hz: 32768.0,
+            },
+            // MP2K software-mixes DirectSound voices at the 13379 Hz engine rate, then the
+            // hardware holds that (and the PSG channels) at the 32768 Hz DAC rate.
+            DevicePlayer::Gba(_) => HardwareChain {
+                mixer_hz: Some(gba::ENGINE_RATE),
+                dac_hz: 32768.0,
+            },
+        }
     }
 
     /// Sequencer steps executed so far — the note-timeline position for visualizers

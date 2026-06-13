@@ -4,9 +4,11 @@
 //! The pieces live in this module's children:
 //! - [`gather`] — the windowed-sinc tap-staging gather (resampler front-end).
 //! - [`instrument`] — [`SampleInstrument`], a single pitch-shifted voice.
+//! - [`authentic`] — the per-voice hardware-chain state behind the Authentic resample mode.
 //! - [`synthesizer`] — [`SampleSynthesizer`], the per-track polyphonic voice pool + stereo stage.
 //! - [`delay`] — the Haas-effect [`DelayLine`].
 
+mod authentic;
 mod delay;
 mod gather;
 mod instrument;

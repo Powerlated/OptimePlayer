@@ -30,7 +30,7 @@ pub use devices::nintendo_ds::{
     calc_channel_volume, BankInfo, InstrumentBank, InstrumentRecord, InstrumentType, Message,
     MessageType, Sdat, Sequence, SequenceTrack, SseqInfo, SwarInfo,
 };
-pub use devices::{DevicePlayer, SoundData, SynthEvent, VoiceId, VoicePitch};
+pub use devices::{DevicePlayer, HardwareChain, SoundData, SynthEvent, VoiceId, VoicePitch};
 pub use dsp::BiquadFilter;
 pub use resample::{fir_kernel, fir_response, ResampleTables};
 pub use sample::{decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, ResampleMode, Sample};

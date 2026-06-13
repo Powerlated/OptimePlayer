@@ -9,6 +9,7 @@ use super::rom::GbaRom;
 use super::sequencer::{Mp2kOp, Mp2kSequencer, NoteOn};
 use super::tables::{midi_key_to_cgb_freq, midi_key_to_freq};
 use super::voice::{CgbKind, ToneKind, WaveData};
+use super::ENGINE_RATE;
 use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
 use crate::sample::Sample;
 use crate::synth_controller::SynthConfig;
@@ -19,10 +20,6 @@ const MAX_DIRECTSOUND_CHANNELS: usize = 12;
 
 /// `SOUND_MODE_MASVOL` value every Pokémon game passes to `m4aSoundMode`.
 const MASTER_VOLUME: u32 = 12;
-
-/// The software mixer rate (`SOUND_MODE_FREQ_13379`) — the playback rate of fixed-frequency
-/// voices.
-const ENGINE_RATE: f64 = 13379.0;
 
 /// Linear gain of a full-scale CGB channel relative to the DirectSound scale.
 ///
