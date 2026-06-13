@@ -577,6 +577,7 @@ impl GbaPlayer {
                         data.push((f32::from(nibble) - 7.5) / 7.5 * 0.5);
                     }
                 }
+                dc_center(&mut data);
                 let mut sample = Sample::new(data, 440.0, 1.0, true, 0);
                 sample.is_psg_square = true;
                 let sample = Arc::new(sample);
@@ -836,6 +837,21 @@ fn cgb_mod_vol(c: &mut CgbChannel) {
     c.sustain_goal = (((u32::from(c.env_goal) * u32::from(c.common.adsr[2])) + 15) >> 4) as u8;
 }
 
+/// Removes a waveform's DC offset. Real GB/GBA audio is AC-coupled (a DC-blocking high-pass on
+/// the output), so a duty wave's mean is filtered away on hardware; keeping it here would make the
+/// channel *thump* by its DC level every time the envelope opens or closes (a pop hardware never
+/// produces). Centering the looping PSG waveforms reproduces the AC-coupled output and removes
+/// those on/off clicks without otherwise changing the tone.
+fn dc_center(data: &mut [f32]) {
+    if data.is_empty() {
+        return;
+    }
+    let mean = data.iter().map(|&v| f64::from(v)).sum::<f64>() / data.len() as f64;
+    for v in data.iter_mut() {
+        *v -= mean as f32;
+    }
+}
+
 /// The four GB square duty cycles as 8-sample loops.
 fn build_square_samples() -> [Arc<Sample>; 4] {
     const DUTIES: [[f32; 8]; 4] = [
@@ -845,7 +861,9 @@ fn build_square_samples() -> [Arc<Sample>; 4] {
         [-0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, -0.5],      // 75%
     ];
     DUTIES.map(|duty| {
-        let mut s = Sample::new(duty.to_vec(), 1.0, 1.0, true, 0);
+        let mut data = duty.to_vec();
+        dc_center(&mut data);
+        let mut s = Sample::new(data, 1.0, 1.0, true, 0);
         s.is_psg_square = true;
         Arc::new(s)
     })
@@ -867,6 +885,7 @@ fn build_noise_samples() -> [Arc<Sample>; 2] {
             }
             data.push(if lfsr & 1 != 0 { -0.5 } else { 0.5 });
         }
+        dc_center(&mut data);
         let mut s = Sample::new(data, 1.0, 1.0, true, 0);
         s.is_psg_square = true;
         Arc::new(s)
