@@ -19,7 +19,10 @@ Options exist for the user to select between:
    * PSGs are nearest neighbor sampled at 32768 Hz, the hardware output sample rate.
    * There should be sliders:
      * (1) Cutoff frequency of filter
- * GBA Crunchy Authentic. Same as authentic, but the 13379 Hz -> 32768 Hz conversion is done by a bandlimited zero-order hold.
+ * GBA Crunchy Authentic. Same as authentic, but instrument -> 13379 Hz is done with properly reconstructed sinc, and the 13379 Hz -> 32768 Hz conversion is done by a bandlimited zero-order hold.
+   * Again, there should be sliders for the user to adjust cutoff frequencies on this. 
+
+ALL 
   
 Only sliders for the currently selected option should be visible.
 

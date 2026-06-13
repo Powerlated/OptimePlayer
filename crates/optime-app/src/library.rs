@@ -131,13 +131,14 @@ pub struct ResampleSettings {
 
 impl Default for ResampleSettings {
     fn default() -> Self {
+        use crate::default_settings as d;
         Self {
-            choice: 2,
-            sinc_taps: 32,
-            psg_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
-            sampler_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
-            authentic_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ_GBA_AUTHENTIC,
-            smooth_psg_pops: false,
+            choice: d::RESAMPLE_CHOICE,
+            sinc_taps: d::SINC_TAPS,
+            psg_cutoff_hz: d::PSG_CUTOFF_HZ,
+            sampler_cutoff_hz: d::SAMPLER_CUTOFF_HZ,
+            authentic_cutoff_hz: d::AUTHENTIC_CUTOFF_HZ,
+            smooth_psg_pops: d::SMOOTH_PSG_POPS,
         }
     }
 }
@@ -172,22 +173,23 @@ pub struct Persisted {
 
 impl Default for Persisted {
     fn default() -> Self {
+        use crate::default_settings as d;
         Self {
             library: Library::default(),
-            shuffle: false,
-            repeat: RepeatMode::All,
-            volume: 1.0,
+            shuffle: d::SHUFFLE,
+            repeat: d::REPEAT,
+            volume: d::VOLUME,
             last_track: None,
-            stereo_separation: true,
-            force_stereo_separation: true,
-            bass_mono: true,
-            bass_mono_freq: 200.0,
-            tuning_choice: 0,
-            pure_tonic: 0,
+            stereo_separation: d::STEREO_SEPARATION,
+            force_stereo_separation: d::FORCE_STEREO_SEPARATION,
+            bass_mono: d::BASS_MONO,
+            bass_mono_freq: d::BASS_MONO_FREQ_HZ,
+            tuning_choice: d::TUNING_CHOICE,
+            pure_tonic: d::PURE_TONIC,
             nds_resample: ResampleSettings::default(),
             gba_resample: ResampleSettings::default(),
-            delay_smoothing_choice: 0,
-            sort_mode: SortMode::default(),
+            delay_smoothing_choice: d::DELAY_SMOOTHING_CHOICE,
+            sort_mode: d::SORT_MODE,
         }
     }
 }
