@@ -114,6 +114,8 @@ pub struct Persisted {
     pub sampler_cutoff_hz: u32,
     /// Smooth out PSG on/off pops instead of preserving the hardware clicks.
     pub smooth_psg_pops: bool,
+    /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
+    pub delay_smoothing_choice: usize,
 }
 
 impl Default for Persisted {
@@ -135,6 +137,7 @@ impl Default for Persisted {
             psg_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
             sampler_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
             smooth_psg_pops: false,
+            delay_smoothing_choice: 0,
         }
     }
 }

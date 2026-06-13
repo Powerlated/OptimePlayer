@@ -11,7 +11,7 @@
 mod config;
 mod vis;
 
-pub use config::SynthConfig;
+pub use config::{DelaySmoothing, SynthConfig};
 pub use vis::{FsVisController, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};

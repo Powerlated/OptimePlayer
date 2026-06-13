@@ -37,4 +37,9 @@ impl DelayLine {
     pub fn set_delay(&mut self, length: usize) {
         self.delay = length.min(self.buffer.len());
     }
+
+    /// The current delay length in samples.
+    pub fn delay(&self) -> usize {
+        self.delay
+    }
 }

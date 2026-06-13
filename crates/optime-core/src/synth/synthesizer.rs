@@ -10,7 +10,7 @@ use crate::devices::{HardwareChain, VoicePitch};
 use crate::dsp::BiquadFilter;
 use crate::resample::ResampleTables;
 use crate::sample::{ResampleMode, Sample};
-use crate::synth_controller::SynthConfig;
+use crate::synth_controller::{DelaySmoothing, SynthConfig};
 use crate::tuning::TuningSystem;
 
 /// A polyphonic synthesizer for one sequence track. Holds a fixed pool of voices and mixes the
@@ -29,6 +29,8 @@ pub struct SampleSynthesizer {
     pan: f64,
     delay_line_l: DelayLine,
     delay_line_r: DelayLine,
+    /// Delay lengths waiting for a note-free moment ([`DelaySmoothing::HoldDuringNotes`]).
+    pending_delays: Option<(usize, usize)>,
     /// Filters that form a Fourth-order Linkwitz-Riley crossover filter
     crossover_lp: BiquadFilter,
     crossover_hp: BiquadFilter,
@@ -66,6 +68,7 @@ impl SampleSynthesizer {
             pan: 0.5,
             delay_line_l: DelayLine::new(delay_len),
             delay_line_r: DelayLine::new(delay_len),
+            pending_delays: None,
             crossover_lp: BiquadFilter::low_pass(4, sample_rate, crossover_freq, CROSSOVER_Q),
             crossover_hp: BiquadFilter::high_pass(4, sample_rate, crossover_freq, CROSSOVER_Q),
             crossover_freq,
@@ -182,6 +185,7 @@ impl SampleSynthesizer {
             mono += self.instrs[i].output;
         }
         self.prune_stopped();
+        self.apply_pending_delays();
 
         self.apply_stereo(mono, config);
     }
@@ -217,6 +221,7 @@ impl SampleSynthesizer {
             );
         }
         self.prune_stopped();
+        self.apply_pending_delays();
 
         for ((&m, l), r) in mono[..n].iter().zip(&mut acc_l[..n]).zip(&mut acc_r[..n]) {
             self.apply_stereo(m, config);
@@ -272,6 +277,10 @@ impl SampleSynthesizer {
     }
 
     /// Sets the stereo pan (0 = left, 1 = right), recomputing the Haas delay lines.
+    ///
+    /// The pan gains always apply immediately; under
+    /// [`DelaySmoothing::HoldDuringNotes`] a delay-*length* change (which would click in the
+    /// middle of flowing audio) is deferred until the track has no notes playing.
     pub fn set_pan(&mut self, pan: f64, config: &SynthConfig) {
         const SPEED_OF_SOUND: f64 = 343.0;
         let r = 3.0;
@@ -289,10 +298,28 @@ impl SampleSynthesizer {
         dist_r -= min_dist;
         let delay_l = (dist_l / SPEED_OF_SOUND * 50.0 * self.sample_rate).round() as usize;
         let delay_r = (dist_r / SPEED_OF_SOUND * 50.0 * self.sample_rate).round() as usize;
-        self.delay_line_l.set_delay(delay_l);
-        self.delay_line_r.set_delay(delay_r);
+        match config.delay_smoothing {
+            DelaySmoothing::HoldDuringNotes if !self.active_instrs.is_empty() => {
+                self.pending_delays = Some((delay_l, delay_r));
+            }
+            _ => {
+                self.pending_delays = None;
+                self.delay_line_l.set_delay(delay_l);
+                self.delay_line_r.set_delay(delay_r);
+            }
+        }
         self.delay_line_r.gain = gain_r;
         self.pan = pan;
+    }
+
+    /// Applies a deferred delay-length change once the track is note-free.
+    fn apply_pending_delays(&mut self) {
+        if self.active_instrs.is_empty() {
+            if let Some((delay_l, delay_r)) = self.pending_delays.take() {
+                self.delay_line_l.set_delay(delay_l);
+                self.delay_line_r.set_delay(delay_r);
+            }
+        }
     }
 }
 
@@ -357,5 +384,72 @@ mod tests {
             "right should now carry centered bass, got {r}"
         );
         assert!((l - r).abs() < 1e-6, "bass should be centered: {l} vs {r}");
+    }
+
+    #[test]
+    fn delay_change_held_while_notes_play() {
+        // Under HoldDuringNotes, a pan change while a note sounds must not move the widening
+        // delay lines (only the gains); the deferred lengths land once the track is silent.
+        let sample_rate = 32768.0;
+        let chain = HardwareChain {
+            mixer_hz: None,
+            dac_hz: 32768.0,
+        };
+        let config = SynthConfig {
+            stereo_separation: true,
+            delay_smoothing: DelaySmoothing::HoldDuringNotes,
+            ..SynthConfig::default()
+        };
+        let mut synth = SampleSynthesizer::new(sample_rate, 4, chain);
+        synth.set_pan(0.0, &config); // hard left while silent: applies immediately
+        let baseline_delay_r = synth.delay_line_r.delay();
+
+        let sample = Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
+        let slot = synth.play(
+            sample,
+            VoicePitch::Midi {
+                note: 69.0,
+                sample_pitch_hz: 440.0,
+            },
+            1.0,
+            &config,
+        );
+        // Pan hard right mid-note: the delay change must be held back.
+        synth.set_pan(1.0, &config);
+        synth.next_sample(&config);
+        assert_eq!(
+            synth.delay_line_r.delay(),
+            baseline_delay_r,
+            "delay must not change while a note plays"
+        );
+        assert!(synth.pending_delays.is_some(), "the change is deferred");
+
+        // Cut the note: the pending lengths land on the next sample.
+        synth.cut_instrument(slot);
+        synth.next_sample(&config);
+        assert!(synth.pending_delays.is_none(), "deferred change applied");
+        assert_ne!(
+            synth.delay_line_r.delay(),
+            baseline_delay_r,
+            "hard-right pan should produce different delays than hard-left"
+        );
+
+        // With smoothing off the same change applies instantly, even mid-note.
+        let immediate = SynthConfig {
+            stereo_separation: true,
+            delay_smoothing: DelaySmoothing::None,
+            ..SynthConfig::default()
+        };
+        synth.play(
+            Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0)),
+            VoicePitch::Midi {
+                note: 69.0,
+                sample_pitch_hz: 440.0,
+            },
+            1.0,
+            &immediate,
+        );
+        synth.set_pan(0.0, &immediate);
+        assert_eq!(synth.delay_line_r.delay(), baseline_delay_r);
     }
 }

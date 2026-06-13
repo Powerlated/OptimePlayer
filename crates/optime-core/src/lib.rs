@@ -35,7 +35,9 @@ pub use dsp::BiquadFilter;
 pub use resample::{fir_kernel, fir_response, ResampleTables};
 pub use sample::{decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, ResampleMode, Sample};
 pub use synth::{DelayLine, SampleInstrument, SampleSynthesizer, CROSSOVER_Q};
-pub use synth_controller::{FsVisController, SynthConfig, SynthController, VisNote};
+pub use synth_controller::{
+    DelaySmoothing, FsVisController, SynthConfig, SynthController, VisNote,
+};
 pub use tuning::{midi_note_to_hz, TuningSystem};
 
 /// Number of sequence tracks the synthesis layer exposes (both consoles fit in 16).

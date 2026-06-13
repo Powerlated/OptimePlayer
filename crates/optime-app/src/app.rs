@@ -3,7 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use optime_core::{
-    FsVisController, ResampleMode, SoundData, SynthConfig, SynthController, TuningSystem,
+    DelaySmoothing, FsVisController, ResampleMode, SoundData, SynthConfig, SynthController,
+    TuningSystem,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -119,6 +120,8 @@ pub struct OptimeApp {
     sampler_cutoff_hz: u32,
     /// Smooth out PSG on/off pops instead of preserving the hardware clicks.
     smooth_psg_pops: bool,
+    /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
+    delay_smoothing_choice: usize,
 
     paused: bool,
     status: String,
@@ -220,6 +223,7 @@ impl OptimeApp {
             psg_cutoff_hz: p.psg_cutoff_hz,
             sampler_cutoff_hz: p.sampler_cutoff_hz,
             smooth_psg_pops: p.smooth_psg_pops,
+            delay_smoothing_choice: p.delay_smoothing_choice,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
             repeat: p.repeat,
@@ -292,6 +296,7 @@ impl OptimeApp {
             psg_cutoff_hz: self.psg_cutoff_hz,
             sampler_cutoff_hz: self.sampler_cutoff_hz,
             smooth_psg_pops: self.smooth_psg_pops,
+            delay_smoothing_choice: self.delay_smoothing_choice,
         }
     }
 
@@ -404,6 +409,10 @@ impl OptimeApp {
             track_enables: self.track_enables,
             resample,
             smooth_psg_pops: self.smooth_psg_pops,
+            delay_smoothing: match self.delay_smoothing_choice {
+                1 => DelaySmoothing::HoldDuringNotes,
+                _ => DelaySmoothing::None,
+            },
         }
     }
 
@@ -1111,6 +1120,24 @@ impl OptimeApp {
         ui.checkbox(&mut self.stereo_separation, "Stereo separation");
         ui.add_enabled_ui(self.stereo_separation, |ui| {
             ui.checkbox(&mut self.force_stereo_separation, "Force stereo separation");
+            egui::ComboBox::from_id_salt("delay_smoothing")
+                .selected_text(match self.delay_smoothing_choice {
+                    1 => "No delay change during notes",
+                    _ => "No smoothing",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.delay_smoothing_choice, 0, "No smoothing")
+                        .on_hover_text("Pan changes move the widening delays immediately.");
+                    ui.selectable_value(
+                        &mut self.delay_smoothing_choice,
+                        1,
+                        "No delay change during notes",
+                    )
+                    .on_hover_text(
+                        "Defer widening-delay changes until the track is silent, so they \
+                         never pop in the middle of a playing note.",
+                    );
+                });
             ui.checkbox(&mut self.bass_mono, "Keep bass centered");
             ui.horizontal(|ui| {
                 ui.add_enabled(
