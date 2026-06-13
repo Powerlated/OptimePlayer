@@ -212,7 +212,7 @@ impl SynthController {
                 volume,
                 duration_ticks: _,
             } => {
-                let slot = self.synthesizers[track].play(sample, pitch, volume, config.tuning);
+                let slot = self.synthesizers[track].play(sample, pitch, volume, config);
                 if let Some(old) = self.slot_owner[track][slot].replace(SlotOwner { voice, key }) {
                     // Round-robin steal: the previous occupant is gone; tell the device.
                     self.notes_on[track][old.key as usize] = 0;
@@ -257,7 +257,7 @@ impl SynthController {
             SynthEvent::VoiceStopped { track, voice } => {
                 if let Some(slot) = self.find_slot(track, voice) {
                     let owner = self.slot_owner[track][slot].take();
-                    self.synthesizers[track].cut_instrument(slot);
+                    self.synthesizers[track].stop_instrument(slot, config.smooth_psg_pops);
                     if let Some(owner) = owner {
                         self.notes_on[track][owner.key as usize] = 0;
                     }

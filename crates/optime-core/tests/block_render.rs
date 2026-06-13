@@ -76,6 +76,20 @@ fn fill_matches_next_sample_clean_plain() {
 }
 
 #[test]
+fn fill_matches_next_sample_smoothed_psg_pops() {
+    let config = SynthConfig {
+        resample: ResampleMode::SincOutputNyquist {
+            half_taps: 4,
+            psg_cutoff_hz: 8_000,
+            sampler_cutoff_hz: 12_000,
+        },
+        smooth_psg_pops: true,
+        ..SynthConfig::default()
+    };
+    assert_fill_matches_next_sample(&config, "crunch + smoothed PSG pops");
+}
+
+#[test]
 fn fill_matches_next_sample_nearest() {
     let config = SynthConfig {
         resample: ResampleMode::NearestNeighbor,

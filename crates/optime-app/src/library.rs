@@ -112,6 +112,8 @@ pub struct Persisted {
     pub psg_cutoff_hz: u32,
     /// Crunchy-mode low-pass cutoff (Hz) for DirectSound/sampled voices.
     pub sampler_cutoff_hz: u32,
+    /// Smooth out PSG on/off pops instead of preserving the hardware clicks.
+    pub smooth_psg_pops: bool,
 }
 
 impl Default for Persisted {
@@ -132,6 +134,7 @@ impl Default for Persisted {
             sinc_taps: 32,
             psg_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
             sampler_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
+            smooth_psg_pops: false,
         }
     }
 }

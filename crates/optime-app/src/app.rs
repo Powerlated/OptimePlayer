@@ -116,6 +116,8 @@ pub struct OptimeApp {
     psg_cutoff_hz: u32,
     /// Crunchy-mode low-pass cutoff (Hz) for DirectSound/sampled voices.
     sampler_cutoff_hz: u32,
+    /// Smooth out PSG on/off pops instead of preserving the hardware clicks.
+    smooth_psg_pops: bool,
 
     paused: bool,
     status: String,
@@ -216,6 +218,7 @@ impl OptimeApp {
             sinc_taps: p.sinc_taps,
             psg_cutoff_hz: p.psg_cutoff_hz,
             sampler_cutoff_hz: p.sampler_cutoff_hz,
+            smooth_psg_pops: p.smooth_psg_pops,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
             repeat: p.repeat,
@@ -287,6 +290,7 @@ impl OptimeApp {
             sinc_taps: self.sinc_taps,
             psg_cutoff_hz: self.psg_cutoff_hz,
             sampler_cutoff_hz: self.sampler_cutoff_hz,
+            smooth_psg_pops: self.smooth_psg_pops,
         }
     }
 
@@ -395,6 +399,7 @@ impl OptimeApp {
             tuning,
             track_enables: self.track_enables,
             resample,
+            smooth_psg_pops: self.smooth_psg_pops,
         }
     }
 
@@ -1190,6 +1195,11 @@ impl OptimeApp {
             )
             .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
         });
+        ui.checkbox(&mut self.smooth_psg_pops, "Smooth PSG pops")
+            .on_hover_text(
+                "Slew PSG channel gains over ~2 ms so notes turning abruptly on and off \
+                 don't click. Unchecked preserves the hardware's hard edges.",
+            );
         ui.separator();
         ui.label("Tuning system");
         egui::ComboBox::from_id_salt("tuning")

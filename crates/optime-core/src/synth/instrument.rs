@@ -9,6 +9,10 @@ use crate::resample::ResampleTables;
 use crate::sample::{ResampleMode, Sample};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
 
+/// Seconds a pop-smoothed PSG voice takes to slew across the full gain range. Short enough to
+/// be inaudible as an envelope, long enough to turn the hard on/off steps into clicks-free ramps.
+const POP_SLEW_SECONDS: f64 = 0.002;
+
 /// A single playing voice.
 #[derive(Clone)]
 pub struct SampleInstrument {
@@ -22,6 +26,11 @@ pub struct SampleInstrument {
     pub volume: f64,
     /// Whether this voice is sounding.
     pub playing: bool,
+    /// The gain actually applied last sample. Tracks [`Self::volume`] exactly, except for
+    /// pop-smoothed PSG voices, where it slews toward it (see [`Self::advance`]'s `smooth_pops`).
+    gain: f64,
+    /// Set by [`Self::begin_fade_out`]: the voice slews to silence and then stops itself.
+    fading_out: bool,
     /// Fractional sample position.
     pub sample_t: f64,
     /// Whether a looping voice has wrapped past the sample end at least once. Once it has, the
@@ -49,6 +58,8 @@ impl SampleInstrument {
             pitch,
             volume: 1.0,
             playing: false,
+            gain: 1.0,
+            fading_out: false,
             sample_t: 0.0,
             wrapped: false,
             finetune: 0.0,
@@ -58,12 +69,36 @@ impl SampleInstrument {
         }
     }
 
+    /// Begins a note: sets the envelope volume and primes the applied gain. A pop-smoothed PSG
+    /// voice starts from silence and slews up; everything else starts at `volume` exactly.
+    pub fn begin_note(&mut self, volume: f64, smooth_pops: bool) {
+        self.volume = volume;
+        self.gain = if smooth_pops && self.sample.is_psg_square {
+            0.0
+        } else {
+            volume
+        };
+        self.fading_out = false;
+    }
+
+    /// Starts a short fade to silence; the voice flips [`Self::playing`] off once it lands.
+    pub fn begin_fade_out(&mut self) {
+        self.fading_out = true;
+    }
+
     /// Advances playback by one output sample, updating [`Self::output`].
     ///
     /// `mode` is the global resampling choice from [`SynthConfig`](crate::SynthConfig).  `tables`
     /// is required for the two sinc modes and may be `None` otherwise (falls back to
-    /// nearest-neighbour).
-    pub fn advance(&mut self, mode: ResampleMode, tables: Option<&ResampleTables>) {
+    /// nearest-neighbour).  With `smooth_pops` set, PSG voices slew their gain toward the
+    /// envelope volume (and toward silence after [`Self::begin_fade_out`]) instead of stepping
+    /// it, turning the abrupt hardware on/off transitions into click-free ramps.
+    pub fn advance(
+        &mut self,
+        mode: ResampleMode,
+        tables: Option<&ResampleTables>,
+        smooth_pops: bool,
+    ) {
         // r = source samples advanced per output sample (pitch-shifted playback speed).
         let r = self.freq_ratio * self.sample.sample_rate * self.inv_sample_rate;
         self.sample_t += r;
@@ -84,9 +119,21 @@ impl SampleInstrument {
         }
         let pos = self.sample_t;
 
+        // Resolve this sample's applied gain: pop-smoothed PSG voices slew toward the target,
+        // everything else applies the envelope volume exactly.
+        let target = if self.fading_out { 0.0 } else { self.volume };
+        self.gain = if smooth_pops && self.sample.is_psg_square {
+            slew_toward(self.gain, target, self.inv_sample_rate / POP_SLEW_SECONDS)
+        } else {
+            target
+        };
+        if self.fading_out && self.gain == 0.0 {
+            self.playing = false;
+        }
+
         // A fully attenuated voice (release floor / silent track) contributes exactly 0 — skip
         // the gather. The position keeps advancing so re-opening the envelope stays seamless.
-        if self.volume == 0.0 {
+        if self.gain == 0.0 {
             self.output = 0.0;
             return;
         }
@@ -138,7 +185,7 @@ impl SampleInstrument {
             }
         };
 
-        self.output = result * self.volume;
+        self.output = result * self.gain;
     }
 
     /// Advances playback by `out.len()` output samples, adding each `volume`-scaled sample into
@@ -150,25 +197,22 @@ impl SampleInstrument {
         &mut self,
         mode: ResampleMode,
         tables: Option<&ResampleTables>,
+        smooth_pops: bool,
         out: &mut [f64],
     ) {
         // Only the sinc modes are worth hoisting; the 1–2 tap modes (and the missing-tables
         // fallback) just take the per-sample path.
         let effective = effective_gather(mode, self.sample.is_psg_square);
-        let EffectiveGather::Sinc {
-            step_mode,
-            cutoff_hz,
-        } = effective
+        let (
+            EffectiveGather::Sinc {
+                step_mode,
+                cutoff_hz,
+            },
+            Some(tbl),
+        ) = (effective, tables)
         else {
             for slot in out.iter_mut() {
-                self.advance(mode, tables);
-                *slot += self.output;
-            }
-            return;
-        };
-        let Some(tbl) = tables else {
-            for slot in out.iter_mut() {
-                self.advance(mode, tables);
+                self.advance(mode, tables, smooth_pops);
                 *slot += self.output;
             }
             return;
@@ -186,10 +230,16 @@ impl SampleInstrument {
 
         let mut pos = self.sample_t;
         let mut wrapped = self.wrapped;
-        let vol = self.volume;
+        // The same per-sample gain resolution as `advance` (kept bit-identical): the target is
+        // constant within a block, but a pop-smoothed gain still slews sample by sample.
+        let smooth = smooth_pops && self.sample.is_psg_square;
+        let slew = self.inv_sample_rate / POP_SLEW_SECONDS;
+        let target = if self.fading_out { 0.0 } else { self.volume };
+        let mut gain = self.gain;
 
-        if vol == 0.0 {
-            // Fully attenuated: advance the position (with identical per-sample folding) only.
+        if target == 0.0 && (gain == 0.0 || !smooth) {
+            // Fully attenuated for the whole block: advance the position (with identical
+            // per-sample folding) only.
             for _ in 0..out.len() {
                 pos += r;
                 if fold && pos >= data_len_f {
@@ -197,8 +247,12 @@ impl SampleInstrument {
                     wrapped = true;
                 }
             }
+            if self.fading_out && !out.is_empty() {
+                self.playing = false;
+            }
             self.sample_t = pos;
             self.wrapped = wrapped;
+            self.gain = 0.0;
             self.output = 0.0;
             return;
         }
@@ -213,6 +267,18 @@ impl SampleInstrument {
                 pos = (pos - lp_f) % loop_len_f + lp_f;
                 wrapped = true;
             }
+            gain = if smooth {
+                slew_toward(gain, target, slew)
+            } else {
+                target
+            };
+            if self.fading_out && gain == 0.0 {
+                self.playing = false;
+            }
+            if gain == 0.0 {
+                last = 0.0;
+                continue;
+            }
             let src = GatherSource {
                 data,
                 looping,
@@ -221,11 +287,12 @@ impl SampleInstrument {
                 wrapped,
             };
             let result = gather_sinc(&src, tbl, pos, fc, step_mode);
-            last = result * vol;
+            last = result * gain;
             *slot += last;
         }
         self.sample_t = pos;
         self.wrapped = wrapped;
+        self.gain = gain;
         self.output = last;
     }
 
@@ -323,6 +390,16 @@ fn sinc_fc(r: f64, inv_sample_rate: f64, step_mode: bool, cutoff_hz: Option<u32>
     fc
 }
 
+/// Moves `gain` toward `target` by at most `max_step`, landing exactly on the target.
+fn slew_toward(gain: f64, target: f64, max_step: f64) -> f64 {
+    let d = target - gain;
+    if d.abs() <= max_step {
+        target
+    } else {
+        gain + max_step.copysign(d)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,11 +454,11 @@ mod tests {
             },
             TuningSystem::Equal,
         );
-        instr.volume = 1.0;
+        instr.begin_note(1.0, false);
         instr.playing = true;
         (0..n)
             .map(|_| {
-                instr.advance(mode, tables);
+                instr.advance(mode, tables, false);
                 instr.output
             })
             .collect()
@@ -621,6 +698,67 @@ mod tests {
                 "is_psg={is_psg}: the other kind's slider must not apply: {a_other} vs {a_open}"
             );
         }
+    }
+
+    #[test]
+    fn pop_smoothing_slews_psg_gain() {
+        // A pop-smoothed PSG voice must ramp from silence instead of stepping on, and a
+        // fade-out must land at exactly zero and stop the voice. With smoothing off the gain
+        // steps instantly (the preserved hardware pop).
+        let out_rate = 48_000.0;
+        let mut sample = Sample::new(vec![1.0; 64], 440.0, out_rate, true, 0); // DC source
+        sample.is_psg_square = true;
+        let sample = Arc::new(sample);
+        let pitch = VoicePitch::Midi {
+            note: 69.0,
+            sample_pitch_hz: 440.0,
+        };
+
+        let mut instr = SampleInstrument::new(out_rate, sample.clone());
+        instr.set_pitch(pitch, TuningSystem::Equal);
+        instr.playing = true;
+        instr.begin_note(1.0, true);
+        instr.advance(ResampleMode::NearestNeighbor, None, true);
+        assert!(
+            instr.output < 0.05,
+            "smoothed start must ramp from silence, got {}",
+            instr.output
+        );
+        let mut prev = instr.output;
+        let mut reached = false;
+        for _ in 0..1024 {
+            instr.advance(ResampleMode::NearestNeighbor, None, true);
+            // DC source ⇒ output equals the applied gain.
+            let delta = instr.output - prev;
+            assert!((-1e-12..0.02).contains(&delta), "ramp step {delta}");
+            prev = instr.output;
+            if (instr.output - 1.0).abs() < 1e-12 {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "gain must land exactly on the target");
+
+        instr.begin_fade_out();
+        for _ in 0..1024 {
+            if !instr.playing {
+                break;
+            }
+            instr.advance(ResampleMode::NearestNeighbor, None, true);
+        }
+        assert!(!instr.playing, "fade-out must stop the voice");
+        assert_eq!(instr.output, 0.0);
+
+        let mut hard = SampleInstrument::new(out_rate, sample);
+        hard.set_pitch(pitch, TuningSystem::Equal);
+        hard.playing = true;
+        hard.begin_note(1.0, false);
+        hard.advance(ResampleMode::NearestNeighbor, None, false);
+        assert!(
+            (hard.output - 1.0).abs() < 1e-12,
+            "unsmoothed start must step to full gain, got {}",
+            hard.output
+        );
     }
 
     /// Renders a stopband source sine downsampled by 2.5× through the clean (SampleNyquist)

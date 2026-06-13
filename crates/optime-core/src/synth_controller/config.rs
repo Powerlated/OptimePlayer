@@ -23,6 +23,9 @@ pub struct SynthConfig {
     pub track_enables: [bool; TRACK_COUNT],
     /// Sample interpolation / anti-aliasing mode.
     pub resample: ResampleMode,
+    /// Smooth out the pops and clicks of PSG channels turning abruptly on and off (a ~2 ms
+    /// gain slew). Off preserves the hard-edged hardware behaviour.
+    pub smooth_psg_pops: bool,
 }
 
 impl Default for SynthConfig {
@@ -35,6 +38,7 @@ impl Default for SynthConfig {
             tuning: TuningSystem::Equal,
             track_enables: [true; TRACK_COUNT],
             resample: ResampleMode::NearestNeighbor,
+            smooth_psg_pops: false,
         }
     }
 }

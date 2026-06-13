@@ -100,8 +100,9 @@ impl SampleSynthesizer {
         sample: Arc<Sample>,
         pitch: VoicePitch,
         volume: f64,
-        tuning: TuningSystem,
+        config: &SynthConfig,
     ) -> usize {
+        let tuning = config.tuning;
         let index = self.playing_index;
         if self.instrs[index].playing {
             self.cut_instrument(index);
@@ -113,7 +114,7 @@ impl SampleSynthesizer {
             instr.set_finetune_lfo(0.0, tuning);
             instr.set_finetune(self.finetune, tuning);
             instr.set_pitch(pitch, tuning);
-            instr.volume = volume;
+            instr.begin_note(volume, config.smooth_psg_pops);
             instr.sample_t = 0.0;
             instr.wrapped = false;
             instr.playing = true;
@@ -124,12 +125,29 @@ impl SampleSynthesizer {
         index
     }
 
-    /// Stops the voice at `index` if it is active.
+    /// Stops the voice at `index` if it is active: immediately, or — for a pop-smoothed PSG
+    /// voice (`fade`) — via a short fade-out after which the voice stops itself.
+    pub fn stop_instrument(&mut self, index: usize, fade: bool) {
+        let instr = &mut self.instrs[index];
+        if fade && instr.playing && instr.sample.is_psg_square {
+            instr.begin_fade_out();
+        } else {
+            self.cut_instrument(index);
+        }
+    }
+
+    /// Stops the voice at `index` immediately if it is active.
     pub fn cut_instrument(&mut self, index: usize) {
         if let Some(pos) = self.active_instrs.iter().position(|&i| i == index) {
             self.instrs[index].playing = false;
             self.active_instrs.remove(pos);
         }
+    }
+
+    /// Drops voices that stopped themselves (a landed fade-out) from the active pool.
+    fn prune_stopped(&mut self) {
+        let instrs = &self.instrs;
+        self.active_instrs.retain(|&i| instrs[i].playing);
     }
 
     /// Rebuilds the sinc tables if the mode switched to a sinc variant or the tap count changed.
@@ -154,9 +172,10 @@ impl SampleSynthesizer {
 
         let mut mono = 0.0;
         for &i in &self.active_instrs {
-            self.instrs[i].advance(config.resample, tables);
+            self.instrs[i].advance(config.resample, tables, config.smooth_psg_pops);
             mono += self.instrs[i].output;
         }
+        self.prune_stopped();
 
         self.apply_stereo(mono, config);
     }
@@ -184,8 +203,14 @@ impl SampleSynthesizer {
 
         let mut mono = [0.0f64; MAX_BLOCK];
         for &i in &self.active_instrs {
-            self.instrs[i].advance_block(config.resample, tables, &mut mono[..n]);
+            self.instrs[i].advance_block(
+                config.resample,
+                tables,
+                config.smooth_psg_pops,
+                &mut mono[..n],
+            );
         }
+        self.prune_stopped();
 
         for ((&m, l), r) in mono[..n].iter().zip(&mut acc_l[..n]).zip(&mut acc_r[..n]) {
             self.apply_stereo(m, config);
@@ -282,7 +307,7 @@ mod tests {
                 sample_pitch_hz: 440.0,
             },
             1.0,
-            TuningSystem::Equal,
+            config,
         );
         // Pan hard left.
         synth.set_pan(0.0, config);
