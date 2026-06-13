@@ -46,11 +46,16 @@ impl SoundData {
         }
     }
 
-    /// Ids of the playable songs, in listing order.
+    /// Ids of the playable songs, in listing order. Only songs that will actually start when
+    /// selected are listed: GBA song tables are full of empty placeholders and the odd
+    /// malformed entry, which are filtered with the same header validation
+    /// [`Self::make_player`] performs.
     pub fn song_ids(&self) -> Vec<u32> {
         match self {
             SoundData::NintendoDs(sdat) => sdat.sseq_list.clone(),
-            SoundData::Gba(rom) => (0..rom.song_count() as u32).collect(),
+            SoundData::Gba(rom) => (0..rom.song_count() as u32)
+                .filter(|&id| rom.song_header(id).is_some())
+                .collect(),
         }
     }
 

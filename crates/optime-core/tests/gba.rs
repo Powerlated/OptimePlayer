@@ -10,6 +10,8 @@ const ROM_BASE: u32 = 0x0800_0000;
 // Synthetic ROM layout.
 const SONG_TABLE: usize = 0x200;
 const SONG_HEADER: usize = 0x300;
+/// A trackCount-0 placeholder header (a valid table entry, but not a playable song).
+const EMPTY_HEADER: usize = 0x380;
 const VOICEGROUP: usize = 0x400;
 const TRACK: usize = 0x500;
 const WAVE: usize = 0x600;
@@ -30,11 +32,13 @@ fn build_rom() -> Vec<u8> {
     // GBA header sanity byte.
     rom[0xB2] = 0x96;
 
-    // Song table: { SongHeader *header, u16 ms, u16 me } × 8.
-    for i in 0..8 {
+    // Song table: { SongHeader *header, u16 ms, u16 me } × 8. The last entry points at an
+    // empty placeholder header (trackCount 0), as real song tables are littered with.
+    for i in 0..7 {
         put_u32(&mut rom, SONG_TABLE + i * 8, ptr(SONG_HEADER));
         // ms/me stay 0.
     }
+    put_u32(&mut rom, SONG_TABLE + 7 * 8, ptr(EMPTY_HEADER));
 
     // SongHeader: trackCount, blockCount, priority, reverb, tone*, part[0]*.
     rom[SONG_HEADER] = 1;
@@ -86,7 +90,16 @@ fn parses_synthetic_rom() {
     assert_eq!(archives.len(), 1, "one GBA archive expected");
     let data = &archives[0];
     assert!(matches!(data, SoundData::Gba(_)));
-    assert_eq!(data.song_ids().len(), 8, "all table entries enumerated");
+    let ids = data.song_ids();
+    assert_eq!(
+        ids,
+        (0..7).collect::<Vec<u32>>(),
+        "only playable songs are listed; the trackCount-0 placeholder (id 7) is filtered"
+    );
+    assert!(
+        data.make_player(7).is_none(),
+        "the placeholder must indeed be unplayable"
+    );
 }
 
 #[test]
