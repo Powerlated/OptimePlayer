@@ -313,8 +313,7 @@ impl GbaPlayer {
 
         match note.tone.kind {
             ToneKind::DirectSound { wav_addr, fixed } => {
-                let Some(slot) = alloc_direct_sound(&self.ds_channels, note.priority, track)
-                else {
+                let Some(slot) = alloc_direct_sound(&self.ds_channels, note.priority, track) else {
                     return;
                 };
                 if let Some(old) = self.ds_channels[slot].take() {

@@ -7,3 +7,5 @@ dist/
 # Rust
 /target/
 **/*.rs.bk
+
+*.gba

@@ -232,7 +232,7 @@ pub fn show_sinc_window(ctx: &egui::Context, open: &mut bool, mode: ResampleMode
         ResampleMode::SincSampleNyquist { half_taps } => {
             (half_taps, "Sinc – sample Nyquist (clean)")
         }
-        ResampleMode::SincOutputNyquist { half_taps } => {
+        ResampleMode::SincOutputNyquist { half_taps, .. } => {
             (half_taps, "Sinc – output Nyquist (crunch)")
         }
         _ => return, // no popup for non-sinc modes

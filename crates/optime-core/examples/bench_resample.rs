@@ -42,7 +42,11 @@ fn main() {
         ),
         (
             "crunch (OutputNyquist)",
-            ResampleMode::SincOutputNyquist { half_taps },
+            ResampleMode::SincOutputNyquist {
+                half_taps,
+                psg_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+                sampler_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+            },
         ),
     ] {
         let config = SynthConfig {

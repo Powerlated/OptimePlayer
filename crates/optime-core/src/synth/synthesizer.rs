@@ -136,7 +136,7 @@ impl SampleSynthesizer {
     fn ensure_tables(&mut self, config: &SynthConfig) {
         let needed_taps = match config.resample {
             ResampleMode::SincSampleNyquist { half_taps }
-            | ResampleMode::SincOutputNyquist { half_taps } => Some(half_taps),
+            | ResampleMode::SincOutputNyquist { half_taps, .. } => Some(half_taps),
             _ => None,
         };
         if let Some(ht) = needed_taps {

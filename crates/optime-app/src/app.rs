@@ -112,6 +112,10 @@ pub struct OptimeApp {
     /// Total source-tap count for the sinc kernel (the kernel spans `sinc_taps` source samples,
     /// i.e. `sinc_taps / 2` per side, regardless of the resampling ratio).
     sinc_taps: usize,
+    /// Crunchy-mode low-pass cutoff (Hz) for PSG voices.
+    psg_cutoff_hz: u32,
+    /// Crunchy-mode low-pass cutoff (Hz) for DirectSound/sampled voices.
+    sampler_cutoff_hz: u32,
 
     paused: bool,
     status: String,
@@ -210,6 +214,8 @@ impl OptimeApp {
             track_enables: [true; TRACK_COUNT],
             resample_choice: p.resample_choice,
             sinc_taps: p.sinc_taps,
+            psg_cutoff_hz: p.psg_cutoff_hz,
+            sampler_cutoff_hz: p.sampler_cutoff_hz,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
             repeat: p.repeat,
@@ -279,6 +285,8 @@ impl OptimeApp {
             pure_tonic: self.pure_tonic,
             resample_choice: self.resample_choice,
             sinc_taps: self.sinc_taps,
+            psg_cutoff_hz: self.psg_cutoff_hz,
+            sampler_cutoff_hz: self.sampler_cutoff_hz,
         }
     }
 
@@ -371,6 +379,8 @@ impl OptimeApp {
             1 => ResampleMode::Linear,
             2 => ResampleMode::SincOutputNyquist {
                 half_taps: (self.sinc_taps / 2).max(1),
+                psg_cutoff_hz: self.psg_cutoff_hz,
+                sampler_cutoff_hz: self.sampler_cutoff_hz,
             },
             3 => ResampleMode::SincSampleNyquist {
                 half_taps: (self.sinc_taps / 2).max(1),
@@ -1159,6 +1169,26 @@ impl OptimeApp {
                  so CPU cost is constant per voice. More taps → sharper cutoff and better \
                  stopband rejection, at higher CPU cost.",
             );
+        });
+        // The crunchy mode's per-kind cutoff sliders (parked at the top = no extra filtering).
+        ui.add_enabled_ui(self.resample_choice == 2, |ui| {
+            ui.add(
+                egui::Slider::new(&mut self.psg_cutoff_hz, 1000..=ResampleMode::CUTOFF_OFF_HZ)
+                    .text("PSG cutoff")
+                    .suffix(" Hz")
+                    .logarithmic(true),
+            )
+            .on_hover_text("Low-pass cutoff for the PSG (square/wave/noise) channels.");
+            ui.add(
+                egui::Slider::new(
+                    &mut self.sampler_cutoff_hz,
+                    1000..=ResampleMode::CUTOFF_OFF_HZ,
+                )
+                .text("Sampler cutoff")
+                .suffix(" Hz")
+                .logarithmic(true),
+            )
+            .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
         });
         ui.separator();
         ui.label("Tuning system");

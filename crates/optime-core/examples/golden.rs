@@ -48,7 +48,11 @@ fn configs() -> Vec<(&'static str, SynthConfig)> {
         (
             "crunch",
             SynthConfig {
-                resample: ResampleMode::SincOutputNyquist { half_taps: 8 },
+                resample: ResampleMode::SincOutputNyquist {
+                    half_taps: 8,
+                    psg_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+                    sampler_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+                },
                 ..SynthConfig::default()
             },
         ),

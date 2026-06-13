@@ -108,6 +108,10 @@ pub struct Persisted {
     pub pure_tonic: i32,
     pub resample_choice: usize,
     pub sinc_taps: usize,
+    /// Crunchy-mode low-pass cutoff (Hz) for PSG voices.
+    pub psg_cutoff_hz: u32,
+    /// Crunchy-mode low-pass cutoff (Hz) for DirectSound/sampled voices.
+    pub sampler_cutoff_hz: u32,
 }
 
 impl Default for Persisted {
@@ -126,6 +130,8 @@ impl Default for Persisted {
             pure_tonic: 0,
             resample_choice: 2,
             sinc_taps: 32,
+            psg_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
+            sampler_cutoff_hz: optime_core::ResampleMode::CUTOFF_OFF_HZ,
         }
     }
 }

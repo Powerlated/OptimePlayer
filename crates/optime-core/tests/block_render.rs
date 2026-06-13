@@ -53,7 +53,11 @@ fn assert_fill_matches_next_sample(config: &SynthConfig, label: &str) {
 #[test]
 fn fill_matches_next_sample_sinc_stereo() {
     let config = SynthConfig {
-        resample: ResampleMode::SincOutputNyquist { half_taps: 4 },
+        resample: ResampleMode::SincOutputNyquist {
+            half_taps: 4,
+            psg_cutoff_hz: 8_000,
+            sampler_cutoff_hz: 12_000,
+        },
         stereo_separation: true,
         bass_mono: true,
         ..SynthConfig::default()

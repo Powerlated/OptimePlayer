@@ -20,10 +20,24 @@ pub enum ResampleMode {
     /// characteristic crunchy ZOH colouring below output Nyquist while removing aliasing above
     /// it.  On upsampled voices it band-limits the ZOH stairstep edges to the output rate
     /// (instead of point-sampling hard edges), suppressing nearest-neighbour jitter/aliasing.
+    ///
+    /// The two cutoffs further darken the crunch independently for the PSG waveform channels
+    /// and the sampled (DirectSound/SWAR) channels: the gather's low-pass runs at
+    /// `min(output Nyquist, cutoff)`.
     SincOutputNyquist {
         /// Half-width of the Blackman-windowed sinc kernel in zero-crossings (≥ 1).
         half_taps: usize,
+        /// Low-pass cutoff (Hz) for PSG waveform voices ([`Sample::is_psg_square`]).
+        psg_cutoff_hz: u32,
+        /// Low-pass cutoff (Hz) for sampled (DirectSound) voices.
+        sampler_cutoff_hz: u32,
     },
+}
+
+impl ResampleMode {
+    /// A cutoff high enough to never bite below any practical output Nyquist — the "no extra
+    /// filtering" slider position.
+    pub const CUTOFF_OFF_HZ: u32 = 24_000;
 }
 
 /// A decoded waveform plus the metadata needed to play it back at the correct pitch.

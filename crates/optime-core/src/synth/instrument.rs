@@ -91,16 +91,7 @@ impl SampleInstrument {
             return;
         }
 
-        let is_psg = self.sample.is_psg_square;
-
-        // Resolve the effective mode: PSG squares under SampleNyquist → nearest (per design).
-        // OutputNyquist stays in BLEP step-mode at every ratio — including upsampling — so the
-        // ZOH stairstep edges are band-limited to the output Nyquist instead of being
-        // point-sampled as hard discontinuities (which jitter/alias at non-integer ratios).
-        let effective = match mode {
-            ResampleMode::SincSampleNyquist { .. } if is_psg => ResampleMode::NearestNeighbor,
-            other => other,
-        };
+        let effective = effective_gather(mode, self.sample.is_psg_square);
 
         // Loop-aware sample accessor for the cheap 1–2 tap modes (and the no-tables fallback).
         let get = |mut t: i64| -> f64 {
@@ -118,26 +109,20 @@ impl SampleInstrument {
         };
 
         let result = match effective {
-            ResampleMode::NearestNeighbor => get(pos.floor() as i64),
-            ResampleMode::Linear => {
+            EffectiveGather::Nearest => get(pos.floor() as i64),
+            EffectiveGather::Linear => {
                 let i = pos.floor() as i64;
                 let frac = pos - i as f64;
                 let a = get(i);
                 let b = get(i + 1);
                 a + (b - a) * frac
             }
-            ResampleMode::SincSampleNyquist { .. } | ResampleMode::SincOutputNyquist { .. } => {
+            EffectiveGather::Sinc {
+                step_mode,
+                cutoff_hz,
+            } => {
                 if let Some(tbl) = tables {
-                    let step_mode = matches!(effective, ResampleMode::SincOutputNyquist { .. });
-                    // fc in cycles/source-sample (source Nyquist = 0.5).
-                    // SampleNyquist (impulse): clean reconstruction low-pass at min(0.5, 0.5/r)
-                    //   — removes ZOH images when upsampling, anti-aliases when downsampling.
-                    // OutputNyquist (BLEP step): fc = 0.5/r, the *output* Nyquist, so the stairstep
-                    //   edges are band-limited to the output rate. For r > 1 (downsampling) this is
-                    //   < 0.5 and anti-aliases; for r ≤ 1 (upsampling) it is ≥ 0.5, keeping the
-                    //   crunch images that sit below output Nyquist while still band-limiting the
-                    //   hard edges (no nearest-neighbour jitter).
-                    let fc = if step_mode || r > 1.0 { 0.5 / r } else { 0.5 };
+                    let fc = sinc_fc(r, self.inv_sample_rate, step_mode, cutoff_hz);
                     let src = GatherSource {
                         data,
                         looping,
@@ -167,21 +152,27 @@ impl SampleInstrument {
         tables: Option<&ResampleTables>,
         out: &mut [f64],
     ) {
-        // Only the sinc modes are worth hoisting; the 1–2 tap modes (and the PSG-square nearest
-        // override / missing-tables fallback) just take the per-sample path.
-        let hoisted_sinc = tables.is_some()
-            && match mode {
-                ResampleMode::SincSampleNyquist { .. } => !self.sample.is_psg_square,
-                ResampleMode::SincOutputNyquist { .. } => true,
-                _ => false,
-            };
-        if !hoisted_sinc {
+        // Only the sinc modes are worth hoisting; the 1–2 tap modes (and the missing-tables
+        // fallback) just take the per-sample path.
+        let effective = effective_gather(mode, self.sample.is_psg_square);
+        let EffectiveGather::Sinc {
+            step_mode,
+            cutoff_hz,
+        } = effective
+        else {
             for slot in out.iter_mut() {
                 self.advance(mode, tables);
                 *slot += self.output;
             }
             return;
-        }
+        };
+        let Some(tbl) = tables else {
+            for slot in out.iter_mut() {
+                self.advance(mode, tables);
+                *slot += self.output;
+            }
+            return;
+        };
 
         let r = self.freq_ratio * self.sample.sample_rate * self.inv_sample_rate;
         let data = &self.sample.data;
@@ -212,10 +203,8 @@ impl SampleInstrument {
             return;
         }
 
-        let tbl = tables.expect("hoisted_sinc implies tables");
-        let step_mode = matches!(mode, ResampleMode::SincOutputNyquist { .. });
-        // See `advance` for the cutoff rationale (clean reconstruction vs BLEP output-Nyquist).
-        let fc = if step_mode || r > 1.0 { 0.5 / r } else { 0.5 };
+        // See `sinc_fc` for the cutoff rationale (clean reconstruction vs BLEP output-Nyquist).
+        let fc = sinc_fc(r, self.inv_sample_rate, step_mode, cutoff_hz);
 
         let mut last = 0.0;
         for slot in out.iter_mut() {
@@ -272,6 +261,68 @@ impl SampleInstrument {
     }
 }
 
+/// The gather a voice actually runs after resolving the global [`ResampleMode`] against the
+/// voice's sample kind.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EffectiveGather {
+    Nearest,
+    Linear,
+    /// Windowed-sinc. `step_mode` selects the BLEP step kernel (output-Nyquist crunch);
+    /// `cutoff_hz` is an extra low-pass on top of the mode's natural cutoff.
+    Sinc {
+        step_mode: bool,
+        cutoff_hz: Option<u32>,
+    },
+}
+
+/// Resolves the global mode for one voice.
+///
+/// PSG waveforms under the clean (SampleNyquist) mode still take the BLEP step gather: their
+/// hard ZOH edges are band-limited to the *output* Nyquist instead of being smoothed down to the
+/// (tiny) source Nyquist of an 8-sample loop, preserving their square character alias-free. The
+/// crunchy (OutputNyquist) mode additionally applies the user's per-kind cutoff slider.
+fn effective_gather(mode: ResampleMode, is_psg: bool) -> EffectiveGather {
+    match mode {
+        ResampleMode::NearestNeighbor => EffectiveGather::Nearest,
+        ResampleMode::Linear => EffectiveGather::Linear,
+        ResampleMode::SincSampleNyquist { .. } => EffectiveGather::Sinc {
+            step_mode: is_psg,
+            cutoff_hz: None,
+        },
+        ResampleMode::SincOutputNyquist {
+            psg_cutoff_hz,
+            sampler_cutoff_hz,
+            ..
+        } => EffectiveGather::Sinc {
+            step_mode: true,
+            cutoff_hz: Some(if is_psg {
+                psg_cutoff_hz
+            } else {
+                sampler_cutoff_hz
+            }),
+        },
+    }
+}
+
+/// The sinc gather's low-pass cutoff in cycles/source-sample (source Nyquist = 0.5) for playback
+/// speed `r` (source samples per output sample).
+///
+/// - Impulse mode (clean reconstruction): `min(0.5, 0.5/r)` — removes ZOH images when
+///   upsampling, anti-aliases when downsampling.
+/// - Step mode (BLEP): `0.5/r`, the *output* Nyquist, so the stairstep edges are band-limited to
+///   the output rate. For `r > 1` (downsampling) this is `< 0.5` and anti-aliases; for `r ≤ 1`
+///   (upsampling) it is `≥ 0.5`, keeping the crunch images that sit below output Nyquist while
+///   still band-limiting the hard edges (no nearest-neighbour jitter).
+/// - `cutoff_hz` (the crunchy-mode sliders) lowers either further: an output-domain frequency
+///   `f` Hz is `f / (r · sample_rate)` cycles/source-sample.
+fn sinc_fc(r: f64, inv_sample_rate: f64, step_mode: bool, cutoff_hz: Option<u32>) -> f64 {
+    let mut fc = if step_mode || r > 1.0 { 0.5 / r } else { 0.5 };
+    if let Some(hz) = cutoff_hz {
+        fc = fc.min(f64::from(hz) * inv_sample_rate / r);
+    }
+    fc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +339,15 @@ mod tests {
     //   r = sample.sample_rate / out_rate
     // is set purely by the two sample rates: `r < 1` upsamples (imaging), `r > 1` downsamples
     // (aliasing).
+
+    /// The crunchy mode with both cutoff sliders parked at "off".
+    fn crunch(half_taps: usize) -> ResampleMode {
+        ResampleMode::SincOutputNyquist {
+            half_taps,
+            psg_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+            sampler_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+        }
+    }
 
     /// A looping source sample holding a pure sine of `period` samples per cycle (frequency
     /// `1/period` cycles per source-sample), recorded at `src_rate`.
@@ -359,7 +419,7 @@ mod tests {
         let crunch = render(
             out_rate,
             sample.clone(),
-            ResampleMode::SincOutputNyquist { half_taps: 16 },
+            crunch(16),
             Some(&tables),
             warmup + n,
         );
@@ -425,13 +485,7 @@ mod tests {
             None,
             warmup + n,
         );
-        let crunch = render(
-            out_rate,
-            sample,
-            ResampleMode::SincOutputNyquist { half_taps: 16 },
-            Some(&tables),
-            warmup + n,
-        );
+        let crunch = render(out_rate, sample, crunch(16), Some(&tables), warmup + n);
 
         let nearest_image = amp_at(&nearest[warmup..], image_hz, out_rate);
         let nearest_alias = amp_at(&nearest[warmup..], alias_hz, out_rate);
@@ -470,31 +524,102 @@ mod tests {
     }
 
     #[test]
-    fn psg_square_uses_nearest_under_sample_nyquist() {
-        // PSG square waves are special-cased to nearest-neighbour even in clean (SampleNyquist)
-        // mode, preserving their hard edges. Verify the effective-mode override fires.
+    fn psg_square_uses_blep_step_under_sample_nyquist() {
+        // PSG square waves are special-cased to the BLEP step gather even in clean
+        // (SampleNyquist) mode, preserving their hard edges band-limited at the output Nyquist.
+        // Verify the effective-mode override fires: clean mode on a PSG voice must match the
+        // crunch mode with the cutoff sliders parked at "off".
         let out_rate = 32768.0;
         let mut sample = Sample::new(vec![1.0, 1.0, -1.0, -1.0], 440.0, 16384.0, true, 0);
         sample.is_psg_square = true;
         let sample = Arc::new(sample);
         let tables = ResampleTables::new(16);
         let n = 512;
-        let nearest = render(
-            out_rate,
-            sample.clone(),
-            ResampleMode::NearestNeighbor,
-            None,
-            n,
-        );
-        let sinc = render(
+        let crunch_mode = render(out_rate, sample.clone(), crunch(16), Some(&tables), n);
+        let clean_mode = render(
             out_rate,
             sample,
             ResampleMode::SincSampleNyquist { half_taps: 16 },
             Some(&tables),
             n,
         );
-        for (i, (a, b)) in nearest.iter().zip(&sinc).enumerate() {
-            assert!((a - b).abs() < 1e-12, "sample {i}: nearest={a}, sinc={b}");
+        for (i, (a, b)) in crunch_mode.iter().zip(&clean_mode).enumerate() {
+            assert!((a - b).abs() < 1e-12, "sample {i}: crunch={a}, clean={b}");
+        }
+    }
+
+    #[test]
+    fn crunchy_cutoff_attenuates_highs_per_voice_kind() {
+        // The crunchy-mode cutoff sliders must low-pass the matching voice kind only: a
+        // 4096 Hz tone passes untouched with the cutoff above it and is strongly attenuated
+        // with the cutoff far below it, independently for PSG and sampler voices.
+        let out_rate = 32768.0;
+        let src_rate = 16384.0;
+        let tone_hz = 4096.0;
+        let warmup = 256;
+        let n = 2048;
+        let tables = ResampleTables::new(32);
+        for is_psg in [false, true] {
+            let mut s = sine_sample(4, 64, src_rate); // 16384/4 = 4096 Hz
+            if is_psg {
+                Arc::get_mut(&mut s).unwrap().is_psg_square = true;
+            }
+            let mode_with = |this_kind_hz: u32| {
+                let other = ResampleMode::CUTOFF_OFF_HZ;
+                ResampleMode::SincOutputNyquist {
+                    half_taps: 32,
+                    psg_cutoff_hz: if is_psg { this_kind_hz } else { other },
+                    sampler_cutoff_hz: if is_psg { other } else { this_kind_hz },
+                }
+            };
+            let open = render(
+                out_rate,
+                s.clone(),
+                mode_with(20_000),
+                Some(&tables),
+                warmup + n,
+            );
+            let cut = render(
+                out_rate,
+                s.clone(),
+                mode_with(1_000),
+                Some(&tables),
+                warmup + n,
+            );
+            // The *other* kind's slider must not touch this voice.
+            let other_cut = {
+                let other = ResampleMode::SincOutputNyquist {
+                    half_taps: 32,
+                    psg_cutoff_hz: if is_psg {
+                        ResampleMode::CUTOFF_OFF_HZ
+                    } else {
+                        1_000
+                    },
+                    sampler_cutoff_hz: if is_psg {
+                        1_000
+                    } else {
+                        ResampleMode::CUTOFF_OFF_HZ
+                    },
+                };
+                render(out_rate, s, other, Some(&tables), warmup + n)
+            };
+            let a_open = amp_at(&open[warmup..], tone_hz, out_rate);
+            let a_cut = amp_at(&cut[warmup..], tone_hz, out_rate);
+            let a_other = amp_at(&other_cut[warmup..], tone_hz, out_rate);
+            // (The step gather keeps the ZOH sinc rolloff: ≈0.90 at a quarter of the source
+            // rate — that colouring is the point of crunch mode.)
+            assert!(
+                a_open > 0.85,
+                "is_psg={is_psg}: open cutoff passes tone, got {a_open}"
+            );
+            assert!(
+                a_cut < 0.05 * a_open,
+                "is_psg={is_psg}: 1 kHz cutoff should crush a 4096 Hz tone: {a_cut} vs {a_open}"
+            );
+            assert!(
+                (a_other - a_open).abs() < 0.05 * a_open,
+                "is_psg={is_psg}: the other kind's slider must not apply: {a_other} vs {a_open}"
+            );
         }
     }
 
