@@ -146,6 +146,35 @@ impl Default for ResampleSettings {
     }
 }
 
+/// Per-device master high-shelf EQ settings (one for the DS, one for the GBA), persisted.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ShelfSettings {
+    /// Whether the shelf is applied.
+    pub enabled: bool,
+    /// Filter order (even); higher steepens the transition.
+    pub order: usize,
+    /// Resonance at the corner.
+    pub q: f32,
+    /// Corner frequency (Hz).
+    pub cutoff_hz: f32,
+    /// Shelf gain (dB); negative cuts the highs, positive boosts them.
+    pub gain_db: f32,
+}
+
+impl Default for ShelfSettings {
+    fn default() -> Self {
+        use crate::default_settings as d;
+        Self {
+            enabled: d::SHELF_ENABLED,
+            order: d::SHELF_ORDER,
+            q: d::SHELF_Q,
+            cutoff_hz: d::SHELF_CUTOFF_HZ,
+            gain_db: d::SHELF_GAIN_DB,
+        }
+    }
+}
+
 /// The full app state saved to (and restored from) eframe storage.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -168,6 +197,10 @@ pub struct Persisted {
     pub nds_resample: ResampleSettings,
     /// GBA resampling settings.
     pub gba_resample: ResampleSettings,
+    /// Nintendo DS master high-shelf EQ.
+    pub nds_shelf: ShelfSettings,
+    /// GBA master high-shelf EQ.
+    pub gba_shelf: ShelfSettings,
     /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
     pub delay_smoothing_choice: usize,
     /// How the song list is sorted.
@@ -193,6 +226,8 @@ impl Default for Persisted {
             pure_tonic: d::PURE_TONIC,
             nds_resample: ResampleSettings::default(),
             gba_resample: ResampleSettings::default(),
+            nds_shelf: ShelfSettings::default(),
+            gba_shelf: ShelfSettings::default(),
             delay_smoothing_choice: d::DELAY_SMOOTHING_CHOICE,
             sort_mode: d::SORT_MODE,
             sort_descending: d::SORT_DESCENDING,

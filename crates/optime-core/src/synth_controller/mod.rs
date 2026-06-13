@@ -11,10 +11,11 @@
 mod config;
 mod vis;
 
-pub use config::{DelaySmoothing, SynthConfig};
+pub use config::{DelaySmoothing, HighShelf, SynthConfig};
 pub use vis::{FsVisController, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
+use crate::dsp::BiquadFilter;
 use crate::synth::MAX_BLOCK;
 use crate::{SampleSynthesizer, TRACK_COUNT};
 
@@ -47,6 +48,10 @@ pub struct SynthController {
     /// Reusable event buffer.
     events: Vec<SynthEvent>,
     timer: f64,
+    /// Master high-shelf EQ on the final mixed output (left/right), and the params it's built for.
+    shelf_l: BiquadFilter,
+    shelf_r: BiquadFilter,
+    shelf_params: Option<HighShelf>,
 }
 
 impl SynthController {
@@ -75,7 +80,46 @@ impl SynthController {
             feedback: TickFeedback::default(),
             events: Vec::new(),
             timer: 0.0,
+            shelf_l: BiquadFilter::high_shelf(2, sample_rate, 4000.0, 0.707, 0.0),
+            shelf_r: BiquadFilter::high_shelf(2, sample_rate, 4000.0, 0.707, 0.0),
+            shelf_params: None,
         })
+    }
+
+    /// Applies the master high-shelf EQ to one final stereo sample (a transparent pass when the
+    /// shelf is disabled / 0 dB), reconfiguring the biquads when the parameters change.
+    #[inline]
+    fn master_filter(&mut self, l: f64, r: f64, config: &SynthConfig) -> (f64, f64) {
+        let hs = config.high_shelf;
+        if !hs.is_active() {
+            return (l, r);
+        }
+        if self.shelf_params != Some(hs) {
+            let order = (hs.order.max(2)) & !1; // even, ≥ 2
+            if self.shelf_l.num_cascade() * 2 != order {
+                self.shelf_l = BiquadFilter::high_shelf(
+                    order,
+                    self.sample_rate,
+                    hs.cutoff_hz,
+                    hs.q,
+                    hs.gain_db,
+                );
+                self.shelf_r = BiquadFilter::high_shelf(
+                    order,
+                    self.sample_rate,
+                    hs.cutoff_hz,
+                    hs.q,
+                    hs.gain_db,
+                );
+            } else {
+                self.shelf_l
+                    .set_high_shelf(self.sample_rate, hs.cutoff_hz, hs.q, hs.gain_db);
+                self.shelf_r
+                    .set_high_shelf(self.sample_rate, hs.cutoff_hz, hs.q, hs.gain_db);
+            }
+            self.shelf_params = Some(hs);
+        }
+        (self.shelf_l.transform(l), self.shelf_r.transform(r))
     }
 
     /// The audio sample rate this controller renders at.
@@ -115,6 +159,7 @@ impl SynthController {
                 val_r += synth.val_r;
             }
         }
+        let (val_l, val_r) = self.master_filter(val_l, val_r, config);
         (val_l as f32, val_r as f32)
     }
 
@@ -158,6 +203,7 @@ impl SynthController {
                 .chunks_exact_mut(2)
                 .zip(acc_l[..n].iter().zip(&acc_r[..n]))
             {
+                let (l, r) = self.master_filter(l, r, config);
                 frame_out[0] = l as f32;
                 frame_out[1] = r as f32;
             }

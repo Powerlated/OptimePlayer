@@ -23,6 +23,8 @@ Options exist for the user to select between:
    * Again, there should be sliders for the user to adjust cutoff frequencies on this. 
 
 The amount of sinc taps that ANY filter uses must be adjustable by the user. 
+
+In no mode where there is any proper reconstruction happening to other samples, should PSGs be nearest-neighbor resampled. PSGs should be cleanly bandlimited ZOH'd in those modes.
   
 Only sliders for the currently selected option should be visible.
 

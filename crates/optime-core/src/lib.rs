@@ -36,7 +36,7 @@ pub use resample::{fir_kernel, fir_response, ResampleTables};
 pub use sample::{decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, ResampleMode, Sample};
 pub use synth::{DelayLine, SampleInstrument, SampleSynthesizer, CROSSOVER_Q};
 pub use synth_controller::{
-    DelaySmoothing, FsVisController, SynthConfig, SynthController, VisNote,
+    DelaySmoothing, FsVisController, HighShelf, SynthConfig, SynthController, VisNote,
 };
 pub use tuning::{midi_note_to_hz, TuningSystem};
 

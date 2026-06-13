@@ -127,6 +127,34 @@ impl BiquadFilter {
         );
     }
 
+    /// Configures this filter as a high-shelf with the given corner frequency, Q and gain (dB).
+    ///
+    /// The cascade's `num_cascade` sections each take `db_gain / num_cascade`, so the total shelf
+    /// gain is `db_gain` regardless of order — a higher order only steepens the transition.
+    /// (RBJ cookbook high-shelf, Q form.)
+    pub fn set_high_shelf(&mut self, sample_rate: f64, corner: f64, q: f64, db_gain: f64) {
+        let per_section_db = db_gain / self.num_cascade().max(1) as f64;
+        let a = 10f64.powf(per_section_db / 40.0);
+        let w0 = 2.0 * PI * corner / sample_rate;
+        let cos_w0 = w0.cos();
+        let alpha = w0.sin() / (2.0 * q);
+        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+        let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+        let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
+        let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+        let aa0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+        let aa1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
+        let aa2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+        self.set_coefficients(aa0, aa1, aa2, b0, b1, b2);
+    }
+
+    /// Convenience constructor for a high-shelf filter.
+    pub fn high_shelf(order: usize, sample_rate: f64, corner: f64, q: f64, db_gain: f64) -> Self {
+        let mut f = Self::new(order, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        f.set_high_shelf(sample_rate, corner, q, db_gain);
+        f
+    }
+
     /// Convenience constructor for a low-pass filter.
     pub fn low_pass(order: usize, sample_rate: f64, cutoff: f64, q: f64) -> Self {
         let mut f = Self::new(order, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -282,6 +310,36 @@ mod tests {
             let r = (re * re + im * im).sqrt();
             assert!(r < 1.0, "pole |z| = {r} is outside the unit circle");
         }
+    }
+
+    #[test]
+    fn high_shelf_boosts_highs_leaves_dc() {
+        // A +12 dB high-shelf: ~unity at DC, ~+12 dB (×3.98) at Nyquist, regardless of order.
+        for order in [2usize, 4, 8] {
+            let f = BiquadFilter::high_shelf(order, 48000.0, 4000.0, 0.707, 12.0);
+            let (dc, _) = f.frequency_response(0.0);
+            let (nyq, _) = f.frequency_response(std::f64::consts::PI);
+            assert!((dc - 1.0).abs() < 1e-3, "order {order}: DC gain {dc}");
+            let want = 10f64.powf(12.0 / 20.0);
+            assert!(
+                (nyq - want).abs() < 0.05 * want,
+                "order {order}: Nyquist gain {nyq}, want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn high_shelf_cut_attenuates_highs() {
+        // A −12 dB high-shelf attenuates Nyquist and leaves DC alone.
+        let f = BiquadFilter::high_shelf(4, 48000.0, 4000.0, 0.707, -12.0);
+        let (dc, _) = f.frequency_response(0.0);
+        let (nyq, _) = f.frequency_response(std::f64::consts::PI);
+        assert!((dc - 1.0).abs() < 1e-3, "DC gain {dc}");
+        let want = 10f64.powf(-12.0 / 20.0);
+        assert!(
+            (nyq - want).abs() < 0.05 * want,
+            "Nyquist gain {nyq}, want {want}"
+        );
     }
 
     #[test]

@@ -16,6 +16,42 @@ pub enum DelaySmoothing {
     HoldDuringNotes,
 }
 
+/// A master high-shelf EQ applied to the final mixed output (one per device, chosen by the
+/// caller). All four RBJ parameters are user-adjustable; `enabled` off (or a 0 dB gain) is a
+/// transparent bypass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HighShelf {
+    /// Whether the shelf is applied at all.
+    pub enabled: bool,
+    /// Filter order (even); the cascade has `order / 2` biquad sections — higher = steeper.
+    pub order: usize,
+    /// Resonance at the corner.
+    pub q: f64,
+    /// Corner frequency in Hz.
+    pub cutoff_hz: f64,
+    /// Shelf gain in dB (negative attenuates the highs, positive boosts them).
+    pub gain_db: f64,
+}
+
+impl Default for HighShelf {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            order: 2,
+            q: 0.707,
+            cutoff_hz: 4000.0,
+            gain_db: 0.0,
+        }
+    }
+}
+
+impl HighShelf {
+    /// Whether the shelf actually changes the signal (enabled and not a 0 dB / silent pass).
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.gain_db != 0.0 && self.order >= 2
+    }
+}
+
 /// Runtime-tunable synthesis options (replaces the original engine's global flags).
 #[derive(Debug, Clone)]
 pub struct SynthConfig {
@@ -40,6 +76,8 @@ pub struct SynthConfig {
     pub smooth_psg_pops: bool,
     /// How the stereo expander handles delay-line length changes.
     pub delay_smoothing: DelaySmoothing,
+    /// Master high-shelf EQ on the final mixed output (per-device; chosen by the caller).
+    pub high_shelf: HighShelf,
 }
 
 impl Default for SynthConfig {
@@ -54,6 +92,7 @@ impl Default for SynthConfig {
             resample: ResampleMode::NearestNeighbor,
             smooth_psg_pops: false,
             delay_smoothing: DelaySmoothing::None,
+            high_shelf: HighShelf::default(),
         }
     }
 }

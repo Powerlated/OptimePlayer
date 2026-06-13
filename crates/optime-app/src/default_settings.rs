@@ -54,3 +54,15 @@ pub const AUTHENTIC_CUTOFF_HZ: u32 = 15_000;
 pub const CRUNCHY_AUTHENTIC_CUTOFF_HZ: u32 = 15_000;
 /// Preserve the hardware's hard PSG on/off edges by default (don't slew the pops).
 pub const SMOOTH_PSG_POPS: bool = false;
+
+// ── Master high-shelf EQ (per device) ────────────────────────────────────────
+/// Off by default — a transparent pass until the user dials in a shelf.
+pub const SHELF_ENABLED: bool = false;
+/// Filter order (even); the cascade has `order / 2` biquad sections.
+pub const SHELF_ORDER: usize = 2;
+/// Shelf resonance at the corner.
+pub const SHELF_Q: f32 = 0.707;
+/// Corner frequency (Hz).
+pub const SHELF_CUTOFF_HZ: f32 = 4000.0;
+/// Shelf gain (dB); 0 = flat.
+pub const SHELF_GAIN_DB: f32 = 0.0;

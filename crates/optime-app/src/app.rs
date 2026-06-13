@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use optime_core::{
-    DelaySmoothing, FsVisController, ResampleMode, SoundData, SynthConfig, SynthController,
-    TuningSystem,
+    DelaySmoothing, FsVisController, HighShelf, ResampleMode, SoundData, SynthConfig,
+    SynthController, TuningSystem,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -12,7 +12,9 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
-use crate::library::{Library, Persisted, RepeatMode, ResampleSettings, SortMode, TrackRef};
+use crate::library::{
+    Library, Persisted, RepeatMode, ResampleSettings, ShelfSettings, SortMode, TrackRef,
+};
 use crate::piano_roll::PianoRoll;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
@@ -123,6 +125,9 @@ pub struct OptimeApp {
     /// Per-device resampling settings (the device of the current song picks which applies).
     nds_resample: ResampleSettings,
     gba_resample: ResampleSettings,
+    /// Per-device master high-shelf EQ (the active device's applies).
+    nds_shelf: ShelfSettings,
+    gba_shelf: ShelfSettings,
     /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
     delay_smoothing_choice: usize,
 
@@ -232,6 +237,8 @@ impl OptimeApp {
             track_enables: [true; TRACK_COUNT],
             nds_resample: p.nds_resample,
             gba_resample: p.gba_resample,
+            nds_shelf: p.nds_shelf,
+            gba_shelf: p.gba_shelf,
             delay_smoothing_choice: p.delay_smoothing_choice,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
@@ -306,6 +313,8 @@ impl OptimeApp {
             pure_tonic: self.pure_tonic,
             nds_resample: self.nds_resample.clone(),
             gba_resample: self.gba_resample.clone(),
+            nds_shelf: self.nds_shelf.clone(),
+            gba_shelf: self.gba_shelf.clone(),
             delay_smoothing_choice: self.delay_smoothing_choice,
             sort_mode: self.sort_mode,
             sort_descending: self.sort_descending,
@@ -407,6 +416,15 @@ impl OptimeApp {
         }
     }
 
+    /// The master high-shelf EQ settings of the active device.
+    fn active_shelf(&self) -> &ShelfSettings {
+        if self.active_device_is_gba() {
+            &self.gba_shelf
+        } else {
+            &self.nds_shelf
+        }
+    }
+
     /// The active synth config built from the UI mirrors.
     fn config(&self) -> SynthConfig {
         let tuning = if self.tuning_choice == 0 {
@@ -438,6 +456,14 @@ impl OptimeApp {
         };
         // Pop smoothing is a crunchy-mode option; the other modes keep the hardware edges.
         let smooth_psg_pops = rs.smooth_psg_pops && rs.choice == 2;
+        let sh = self.active_shelf();
+        let high_shelf = HighShelf {
+            enabled: sh.enabled,
+            order: sh.order,
+            q: sh.q as f64,
+            cutoff_hz: sh.cutoff_hz as f64,
+            gain_db: sh.gain_db as f64,
+        };
         SynthConfig {
             stereo_separation: self.stereo_separation,
             force_stereo_separation: self.force_stereo_separation,
@@ -451,6 +477,7 @@ impl OptimeApp {
                 1 => DelaySmoothing::HoldDuringNotes,
                 _ => DelaySmoothing::None,
             },
+            high_shelf,
         }
     }
 
@@ -1510,6 +1537,47 @@ impl OptimeApp {
         }
         if open_sinc_plot {
             self.sinc_plot_open = true;
+        }
+        ui.separator();
+        // Master high-shelf EQ — per device, like the resampling settings above.
+        ui.label(if is_gba {
+            "High-shelf EQ (GBA)"
+        } else {
+            "High-shelf EQ (Nintendo DS)"
+        });
+        {
+            let sh = if is_gba {
+                &mut self.gba_shelf
+            } else {
+                &mut self.nds_shelf
+            };
+            ui.checkbox(&mut sh.enabled, "Enable high-shelf")
+                .on_hover_text(
+                    "A master high-shelf EQ on the final mix. Negative gain tames harsh highs / \
+                 click brightness; positive adds air.",
+                );
+            ui.add_enabled_ui(sh.enabled, |ui| {
+                ui.add(
+                    egui::Slider::new(&mut sh.gain_db, -24.0..=24.0)
+                        .text("Gain")
+                        .suffix(" dB"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut sh.cutoff_hz, 500.0..=16000.0)
+                        .text("Cutoff")
+                        .suffix(" Hz")
+                        .logarithmic(true),
+                );
+                ui.add(egui::Slider::new(&mut sh.q, 0.1..=2.0).text("Q"));
+                ui.add(
+                    egui::Slider::new(&mut sh.order, 2..=16)
+                        .step_by(2.0)
+                        .text("Order"),
+                )
+                .on_hover_text(
+                    "Higher order steepens the shelf transition (more biquad sections).",
+                );
+            });
         }
         ui.separator();
         ui.label("Tuning system");
