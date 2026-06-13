@@ -20,6 +20,8 @@ pub const REPEAT: RepeatMode = RepeatMode::All;
 pub const VOLUME: f32 = 1.0;
 /// Native song-list order until the user sorts.
 pub const SORT_MODE: SortMode = SortMode::Default;
+/// Sort ascending (A→Z, shortest→longest) by default.
+pub const SORT_DESCENDING: bool = false;
 
 // ── Stereo / mixing ─────────────────────────────────────────────────────────
 pub const STEREO_SEPARATION: bool = true;

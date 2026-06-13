@@ -169,6 +169,8 @@ pub struct Persisted {
     pub delay_smoothing_choice: usize,
     /// How the song list is sorted.
     pub sort_mode: SortMode,
+    /// Whether the sort runs in descending order.
+    pub sort_descending: bool,
 }
 
 impl Default for Persisted {
@@ -190,6 +192,7 @@ impl Default for Persisted {
             gba_resample: ResampleSettings::default(),
             delay_smoothing_choice: d::DELAY_SMOOTHING_CHOICE,
             sort_mode: d::SORT_MODE,
+            sort_descending: d::SORT_DESCENDING,
         }
     }
 }

@@ -144,6 +144,8 @@ pub struct OptimeApp {
     library: Library,
     /// How the song list is ordered (by name, by length, or native order).
     sort_mode: SortMode,
+    /// Whether [`Self::sort_mode`] runs in descending order.
+    sort_descending: bool,
     /// Cached computed song lengths, keyed by (source key, song id), so re-sorting and
     /// reloading don't recompute. `None` = the length couldn't be determined.
     length_cache: std::collections::HashMap<(String, u32), Option<f64>>,
@@ -240,6 +242,7 @@ impl OptimeApp {
             rng: 0x9E37_79B9_7F4A_7C15,
             library: p.library,
             sort_mode: p.sort_mode,
+            sort_descending: p.sort_descending,
             length_cache: std::collections::HashMap::new(),
             needs_sort: false,
             library_view: LibraryView::Root,
@@ -305,6 +308,7 @@ impl OptimeApp {
             gba_resample: self.gba_resample.clone(),
             delay_smoothing_choice: self.delay_smoothing_choice,
             sort_mode: self.sort_mode,
+            sort_descending: self.sort_descending,
         }
     }
 
@@ -542,28 +546,37 @@ impl OptimeApp {
         }
     }
 
-    /// Reorders [`Self::songs`] per [`Self::sort_mode`], preserving which song is current.
+    /// Reorders [`Self::songs`] per [`Self::sort_mode`] and [`Self::sort_descending`],
+    /// preserving which song is current.
     fn apply_sort(&mut self) {
+        use std::cmp::Ordering;
         let current = self
             .current_song
             .and_then(|i| self.songs.get(i))
             .map(|s| (s.archive_index, s.song_id));
-        match self.sort_mode {
-            SortMode::Default => self.songs.sort_by_key(|s| s.order),
-            SortMode::Name => self.songs.sort_by(|a, b| {
-                a.name
-                    .to_lowercase()
-                    .cmp(&b.name.to_lowercase())
-                    .then(a.order.cmp(&b.order))
-            }),
-            SortMode::Length => self.songs.sort_by(|a, b| {
-                a.length
+        // Copy out so the sort closure doesn't borrow `self` alongside `&mut self.songs`.
+        let mode = self.sort_mode;
+        let desc = self.sort_descending;
+        // The ascending key comparison for the active mode (Default keeps native order).
+        let key_cmp = |a: &Song, b: &Song| -> Ordering {
+            match mode {
+                SortMode::Default => Ordering::Equal,
+                SortMode::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortMode::Length => a
+                    .length
                     .unwrap_or(f64::INFINITY)
                     .partial_cmp(&b.length.unwrap_or(f64::INFINITY))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(a.order.cmp(&b.order))
-            }),
-        }
+                    .unwrap_or(Ordering::Equal),
+            }
+        };
+        self.songs.sort_by(|a, b| {
+            let primary = key_cmp(a, b);
+            let primary = if desc { primary.reverse() } else { primary };
+            // Native order breaks ties (and, for Default, is the whole ordering); it follows the
+            // ascending/descending direction too so a descending sort fully reverses the list.
+            let tie = a.order.cmp(&b.order);
+            primary.then(if desc { tie.reverse() } else { tie })
+        });
         if let Some((ai, sid)) = current {
             self.current_song = self
                 .songs
@@ -970,8 +983,10 @@ impl OptimeApp {
                 }
             });
         };
-        // Sort selector (by native order, name, or computed length).
+        // Sort selector (by native order, name, or computed length) with an ascending/descending
+        // direction toggle.
         let mut mode = self.sort_mode;
+        let mut desc = self.sort_descending;
         ui.horizontal(|ui| {
             ui.label("Sort:");
             egui::ComboBox::from_id_salt("song_sort")
@@ -981,9 +996,23 @@ impl OptimeApp {
                     ui.selectable_value(&mut mode, SortMode::Name, SortMode::Name.label());
                     ui.selectable_value(&mut mode, SortMode::Length, SortMode::Length.label());
                 });
+            // "▲" ascending / "▼" descending, toggled on click.
+            let arrow = if desc { "▼" } else { "▲" };
+            if ui
+                .add(egui::Button::new(arrow).frame(false))
+                .on_hover_text(if desc {
+                    "Descending — click for ascending"
+                } else {
+                    "Ascending — click for descending"
+                })
+                .clicked()
+            {
+                desc = !desc;
+            }
         });
-        if mode != self.sort_mode {
+        if mode != self.sort_mode || desc != self.sort_descending {
             self.sort_mode = mode;
+            self.sort_descending = desc;
             self.needs_sort = true;
         }
         ui.add_space(2.0);

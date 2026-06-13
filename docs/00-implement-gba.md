@@ -22,7 +22,7 @@ Options exist for the user to select between:
  * GBA Crunchy Authentic. Same as authentic, but instrument -> 13379 Hz is done with properly reconstructed sinc, and the 13379 Hz -> 32768 Hz conversion is done by a bandlimited zero-order hold.
    * Again, there should be sliders for the user to adjust cutoff frequencies on this. 
 
-ALL 
+The amount of sinc taps that ANY filter uses must be adjustable by the user. 
   
 Only sliders for the currently selected option should be visible.
 
