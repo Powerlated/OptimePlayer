@@ -4,7 +4,7 @@
 use core::f64::consts::PI;
 
 use super::kernels::{kernels, sinc_int_at, OVERSAMPLE, TAU_MAX};
-use super::{fir_kernel, fir_response, resample_sinc, tap_window, ResampleTables};
+use super::{resample_sinc, tap_window, ResampleTables};
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() < tol
@@ -126,54 +126,5 @@ fn fixed_tap_count_independent_of_ratio() {
             "fc={fc}: {n} taps (expected ≈{})",
             2 * p
         );
-    }
-}
-
-#[test]
-fn fir_kernel_dc_gain_is_one() {
-    let k = fir_kernel(16, 0.45);
-    let sum: f64 = k.iter().sum();
-    assert!(close(sum, 1.0, 1e-10), "kernel sum = {sum}");
-}
-
-#[test]
-fn fir_kernel_is_symmetric() {
-    let k = fir_kernel(8, 0.4);
-    let n = k.len();
-    for i in 0..n / 2 {
-        assert!(close(k[i], k[n - 1 - i], 1e-15), "asymmetry at {i}");
-    }
-}
-
-#[test]
-fn fir_response_dc_gain_near_one() {
-    let (mag, _) = fir_response(16, 0.45, 0.0);
-    assert!(close(mag, 1.0, 1e-10), "DC magnitude = {mag}");
-}
-
-#[test]
-fn stopband_suppression_improves_with_taps() {
-    // For a fixed cutoff, a wider support sharpens the transition and pushes a stopband tone
-    // further down. Cutoff fc = 0.25; probe at 0.4 cyc/sample (deep in the stopband).
-    let w_stop = 2.0 * PI * 0.4;
-    let taps = [2usize, 4, 8, 16, 32];
-    let mags: Vec<f64> = taps
-        .iter()
-        .map(|&t| fir_response(t, 0.25, w_stop).0)
-        .collect();
-    for w in mags.windows(2) {
-        assert!(
-            w[1] < w[0],
-            "stopband magnitude should fall with more taps, got {mags:?}"
-        );
-    }
-    assert!(
-        *mags.last().unwrap() < 0.01,
-        "widest-kernel stopband magnitude = {}",
-        mags.last().unwrap()
-    );
-    for &t in &taps {
-        let (pass, _) = fir_response(t, 0.25, 2.0 * PI * 0.05);
-        assert!(pass > 0.95, "passband magnitude at {t} taps = {pass}");
     }
 }

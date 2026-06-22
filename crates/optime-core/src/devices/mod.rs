@@ -15,12 +15,11 @@
 //! device, and a device never touches voices directly.
 
 pub mod gba;
-mod messages;
 pub mod nintendo_ds;
 
-pub use messages::{HardwareChain, SynthEvent, TickFeedback, VoiceId, VoicePitch};
+pub use crate::synth_controller::messages::{HardwareChain, SynthEvent, TickFeedback, VoiceId, VoicePitch};
 
-use crate::synth_controller::SynthConfig;
+use crate::synth_controller::{messages, SynthConfig};
 
 /// A loaded, parsed sound archive for some device — everything needed to list and start songs.
 pub enum SoundData {

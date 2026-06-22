@@ -12,7 +12,7 @@ use super::kernels::{sinc_int_at, win_at, Kernels};
 /// where `S` is the cumulative sinc integral. The bin's upper-edge `S` value is the next bin's
 /// lower edge, so it is carried across iterations (one `sinc_int` lookup per tap). Normalizing by
 /// the weight sum forces exact DC unity (and absorbs the window). Returns `(Σ src·w, Σ w)`.
-pub(super) fn gather_step(
+pub(crate) fn gather_step(
     k: &Kernels,
     src: &[f32],
     d0: f64,
@@ -42,7 +42,7 @@ pub(super) fn gather_step(
 /// tap — no per-tap `abs`/multiply. Taps past the support contribute a zero window, so no in-loop
 /// bounds test is needed. Returns `(Σ src·w, Σ w)`.
 #[cfg(not(feature = "simd"))]
-pub(super) fn gather_impulse(
+pub(crate) fn gather_impulse(
     k: &Kernels,
     src: &[f32],
     d0: f64,

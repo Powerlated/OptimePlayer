@@ -18,21 +18,21 @@
 //! samples. The browser/audio/UI concerns live in the `optime-app` crate.
 
 pub mod devices;
-pub mod dsp;
-pub mod resample;
 pub mod sample;
 pub mod synth;
 pub mod synth_controller;
 pub mod tuning;
 pub mod util;
+mod dsp;
 
 pub use devices::nintendo_ds::{
     calc_channel_volume, BankInfo, InstrumentBank, InstrumentRecord, InstrumentType, Message,
     MessageType, Sdat, Sequence, SequenceTrack, SseqInfo, SwarInfo,
 };
 pub use devices::{DevicePlayer, HardwareChain, SoundData, SynthEvent, VoiceId, VoicePitch};
-pub use dsp::BiquadFilter;
-pub use resample::{fir_kernel, fir_response, ResampleTables};
+pub use dsp::biquad_filter;
+use dsp::resample;
+pub use dsp::resample::{ResampleTables};
 pub use sample::{decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, ResampleMode, Sample};
 pub use synth::{DelayLine, SampleInstrument, SampleSynthesizer, CROSSOVER_Q};
 pub use synth_controller::{

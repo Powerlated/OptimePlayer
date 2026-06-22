@@ -7,7 +7,7 @@ use super::{resample_sinc, tap_window, ResampleTables, GATHER_BUF_LEN};
 /// Maps a source index past the loop end back into the loop body `[loop_point, data_len)`.
 /// Callers guarantee `loop_len > 0`.
 #[inline]
-pub(super) fn loop_wrap(t: i64, loop_point: i64, loop_len: i64) -> i64 {
+pub(crate) fn loop_wrap(t: i64, loop_point: i64, loop_len: i64) -> i64 {
     (t - loop_point).rem_euclid(loop_len) + loop_point
 }
 

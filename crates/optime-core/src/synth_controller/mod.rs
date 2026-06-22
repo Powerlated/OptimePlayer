@@ -10,14 +10,15 @@
 
 mod config;
 mod vis;
+pub mod messages;
 
 pub use config::{DelaySmoothing, HighShelf, SynthConfig};
 pub use vis::{FsVisController, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
-use crate::dsp::BiquadFilter;
 use crate::synth::MAX_BLOCK;
 use crate::{SampleSynthesizer, TRACK_COUNT};
+use crate::dsp::biquad_filter::BiquadFilter;
 
 /// Which device voice currently owns a pool slot.
 #[derive(Debug, Clone, Copy)]

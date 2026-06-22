@@ -7,19 +7,19 @@ use std::sync::OnceLock;
 /// Samples per unit `τ` in the oversampled sinc tables. 512 keeps the (linearly interpolated)
 /// kernel error near 5e-6 while shrinking each table to ~256 KB so the strided gather stays cache-
 /// resident — far cheaper than the original 4096 (which spilled L2 and cost ~40% in crunch mode).
-pub(super) const OVERSAMPLE: usize = 512;
+pub(crate) const OVERSAMPLE: usize = 512;
 /// Maximum tabulated `τ = 2·fc·d`. For the hot path (`fc ≤ 0.5`, `d ≤ P ≤ 64`) this bounds `τ`.
 /// Beyond it (only reachable on cheap step-mode upsampling) the kernel is evaluated directly.
-pub(super) const TAU_MAX: usize = 64;
+pub(crate) const TAU_MAX: usize = 64;
 /// Samples in the Blackman window table over the normalized half-support `x = d/P ∈ [0, 1]`.
-pub(super) const WIN_OVERSAMPLE: usize = 4096;
+pub(crate) const WIN_OVERSAMPLE: usize = 4096;
 /// Largest supported `half_taps` (`P`). [`ResampleTables::new`](super::ResampleTables::new) clamps
 /// to this, so callers may size stack buffers for the widest possible gather window (see
 /// [`tap_window`](super::tap_window)).
 pub const MAX_HALF_TAPS: usize = TAU_MAX;
 
 /// `sinc(x) = sin(πx)/(πx)` (the normalized cardinal sine, unit zero-crossings).
-pub(super) fn sinc(x: f64) -> f64 {
+pub(crate) fn sinc(x: f64) -> f64 {
     if x.abs() < 1e-15 {
         1.0
     } else {
@@ -31,7 +31,7 @@ pub(super) fn sinc(x: f64) -> f64 {
 /// Blackman window over the normalized half-support `x = |d| / P ∈ [0, 1]` (and 0 outside).
 ///
 /// `w(x) = 0.42 + 0.5·cos(πx) + 0.08·cos(2πx)`; `w(0) = 1`, `w(1) = 0`.
-pub(super) fn blackman(x: f64) -> f64 {
+pub(crate) fn blackman(x: f64) -> f64 {
     if x >= 1.0 {
         return 0.0;
     }
@@ -41,7 +41,7 @@ pub(super) fn blackman(x: f64) -> f64 {
 /// The decoupled windowed-sinc tap weight `sinc(2·fc·d) · blackman(|d|/P)` evaluated directly
 /// (no tables). Used by the SIMD gather's scalar remainder and the UI filter-plot analysis.
 #[inline]
-pub(super) fn kernel_weight(d: f64, fc: f64, p: f64) -> f64 {
+pub(crate) fn kernel_weight(d: f64, fc: f64, p: f64) -> f64 {
     sinc(2.0 * fc * d) * blackman(d.abs() / p)
 }
 
@@ -51,7 +51,7 @@ pub(super) fn kernel_weight(d: f64, fc: f64, p: f64) -> f64 {
 /// Values are stored as `f32`: at `OVERSAMPLE` resolution the linear-interp error already dwarfs
 /// the `~6e-8` `f32` rounding, so the narrower type halves the cache footprint (each table ~128 KB)
 /// and the load cost in the strided gather, while sums still accumulate in `f64`.
-pub(super) struct Kernels {
+pub(crate) struct Kernels {
     /// `sinc[k] = sinc(k / OVERSAMPLE)` for `k` in `0..=TAU_MAX * OVERSAMPLE` (symmetric).
     /// (Unused by the `simd` build, which evaluates the impulse kernel analytically.)
     #[cfg(not(feature = "simd"))]
@@ -63,7 +63,7 @@ pub(super) struct Kernels {
     win: Vec<f32>,
 }
 
-pub(super) fn kernels() -> &'static Kernels {
+pub(crate) fn kernels() -> &'static Kernels {
     static K: OnceLock<Kernels> = OnceLock::new();
     K.get_or_init(|| {
         let len = TAU_MAX * OVERSAMPLE;
@@ -116,7 +116,7 @@ fn lerp(tab: &[f32], idx: f64) -> f64 {
 /// Odd in `τ` (`S(−τ) = −S(τ)`), asymptote `±0.5`; beyond the table the ripple is negligible so the
 /// asymptote is returned directly. (Step mode may push `|τ| > TAU_MAX` on upsampling.)
 #[inline]
-pub(super) fn sinc_int_at(k: &Kernels, idx: f64) -> f64 {
+pub(crate) fn sinc_int_at(k: &Kernels, idx: f64) -> f64 {
     let mag = idx.abs();
     let v = if mag >= (k.sinc_int.len() - 1) as f64 {
         0.5
@@ -133,7 +133,7 @@ pub(super) fn sinc_int_at(k: &Kernels, idx: f64) -> f64 {
 /// Blackman window looked up at the **pre-scaled index** `idx = (|d|/P)·WIN_OVERSAMPLE` (0 past the
 /// support edge).
 #[inline]
-pub(super) fn win_at(k: &Kernels, idx: f64) -> f64 {
+pub(crate) fn win_at(k: &Kernels, idx: f64) -> f64 {
     if idx >= WIN_OVERSAMPLE as f64 {
         0.0
     } else {
@@ -147,7 +147,7 @@ pub(super) fn win_at(k: &Kernels, idx: f64) -> f64 {
 /// (The `simd` build evaluates the impulse kernel analytically and does not read this table.)
 #[cfg(not(feature = "simd"))]
 #[inline]
-pub(super) fn sinc_at(k: &Kernels, idx: f64) -> f64 {
+pub(crate) fn sinc_at(k: &Kernels, idx: f64) -> f64 {
     if idx >= (k.sinc.len() - 1) as f64 {
         0.0
     } else {

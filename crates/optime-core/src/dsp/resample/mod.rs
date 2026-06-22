@@ -34,7 +34,6 @@
 //! - [`authentic`] — the per-voice fixed-rate hardware chain behind the Authentic resample mode.
 //! - [`analysis`] — the `fir_kernel` / `fir_response` helpers for the UI filter plot.
 
-mod analysis;
 mod authentic;
 mod gather;
 mod kernels;
@@ -45,7 +44,6 @@ mod simd;
 #[cfg(test)]
 mod tests;
 
-pub use analysis::{fir_kernel, fir_response};
 pub use authentic::{AuthenticState, ChainParams, Reconstruction};
 pub use kernels::MAX_HALF_TAPS;
 pub use source::{gather_sinc, GatherSource};

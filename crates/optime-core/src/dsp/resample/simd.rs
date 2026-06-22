@@ -54,7 +54,7 @@ impl Phasor {
 /// Vectorized impulse gather: `w(d) = sinc(2fc·d) · blackman(|d|/P)` evaluated analytically.
 /// `sinc` is even and `blackman` is even in `d`, so no run splitting or `abs` ordering is
 /// needed — one support mask per chunk. Returns `(Σ src·w, Σ w)`.
-pub(super) fn gather_impulse(src: &[f32], d0: f64, fc: f64, p: f64) -> (f64, f64) {
+pub(crate) fn gather_impulse(src: &[f32], d0: f64, fc: f64, p: f64) -> (f64, f64) {
     // Angle rates per source sample: πτ = a·d for the sinc, and the blackman harmonics.
     let a = PI * 2.0 * fc;
     let b = PI / p;

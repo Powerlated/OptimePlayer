@@ -192,11 +192,6 @@ pub struct OptimeApp {
     /// Keys currently held, to debounce auto-repeat for note input.
     held_notes: [bool; 128],
 
-    /// Whether the crossover-filter analysis popup is open.
-    crossover_plot_open: bool,
-    /// Whether the sinc-resampler analysis popup is open.
-    sinc_plot_open: bool,
-
     /// Which visualizer tab is active.
     vis_tab: VisTab,
     /// Streaming piano-roll state (note timeline, smoothed scroll clock).
@@ -267,8 +262,6 @@ impl OptimeApp {
             voice_history: std::collections::VecDeque::new(),
             pending_file: Arc::new(Mutex::new(None)),
             held_notes: [false; 128],
-            crossover_plot_open: false,
-            sinc_plot_open: false,
             vis_tab: VisTab::PianoRoll,
             piano_roll: PianoRoll::default(),
             look_ahead: None,
@@ -1436,13 +1429,6 @@ impl OptimeApp {
                     "Frequencies below this stay glued to the center; \
                      mids and treble are widened.",
                 );
-                if ui
-                    .add_enabled(self.bass_mono, egui::Button::new("📈"))
-                    .on_hover_text("Analyze crossover filter")
-                    .clicked()
-                {
-                    self.crossover_plot_open = true;
-                }
             });
         });
         ui.separator();
@@ -1455,7 +1441,6 @@ impl OptimeApp {
         } else {
             "Resampling (Nintendo DS)"
         });
-        let mut open_sinc_plot = false;
         {
             let rs = if is_gba {
                 &mut self.gba_resample
@@ -1497,13 +1482,6 @@ impl OptimeApp {
                                  (instead of linear + nearest-hold). PSGs are unchanged.",
                             );
                     });
-                if ui
-                    .add_enabled(matches!(rs.choice, 2 | 3), egui::Button::new("📈"))
-                    .on_hover_text("Analyze sinc kernel")
-                    .clicked()
-                {
-                    open_sinc_plot = true;
-                }
             });
             // Only the options of the selected mode are shown.
             if rs.choice >= 2 {
@@ -1567,9 +1545,6 @@ impl OptimeApp {
                 )
                 .on_hover_text("Low-pass cutoff applied by the final reconstruction stage.");
             }
-        }
-        if open_sinc_plot {
-            self.sinc_plot_open = true;
         }
         ui.separator();
         // Master high-shelf EQ — per device, like the resampling settings above.
@@ -2132,18 +2107,6 @@ impl eframe::App for OptimeApp {
                 guard += 1;
             }
             self.piano_roll.ingest(look);
-        }
-
-        // Analysis popups (shown every frame while open) — reachable from both layouts.
-        crate::filter_plot::show_crossover_window(
-            ctx,
-            &mut self.crossover_plot_open,
-            self.sample_rate,
-            self.bass_mono_freq as f64,
-        );
-        if self.active_resample().choice >= 2 {
-            let resample_mode = self.config().resample;
-            crate::filter_plot::show_sinc_window(ctx, &mut self.sinc_plot_open, resample_mode);
         }
 
         // Narrow screens (phones) get the Spotify-style mobile layout.

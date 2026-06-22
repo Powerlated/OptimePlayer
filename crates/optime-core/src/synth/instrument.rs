@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use crate::devices::{HardwareChain, VoicePitch};
-use crate::resample::{
+use crate::dsp::resample::{
     gather_sinc, AuthenticState, ChainParams, GatherSource, Reconstruction, ResampleTables,
 };
 use crate::sample::{ResampleMode, Sample};
@@ -789,7 +789,7 @@ mod tests {
         // step reconstruction — a clean band-limited ZOH, NOT a raw nearest-neighbour staircase.
         // With out == dac the final stage is the band-limited step gather of the DAC-rate stream;
         // pin the chain output against that reference and confirm it departs from raw nearest.
-        use crate::resample::{resample_sinc, tap_window};
+        use crate::dsp::resample::{resample_sinc, tap_window};
         let out_rate = 32768.0;
         let dac = 32768.0;
         let src_rate = 16384.0;
