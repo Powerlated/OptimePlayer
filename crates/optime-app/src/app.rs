@@ -113,44 +113,21 @@ pub struct OptimeApp {
     songs: Vec<Song>,
     current_song: Option<usize>,
 
-    // UI mirrors of [`SynthConfig`].
-    stereo_separation: bool,
-    force_stereo_separation: bool,
-    bass_mono: bool,
-    bass_mono_freq: f32,
-    tuning_choice: usize,
-    pure_tonic: i32,
-    track_enables: [bool; TRACK_COUNT],
-
-    /// Per-device resampling settings (the device of the current song picks which applies).
-    nds_resample: ResampleSettings,
-    gba_resample: ResampleSettings,
-    /// Per-device master high-shelf EQ (the active device's applies).
-    nds_shelf: ShelfSettings,
-    gba_shelf: ShelfSettings,
-    /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
-    delay_smoothing_choice: usize,
-
     paused: bool,
     status: String,
 
-    /// What happens when a song ends (after fade-out): stop, advance, or replay.
-    repeat: RepeatMode,
-    /// Pick the next song at random instead of in list order.
-    shuffle: bool,
-    /// Master volume (0..=1).
-    volume: f32,
+    // UI mirrors of [`SynthConfig`].
+    track_enables: [bool; TRACK_COUNT],
+
+
+    /// Saved state that persists across sessions
+    p: Persisted,
+
     /// Loops completed by the current song (counted from `SynthController::jumps`).
     loop_count: u32,
     /// xorshift64 state for shuffle.
     rng: u64,
 
-    /// The user's persistent library (playlists, likes, history).
-    library: Library,
-    /// How the song list is ordered (by name, by length, or native order).
-    sort_mode: SortMode,
-    /// Whether [`Self::sort_mode`] runs in descending order.
-    sort_descending: bool,
     /// Cached computed song lengths, keyed by (source key, song id), so re-sorting and
     /// reloading don't recompute. `None` = the length couldn't be determined.
     length_cache: std::collections::HashMap<(String, u32), Option<f64>>,
@@ -214,35 +191,24 @@ impl OptimeApp {
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
 
-        let mut app = Self {
+        #[cfg(target_arch = "wasm32")]
+        let track = get_track_ref_from_query_string().or_else(|| p.last_track.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let track = p.last_track.clone();
+
+                let mut app = Self {
             audio,
             audio_failed: false,
             sample_rate,
             archives: Vec::new(),
             songs: Vec::new(),
             current_song: None,
-            stereo_separation: p.stereo_separation,
-            force_stereo_separation: p.force_stereo_separation,
-            bass_mono: p.bass_mono,
-            bass_mono_freq: p.bass_mono_freq,
-            tuning_choice: p.tuning_choice,
-            pure_tonic: p.pure_tonic,
+            p: p,
             track_enables: [true; TRACK_COUNT],
-            nds_resample: p.nds_resample,
-            gba_resample: p.gba_resample,
-            nds_shelf: p.nds_shelf,
-            gba_shelf: p.gba_shelf,
-            delay_smoothing_choice: p.delay_smoothing_choice,
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
-            repeat: p.repeat,
-            shuffle: p.shuffle,
-            volume: p.volume.clamp(0.0, 1.0),
             loop_count: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
-            library: p.library,
-            sort_mode: p.sort_mode,
-            sort_descending: p.sort_descending,
             length_cache: std::collections::HashMap::new(),
             needs_sort: false,
             library_view: LibraryView::Root,
@@ -264,11 +230,6 @@ impl OptimeApp {
             look_ahead: None,
         };
 
-        #[cfg(target_arch = "wasm32")]
-        let track = get_track_ref_from_query_string().or_else(|| p.last_track.clone());
-        #[cfg(not(target_arch = "wasm32"))]
-        let track = p.last_track.clone();
-
         // Resume where the last session left off (paused), if the last track was from a demo
         // we can re-fetch; otherwise fall back to the first demo.
         match track {
@@ -285,30 +246,6 @@ impl OptimeApp {
             _ => app.request_demo(DEMOS[0].1, DEMOS[0].0),
         }
         app
-    }
-
-    /// The serializable bundle written to eframe storage.
-    fn persisted(&self) -> Persisted {
-        Persisted {
-            library: self.library.clone(),
-            shuffle: self.shuffle,
-            repeat: self.repeat,
-            volume: self.volume,
-            last_track: self.current_track_ref(),
-            stereo_separation: self.stereo_separation,
-            force_stereo_separation: self.force_stereo_separation,
-            bass_mono: self.bass_mono,
-            bass_mono_freq: self.bass_mono_freq,
-            tuning_choice: self.tuning_choice,
-            pure_tonic: self.pure_tonic,
-            nds_resample: self.nds_resample.clone(),
-            gba_resample: self.gba_resample.clone(),
-            nds_shelf: self.nds_shelf.clone(),
-            gba_shelf: self.gba_shelf.clone(),
-            delay_smoothing_choice: self.delay_smoothing_choice,
-            sort_mode: self.sort_mode,
-            sort_descending: self.sort_descending,
-        }
     }
 
     /// The persistent reference for the song at list index `i`, if it exists.
@@ -433,28 +370,28 @@ impl OptimeApp {
     /// The resampling settings of the active device.
     fn active_resample(&self) -> &ResampleSettings {
         if self.active_device_is_gba() {
-            &self.gba_resample
+            &self.p.gba_resample
         } else {
-            &self.nds_resample
+            &self.p.nds_resample
         }
     }
 
     /// The master high-shelf EQ settings of the active device.
     fn active_shelf(&self) -> &ShelfSettings {
         if self.active_device_is_gba() {
-            &self.gba_shelf
+            &self.p.gba_shelf
         } else {
-            &self.nds_shelf
+            &self.p.nds_shelf
         }
     }
 
     /// The active synth config built from the UI mirrors.
     fn config(&self) -> SynthConfig {
-        let tuning = if self.tuning_choice == 0 {
+        let tuning = if self.p.tuning_choice == 0 {
             TuningSystem::Equal
         } else {
             TuningSystem::Pure {
-                tonic: self.pure_tonic,
+                tonic: self.p.pure_tonic,
             }
         };
         let rs = self.active_resample();
@@ -480,15 +417,15 @@ impl OptimeApp {
             gain_db: sh.gain_db as f64,
         };
         SynthConfig {
-            stereo_separation: self.stereo_separation,
-            force_stereo_separation: self.force_stereo_separation,
-            bass_mono: self.bass_mono,
-            bass_mono_freq: self.bass_mono_freq as f64,
+            stereo_separation: self.p.stereo_separation,
+            force_stereo_separation: self.p.force_stereo_separation,
+            bass_mono: self.p.bass_mono,
+            bass_mono_freq: self.p.bass_mono_freq as f64,
             tuning,
             track_enables: self.track_enables,
             resample,
             smooth_psg_pops,
-            delay_smoothing: match self.delay_smoothing_choice {
+            delay_smoothing: match self.p.delay_smoothing_choice {
                 1 => DelaySmoothing::HoldDuringNotes,
                 _ => DelaySmoothing::None,
             },
@@ -580,7 +517,7 @@ impl OptimeApp {
 
         if self.needs_sort {
             // Length sort needs every length first; the others can sort right away.
-            if self.sort_mode != SortMode::Length || all_known {
+            if self.p.sort_mode != SortMode::Length || all_known {
                 self.apply_sort();
                 self.needs_sort = false;
             }
@@ -601,8 +538,8 @@ impl OptimeApp {
             .and_then(|i| self.songs.get(i))
             .map(|s| (s.archive_index, s.song_id));
         // Copy out so the sort closure doesn't borrow `self` alongside `&mut self.songs`.
-        let mode = self.sort_mode;
-        let desc = self.sort_descending;
+        let mode = self.p.sort_mode;
+        let desc = self.p.sort_descending;
         // The ascending key comparison for the active mode (Default keeps native order).
         let key_cmp = |a: &Song, b: &Song| -> Ordering {
             match mode {
@@ -650,7 +587,7 @@ impl OptimeApp {
                 self.paused = false;
                 self.loop_count = 0;
                 if let Some(t) = self.track_ref(index) {
-                    self.library.push_recent(&t);
+                    self.p.library.push_recent(&t);
                 }
                 self.piano_roll.clear();
                 // Parallel look-ahead runner; we drive it forward ourselves each frame.
@@ -710,7 +647,7 @@ impl OptimeApp {
             if tracks.is_empty() {
                 self.queue = None;
             } else {
-                let next = if self.shuffle && tracks.len() > 1 {
+                let next = if self.p.shuffle && tracks.len() > 1 {
                     self.rand_index(tracks.len(), Some(pos))
                 } else {
                     (pos as isize + delta).rem_euclid(tracks.len() as isize) as usize
@@ -722,7 +659,7 @@ impl OptimeApp {
         if n == 0 {
             return None;
         }
-        let next = if self.shuffle && n > 1 {
+        let next = if self.p.shuffle && n > 1 {
             self.rand_index(n, self.current_song)
         } else {
             let cur = self.current_song.unwrap_or(0) as isize;
@@ -819,7 +756,7 @@ impl OptimeApp {
 
     /// What to do when the current song has finished its fade-out.
     fn handle_song_end(&mut self) {
-        match self.repeat {
+        match self.p.repeat {
             RepeatMode::One => self.restart(),
             RepeatMode::All => self.step_song(1),
             RepeatMode::Off => {
@@ -827,7 +764,7 @@ impl OptimeApp {
                     Some((tracks, pos)) => pos + 1 >= tracks.len(),
                     None => self.current_song.is_none_or(|i| i + 1 >= self.songs.len()),
                 };
-                if at_end && !self.shuffle {
+                if at_end && !self.p.shuffle {
                     // Reload the song (resetting the fade) and leave it paused at the start.
                     self.restart();
                     self.paused = true;
@@ -950,7 +887,7 @@ impl OptimeApp {
         st.config = config.clone();
         st.paused = self.paused;
         // Swipe attenuation: the song gets quieter as its visualizer slides offscreen.
-        st.volume = self.volume * self.swipe_gain;
+        st.volume = self.p.volume * self.swipe_gain;
 
         // Sample the performance meters (drawn in the top bar).
         const METER_SAMPLES: usize = 128;
@@ -1054,8 +991,8 @@ impl OptimeApp {
         };
         // Sort selector (by native order, name, or computed length) with an ascending/descending
         // direction toggle.
-        let mut mode = self.sort_mode;
-        let mut desc = self.sort_descending;
+        let mut mode = self.p.sort_mode;
+        let mut desc = self.p.sort_descending;
         ui.horizontal(|ui| {
             ui.label("Sort:");
             egui::ComboBox::from_id_salt("song_sort")
@@ -1079,9 +1016,9 @@ impl OptimeApp {
                 desc = !desc;
             }
         });
-        if mode != self.sort_mode || desc != self.sort_descending {
-            self.sort_mode = mode;
-            self.sort_descending = desc;
+        if mode != self.p.sort_mode || desc != self.p.sort_descending {
+            self.p.sort_mode = mode;
+            self.p.sort_descending = desc;
             self.needs_sort = true;
         }
         ui.add_space(2.0);
@@ -1094,9 +1031,9 @@ impl OptimeApp {
                 sseq_id: song.song_id,
                 label: String::new(),
             };
-            let liked = self.library.is_liked(&track);
+            let liked = self.p.library.is_liked(&track);
             let in_playlist = self
-                .library
+                .p.library
                 .playlists
                 .iter()
                 .any(|pl| pl.tracks.iter().any(|x| x.same_song(&track)));
@@ -1120,7 +1057,7 @@ impl OptimeApp {
                         egui::RichText::new("…")
                             .size(22.0)
                             .color(crate::theme::TEXT_DIM),
-                        |ui| song_menu(ui, i, liked, &self.library.playlists, &mut action),
+                        |ui| song_menu(ui, i, liked, &self.p.library.playlists, &mut action),
                     );
                     let row_w = ui.available_width();
 
@@ -1138,7 +1075,7 @@ impl OptimeApp {
                         action = Some(Action::Play(i));
                     }
                     resp.context_menu(|ui| {
-                        song_menu(ui, i, liked, &self.library.playlists, &mut action)
+                        song_menu(ui, i, liked, &self.p.library.playlists, &mut action)
                     });
                 },
             );
@@ -1150,7 +1087,7 @@ impl OptimeApp {
             }
             Some(Action::Like(i)) => {
                 if let Some(t) = self.track_ref(i) {
-                    self.library.toggle_liked(&t);
+                    self.p.library.toggle_liked(&t);
                 }
             }
             Some(Action::Add(i, p)) => self.add_song_to_playlist(i, p),
@@ -1162,7 +1099,7 @@ impl OptimeApp {
     /// Adds song `i` to playlist `p` (deduplicated), reporting the result in the status line.
     fn add_song_to_playlist(&mut self, i: usize, p: usize) {
         let Some(t) = self.track_ref(i) else { return };
-        let Some(pl) = self.library.playlists.get_mut(p) else {
+        let Some(pl) = self.p.library.playlists.get_mut(p) else {
             return;
         };
         if pl.tracks.iter().any(|x| x.same_song(&t)) {
@@ -1189,7 +1126,7 @@ impl OptimeApp {
         use crate::theme::{ios_row, section_header};
         ui.spacing_mut().item_spacing.y = 0.0;
         let w = ui.available_width();
-        let liked_title = format!("Liked Songs ({})", self.library.liked.len());
+        let liked_title = format!("Liked Songs ({})", self.p.library.liked.len());
         if ios_row(ui, w, Some("❤"), &liked_title, &[], false, true).clicked() {
             self.library_view = LibraryView::Liked;
         }
@@ -1199,7 +1136,7 @@ impl OptimeApp {
         section_header(ui, "Playlists");
         let mut open = None;
         let mut delete = None;
-        for (p, pl) in self.library.playlists.iter().enumerate() {
+        for (p, pl) in self.p.library.playlists.iter().enumerate() {
             // RTL: trash button sized first, row fills the exact remainder (no overflow).
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), 42.0),
@@ -1224,7 +1161,7 @@ impl OptimeApp {
             self.library_view = LibraryView::Playlist(p);
         }
         if let Some(p) = delete {
-            self.library.playlists.remove(p);
+            self.p.library.playlists.remove(p);
         }
         ui.add_space(8.0);
         ui.allocate_ui_with_layout(
@@ -1238,7 +1175,7 @@ impl OptimeApp {
                 ui.add(edit);
                 let name = self.new_playlist_name.trim().to_owned();
                 if add.clicked() && !name.is_empty() {
-                    self.library.playlists.push(crate::library::Playlist {
+                    self.p.library.playlists.push(crate::library::Playlist {
                         name,
                         tracks: Vec::new(),
                     });
@@ -1252,9 +1189,9 @@ impl OptimeApp {
     /// Returns `true` if playback started.
     fn collection_ui(&mut self, ui: &mut egui::Ui, view: LibraryView) -> bool {
         let (title, tracks, removable) = match view {
-            LibraryView::Liked => ("❤ Liked Songs", self.library.liked.clone(), true),
-            LibraryView::Recent => ("🕘 Recently Played", self.library.recent.clone(), false),
-            LibraryView::Playlist(p) => match self.library.playlists.get(p) {
+            LibraryView::Liked => ("❤ Liked Songs", self.p.library.liked.clone(), true),
+            LibraryView::Recent => ("🕘 Recently Played", self.p.library.recent.clone(), false),
+            LibraryView::Playlist(p) => match self.p.library.playlists.get(p) {
                 Some(pl) => (pl.name.as_str(), pl.tracks.clone(), true),
                 None => {
                     self.library_view = LibraryView::Root;
@@ -1290,7 +1227,7 @@ impl OptimeApp {
                 )
                 .clicked()
         {
-            let pos = if self.shuffle {
+            let pos = if self.p.shuffle {
                 self.rand_index(tracks.len(), None)
             } else {
                 0
@@ -1334,10 +1271,10 @@ impl OptimeApp {
             match view {
                 LibraryView::Liked => {
                     let t = tracks[i].clone();
-                    self.library.liked.retain(|x| !x.same_song(&t));
+                    self.p.library.liked.retain(|x| !x.same_song(&t));
                 }
                 LibraryView::Playlist(p) => {
-                    if let Some(pl) = self.library.playlists.get_mut(p) {
+                    if let Some(pl) = self.p.library.playlists.get_mut(p) {
                         pl.tracks.remove(i);
                     }
                 }
@@ -1379,19 +1316,19 @@ impl OptimeApp {
     /// The synthesis settings (shared between the desktop side panel and the mobile tab).
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Settings");
-        ui.checkbox(&mut self.stereo_separation, "Stereo separation");
-        ui.add_enabled_ui(self.stereo_separation, |ui| {
-            ui.checkbox(&mut self.force_stereo_separation, "Force stereo separation");
+        ui.checkbox(&mut self.p.stereo_separation, "Stereo separation");
+        ui.add_enabled_ui(self.p.stereo_separation, |ui| {
+            ui.checkbox(&mut self.p.force_stereo_separation, "Force stereo separation");
             egui::ComboBox::from_id_salt("delay_smoothing")
-                .selected_text(match self.delay_smoothing_choice {
+                .selected_text(match self.p.delay_smoothing_choice {
                     1 => "No delay change during notes",
                     _ => "No smoothing",
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.delay_smoothing_choice, 0, "No smoothing")
+                    ui.selectable_value(&mut self.p.delay_smoothing_choice, 0, "No smoothing")
                         .on_hover_text("Pan changes move the widening delays immediately.");
                     ui.selectable_value(
-                        &mut self.delay_smoothing_choice,
+                        &mut self.p.delay_smoothing_choice,
                         1,
                         "No delay change during notes",
                     )
@@ -1400,11 +1337,11 @@ impl OptimeApp {
                          never pop in the middle of a playing note.",
                     );
                 });
-            ui.checkbox(&mut self.bass_mono, "Keep bass centered");
+            ui.checkbox(&mut self.p.bass_mono, "Keep bass centered");
             ui.horizontal(|ui| {
                 ui.add_enabled(
-                    self.bass_mono,
-                    egui::Slider::new(&mut self.bass_mono_freq, 40.0..=800.0)
+                    self.p.bass_mono,
+                    egui::Slider::new(&mut self.p.bass_mono_freq, 40.0..=800.0)
                         .text("Bass crossover")
                         .suffix(" Hz")
                         .logarithmic(true),
@@ -1427,9 +1364,9 @@ impl OptimeApp {
         });
         {
             let rs = if is_gba {
-                &mut self.gba_resample
+                &mut self.p.gba_resample
             } else {
-                &mut self.nds_resample
+                &mut self.p.nds_resample
             };
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("resample")
@@ -1494,9 +1431,9 @@ impl OptimeApp {
         });
         {
             let sh = if is_gba {
-                &mut self.gba_shelf
+                &mut self.p.gba_shelf
             } else {
-                &mut self.nds_shelf
+                &mut self.p.nds_shelf
             };
             ui.checkbox(&mut sh.enabled, "Enable high-shelf")
                 .on_hover_text(
@@ -1529,18 +1466,18 @@ impl OptimeApp {
         ui.separator();
         ui.label("Tuning system");
         egui::ComboBox::from_id_salt("tuning")
-            .selected_text(if self.tuning_choice == 0 {
+            .selected_text(if self.p.tuning_choice == 0 {
                 "Equal temperament"
             } else {
                 "Pure (Pythagorean)"
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.tuning_choice, 0, "Equal temperament");
-                ui.selectable_value(&mut self.tuning_choice, 1, "Pure (Pythagorean)");
+                ui.selectable_value(&mut self.p.tuning_choice, 0, "Equal temperament");
+                ui.selectable_value(&mut self.p.tuning_choice, 1, "Pure (Pythagorean)");
             });
-        if self.tuning_choice == 1 {
+        if self.p.tuning_choice == 1 {
             ui.add(
-                egui::Slider::new(&mut self.pure_tonic, 0..=11).text("Tonic (semitones from A)"),
+                egui::Slider::new(&mut self.p.pure_tonic, 0..=11).text("Tonic (semitones from A)"),
             );
         }
     }
@@ -1804,8 +1741,8 @@ impl OptimeApp {
                 ui.spacing_mut().item_spacing.x = spacing;
                 ui.add_space(spacing);
 
-                if icon_button(ui, "🔀", small, 18.0, false, self.shuffle, true).clicked() {
-                    self.shuffle = !self.shuffle;
+                if icon_button(ui, "🔀", small, 18.0, false, self.p.shuffle, true).clicked() {
+                    self.p.shuffle = !self.p.shuffle;
                 }
                 if icon_button(ui, "⏮", small, 20.0, false, false, have_songs).clicked() {
                     self.step_song(-1);
@@ -1821,7 +1758,7 @@ impl OptimeApp {
                 if icon_button(ui, "⏭", small, 20.0, false, false, have_songs).clicked() {
                     self.step_song(1);
                 }
-                let repeat_icon = match self.repeat {
+                let repeat_icon = match self.p.repeat {
                     RepeatMode::One => "🔂",
                     _ => "🔁",
                 };
@@ -1831,20 +1768,20 @@ impl OptimeApp {
                     small,
                     18.0,
                     false,
-                    self.repeat != RepeatMode::Off,
+                    self.p.repeat != RepeatMode::Off,
                     true,
                 );
                 if repeat.on_hover_text("Repeat: off / all / one").clicked() {
-                    self.repeat = self.repeat.next();
+                    self.p.repeat = self.p.repeat.next();
                 }
                 let current = self.current_track_ref();
-                let liked = current.as_ref().is_some_and(|t| self.library.is_liked(t));
+                let liked = current.as_ref().is_some_and(|t| self.p.library.is_liked(t));
                 // Same glyph either way (the outline heart isn't in egui's fonts); the
                 // active flag tints it accent when liked, white otherwise.
                 let heart = "❤";
                 if icon_button(ui, heart, small, 18.0, false, liked, current.is_some()).clicked() {
                     if let Some(t) = current {
-                        self.library.toggle_liked(&t);
+                        self.p.library.toggle_liked(&t);
                     }
                 }
             });
@@ -1854,7 +1791,7 @@ impl OptimeApp {
                 ui.label(egui::RichText::new("🔈").color(crate::theme::TEXT_DIM));
                 ui.spacing_mut().slider_width = (ui.available_width() - 40.0).max(60.0);
                 ui.add(
-                    egui::Slider::new(&mut self.volume, 0.0..=1.0)
+                    egui::Slider::new(&mut self.p.volume, 0.0..=1.0)
                         .show_value(false)
                         .trailing_fill(true),
                 );
@@ -1995,7 +1932,7 @@ impl OptimeApp {
 impl eframe::App for OptimeApp {
     /// Persists the library, playback prefs, and synth settings (native: disk; web: localStorage).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, &self.persisted());
+        eframe::set_value(storage, eframe::APP_KEY, &self.p);
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -2114,16 +2051,16 @@ impl eframe::App for OptimeApp {
                     self.step_song(1);
                 }
                 ui.separator();
-                ui.toggle_value(&mut self.shuffle, "🔀 Shuffle");
+                ui.toggle_value(&mut self.p.shuffle, "🔀 Shuffle");
                 if ui
-                    .button(self.repeat.label())
+                    .button(self.p.repeat.label())
                     .on_hover_text("Repeat mode: off / all / one")
                     .clicked()
                 {
-                    self.repeat = self.repeat.next();
+                    self.p.repeat = self.p.repeat.next();
                 }
                 if let Some(t) = self.current_track_ref() {
-                    let liked = self.library.is_liked(&t);
+                    let liked = self.p.library.is_liked(&t);
                     let heart_color = if liked {
                         crate::theme::ACCENT
                     } else {
@@ -2134,13 +2071,13 @@ impl eframe::App for OptimeApp {
                         .on_hover_text("Like")
                         .clicked()
                     {
-                        self.library.toggle_liked(&t);
+                        self.p.library.toggle_liked(&t);
                     }
                 }
                 ui.separator();
                 ui.label("🔊");
                 ui.add(
-                    egui::Slider::new(&mut self.volume, 0.0..=1.0)
+                    egui::Slider::new(&mut self.p.volume, 0.0..=1.0)
                         .show_value(false)
                         .trailing_fill(true),
                 );
