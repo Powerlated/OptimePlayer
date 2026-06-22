@@ -2,7 +2,14 @@
 //! stages the exact tap window for a fractional source position so the inner resampler reads a
 //! plain, loop-mapped slice.
 
-use super::{resample_sinc, tap_window, ResampleTables, MAX_HALF_TAPS};
+use super::{resample_sinc, tap_window, ResampleTables, GATHER_BUF_LEN};
+
+/// Maps a source index past the loop end back into the loop body `[loop_point, data_len)`.
+/// Callers guarantee `loop_len > 0`.
+#[inline]
+pub(super) fn loop_wrap(t: i64, loop_point: i64, loop_len: i64) -> i64 {
+    (t - loop_point).rem_euclid(loop_len) + loop_point
+}
 
 /// The source-sample view a sinc gather reads from: the decoded data plus its loop layout and
 /// whether the reading voice has already wrapped (see [`gather_sinc`]).
@@ -47,11 +54,11 @@ pub fn gather_sinc(
 
     // Edge path: stage the window into a stack buffer so the gather still reads a plain slice.
     let n = (k_hi - k_lo + 1) as usize;
-    let mut buf = [0.0f32; 2 * MAX_HALF_TAPS + 2];
+    let mut buf = [0.0f32; GATHER_BUF_LEN];
     if periodic {
         // The voice has wrapped: every tap maps into the loop body. One division to place the
         // first tap, then an increment-and-wrap walk.
-        let mut idx = (k_lo - loop_point).rem_euclid(loop_len) + loop_point;
+        let mut idx = loop_wrap(k_lo, loop_point, loop_len);
         for slot in &mut buf[..n] {
             *slot = data[idx as usize];
             idx += 1;
@@ -66,7 +73,7 @@ pub fn gather_sinc(
             *slot = if (0..data_len).contains(&t) {
                 data[t as usize]
             } else if t >= data_len && looping && loop_len > 0 {
-                data[((t - loop_point).rem_euclid(loop_len) + loop_point) as usize]
+                data[loop_wrap(t, loop_point, loop_len) as usize]
             } else {
                 0.0
             };

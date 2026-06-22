@@ -52,6 +52,10 @@ pub use source::{gather_sinc, GatherSource};
 
 use kernels::{kernels, OVERSAMPLE, WIN_OVERSAMPLE};
 
+/// Stack-buffer length covering the widest possible gather window (one full tap window at
+/// [`MAX_HALF_TAPS`]). Sized so every staged-window gather reads a plain slice.
+pub(crate) const GATHER_BUF_LEN: usize = 2 * MAX_HALF_TAPS + 2;
+
 /// Pre-built resampler configuration. Holds only the support half-width `P`; the heavy kernel
 /// tables live in a process-wide [`OnceLock`](std::sync::OnceLock) and are shared (so building
 /// this is essentially free).

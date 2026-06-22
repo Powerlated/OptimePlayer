@@ -1,7 +1,7 @@
 //! Analysis helpers used by the filter-plot popup in optime-app: the normalized kernel taps and
 //! the frequency response of the windowed-sinc low-pass.
 
-use super::kernels::{blackman, sinc};
+use super::kernels::kernel_weight;
 
 /// Returns the normalized kernel taps `k(d)` for integer source offsets `d = −(P−1)..=(P−1)`,
 /// suitable for drawing as a stem plot. Scaled to the cutoff `fc` and normalized to unit DC gain.
@@ -10,10 +10,7 @@ pub fn fir_kernel(half_taps: usize, fc: f64) -> Vec<f64> {
     let pf = p as f64;
     let fc = fc.clamp(1e-6, 0.5);
     let taps: Vec<f64> = (-(p as i64 - 1)..=(p as i64 - 1))
-        .map(|d| {
-            let ad = d.unsigned_abs() as f64;
-            sinc(2.0 * fc * ad) * blackman(ad / pf)
-        })
+        .map(|d| kernel_weight(d as f64, fc, pf))
         .collect();
     let sum: f64 = taps.iter().sum();
     if sum > 1e-10 {

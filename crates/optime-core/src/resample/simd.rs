@@ -12,7 +12,7 @@
 use core::f64::consts::PI;
 use std::simd::prelude::*;
 
-use super::kernels::{blackman, sinc};
+use super::kernels::kernel_weight;
 
 const LANES: usize = 4;
 type Fv = Simd<f64, LANES>;
@@ -86,7 +86,7 @@ pub(super) fn gather_impulse(src: &[f32], d0: f64, fc: f64, p: f64) -> (f64, f64
     let done = src.len() - src.chunks_exact(LANES).remainder().len();
     for (j, &s) in src.iter().enumerate().skip(done) {
         let d = d0 - j as f64;
-        let w = sinc(2.0 * fc * d) * blackman(d.abs() / p);
+        let w = kernel_weight(d, fc, p);
         out += f64::from(s) * w;
         wsum += w;
     }

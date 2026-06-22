@@ -11,13 +11,13 @@
 //! ahead to cover the final reconstruction kernel's tap window; the chain stages before it are
 //! exact integer-rate processes, so no second kernel is needed.
 
-use super::source::{gather_sinc, GatherSource};
-use super::{resample_sinc, tap_window, ResampleTables, MAX_HALF_TAPS};
+use super::source::{gather_sinc, loop_wrap, GatherSource};
+use super::{resample_sinc, tap_window, ResampleTables, GATHER_BUF_LEN};
 use crate::devices::HardwareChain;
 use crate::sample::Sample;
 
 /// Ring capacity in DAC-rate samples: one full tap window at the widest supported kernel.
-const RING_LEN: usize = 2 * MAX_HALF_TAPS + 2;
+const RING_LEN: usize = GATHER_BUF_LEN;
 
 /// How a sampled voice's source is taken through the software-mixer → DAC stages of the chain.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -175,17 +175,6 @@ impl AuthenticState {
             return 0.0;
         }
 
-        // Stage the tap window (zeros before the note started) and reconstruct the DAC-rate
-        // stream to the output rate.
-        let n = (k_hi - k_lo + 1) as usize;
-        let mut buf = [0.0f32; RING_LEN];
-        for (slot, k) in buf[..n].iter_mut().zip(k_lo..) {
-            *slot = if k < 0 {
-                0.0
-            } else {
-                self.ring[k.rem_euclid(RING_LEN as i64) as usize]
-            };
-        }
         // Mixer-less voices (PSGs, and every DS voice) are point-sampled straight into the DAC
         // ring, so the DAC's physical zero-order hold is reproduced here by the band-limited step
         // gather — a clean band-limited ZOH rather than a raw nearest-neighbour staircase. Sampled
@@ -202,7 +191,7 @@ impl AuthenticState {
         } else {
             nyq.min(0.5).min(cutoff)
         };
-        resample_sinc(tables, &buf[..n], self.t_dac, fc, step)
+        resample_ring(&self.ring, k_lo, k_hi, tables, self.t_dac, fc, step)
     }
 
     /// Produces one DAC-rate sample (at grid index `self.next_n`) for the crunchy reconstruction:
@@ -240,16 +229,7 @@ impl AuthenticState {
         }
         // Band-limited zero-order hold: stage the mixer window (zeros before the start) and gather
         // it with the BLEP step kernel band-limited to the DAC Nyquist.
-        let n = (m_hi - m_lo + 1) as usize;
-        let mut buf = [0.0f32; RING_LEN];
-        for (slot, m) in buf[..n].iter_mut().zip(m_lo..) {
-            *slot = if m < 0 {
-                0.0
-            } else {
-                self.mixer_ring[m.rem_euclid(RING_LEN as i64) as usize]
-            };
-        }
-        resample_sinc(tables, &buf[..n], t_mixer, 0.5 / r_md, true)
+        resample_ring(&self.mixer_ring, m_lo, m_hi, tables, t_mixer, 0.5 / r_md, true)
     }
 
     /// A clean band-limited sinc read of the looping source at the current [`Self::src_pos`].
@@ -286,11 +266,34 @@ fn read_source(sample: &Sample, mut t: i64) -> f64 {
         if loop_len <= 0 {
             return 0.0;
         }
-        t = (t - sample.loop_point).rem_euclid(loop_len) + sample.loop_point;
+        t = loop_wrap(t, sample.loop_point, loop_len);
     }
     if t >= 0 && t < data_len {
         f64::from(sample.data[t as usize])
     } else {
         0.0
     }
+}
+
+/// Stage a `[lo, hi]` window of a ring (zeros before grid index 0) into a stack buffer and
+/// reconstruct it to read position `pos` with the shared sinc gather.
+fn resample_ring(
+    ring: &[f32; RING_LEN],
+    lo: i64,
+    hi: i64,
+    tables: &ResampleTables,
+    pos: f64,
+    fc: f64,
+    step: bool,
+) -> f64 {
+    let n = (hi - lo + 1) as usize;
+    let mut buf = [0.0f32; RING_LEN];
+    for (slot, k) in buf[..n].iter_mut().zip(lo..) {
+        *slot = if k < 0 {
+            0.0
+        } else {
+            ring[k.rem_euclid(RING_LEN as i64) as usize]
+        };
+    }
+    resample_sinc(tables, &buf[..n], pos, fc, step)
 }

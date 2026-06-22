@@ -38,6 +38,13 @@ pub(super) fn blackman(x: f64) -> f64 {
     0.42 + 0.5 * (PI * x).cos() + 0.08 * (2.0 * PI * x).cos()
 }
 
+/// The decoupled windowed-sinc tap weight `sinc(2·fc·d) · blackman(|d|/P)` evaluated directly
+/// (no tables). Used by the SIMD gather's scalar remainder and the UI filter-plot analysis.
+#[inline]
+pub(super) fn kernel_weight(d: f64, fc: f64, p: f64) -> f64 {
+    sinc(2.0 * fc * d) * blackman(d.abs() / p)
+}
+
 /// Process-wide oversampled kernel tables. None of these depend on `fc` or `P`, so they are built
 /// exactly once and shared across every voice.
 ///
