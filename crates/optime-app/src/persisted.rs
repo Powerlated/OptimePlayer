@@ -118,6 +118,17 @@ pub enum InstrumentResampleChoice {
     SincSampleNyquist,
 }
 
+impl InstrumentResampleChoice {
+    pub fn text(&self) -> &'static str {
+        match self {
+            InstrumentResampleChoice::Nearest => "Nearest neighbour",
+            InstrumentResampleChoice::Linear => "Linear",
+            InstrumentResampleChoice::SincOutputNyquist => "Sinc – output Nyquist (crunch)",
+            InstrumentResampleChoice::SincSampleNyquist => "Sinc – sample Nyquist (clean)",
+        }
+    }
+}
+
 /// Per-device resampling settings — each console keeps its own, so e.g. the DS can play
 /// Crunchy sinc while the GBA plays Clean sinc.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -139,11 +150,45 @@ impl Default for InstrumentResampleSettings {
     fn default() -> Self {
         use crate::default_settings as d;
         Self {
-            choice: d::RESAMPLE_CHOICE,
-            sinc_taps: d::SINC_TAPS,
+            choice: d::INSTRUMENT_RESAMPLE_CHOICE,
+            sinc_taps: d::INSTRUMENT_RESAMPLE_SINC_TAPS,
             psg_cutoff_hz: d::PSG_CUTOFF_HZ,
             sampler_cutoff_hz: d::SAMPLER_CUTOFF_HZ,
             smooth_psg_pops: d::SMOOTH_PSG_POPS,
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum MixerResampleChoice {
+    Nearest,
+    Sinc,
+}
+
+impl MixerResampleChoice {
+    pub fn text(&self) -> &'static str {
+        match self {
+            MixerResampleChoice::Nearest => "Nearest",
+            MixerResampleChoice::Sinc => "Sinc",
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct MixerResampleSettings {
+    /// Resampling choice enum
+    pub choice: MixerResampleChoice,
+    /// Total source-tap count for the sinc/reconstruction kernel.
+    pub sinc_taps: usize,
+}
+
+impl Default for MixerResampleSettings {
+    fn default() -> Self {
+        use crate::default_settings as d;
+        Self {
+            choice: d::MIXER_RESAMPLE_CHOICE,
+            sinc_taps: d::MIXER_RESAMPLE_SINC_TAPS,
         }
     }
 }
@@ -196,6 +241,7 @@ pub struct Persisted {
     pub tuning_choice: usize,
     pub pure_tonic: i32,
     pub instrument_resample: InstrumentResampleSettings,
+    pub mixer_resample: MixerResampleSettings,
     pub shelf: ShelfSettings,
     /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
     pub delay_smoothing_choice: usize,
@@ -223,6 +269,7 @@ impl Default for Persisted {
             tuning_choice: d::TUNING_CHOICE,
             pure_tonic: d::PURE_TONIC,
             instrument_resample: InstrumentResampleSettings::default(),
+            mixer_resample: MixerResampleSettings::default(),
             shelf: ShelfSettings::default(),
             delay_smoothing_choice: d::DELAY_SMOOTHING_CHOICE,
             sort_mode: d::SORT_MODE,

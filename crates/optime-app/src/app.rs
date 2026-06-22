@@ -12,9 +12,7 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
-use crate::persisted::{
-    Persisted, RepeatMode, InstrumentResampleChoice, InstrumentResampleSettings, ShelfSettings, SortMode, TrackRef,
-};
+use crate::persisted::{Persisted, RepeatMode, InstrumentResampleChoice, InstrumentResampleSettings, ShelfSettings, SortMode, TrackRef, MixerResampleChoice};
 use crate::piano_roll::PianoRoll;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
@@ -1335,33 +1333,28 @@ impl OptimeApp {
         ui.separator();
         ui.label("Instrument-to-mixer resampling");
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("resample")
-                .selected_text(match self.p.instrument_resample.choice {
-                    InstrumentResampleChoice::Linear => "Linear",
-                    InstrumentResampleChoice::SincOutputNyquist => "Sinc – output Nyquist (crunch)",
-                    InstrumentResampleChoice::SincSampleNyquist => "Sinc – sample Nyquist (clean)",
-                    _ => "Nearest neighbour",
-                })
+            egui::ComboBox::from_id_salt("instrument-to-mixer-resampling")
+                .selected_text(self.p.instrument_resample.choice.text())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut self.p.instrument_resample.choice,
                         InstrumentResampleChoice::Nearest,
-                        "Nearest neighbour",
+                        InstrumentResampleChoice::Nearest.text(),
                     );
                     ui.selectable_value(
                         &mut self.p.instrument_resample.choice,
                         InstrumentResampleChoice::Linear,
-                        "Linear",
+                        InstrumentResampleChoice::Linear.text(),
                     );
                     ui.selectable_value(
                         &mut self.p.instrument_resample.choice,
                         InstrumentResampleChoice::SincOutputNyquist,
-                        "Sinc – output Nyquist (crunch)",
+                        InstrumentResampleChoice::SincOutputNyquist.text(),
                     );
                     ui.selectable_value(
                         &mut self.p.instrument_resample.choice,
                         InstrumentResampleChoice::SincSampleNyquist,
-                        "Sinc – sample Nyquist (clean)",
+                        InstrumentResampleChoice::SincSampleNyquist.text(),
                     );
                 });
         });
@@ -1421,8 +1414,28 @@ impl OptimeApp {
             );
         }
         ui.separator();
+
+        ui.label("Mixer-to-output resampling");
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("mixer-to-output-resampling")
+                .selected_text(self.p.mixer_resample.choice.text())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.p.mixer_resample.choice,
+                        MixerResampleChoice::Nearest,
+                        MixerResampleChoice::Nearest.text(),
+                    );
+                    ui.selectable_value(
+                        &mut self.p.mixer_resample.choice,
+                        MixerResampleChoice::Sinc,
+                        MixerResampleChoice::Sinc.text(),
+                    );
+                });
+        });
+        ui.separator();
+
         // Master high-shelf EQ — per device, like the resampling settings above.
-        ui.label("High-shelf EQ");
+        ui.label("Master high-shelf EQ");
         {
             ui.checkbox(&mut self.p.shelf.enabled, "Enable high-shelf")
                 .on_hover_text(

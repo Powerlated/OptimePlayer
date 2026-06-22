@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use super::delay::DelayLine;
+use super::delay_line::DelayLine;
 use super::instrument::SampleInstrument;
 use super::{CROSSOVER_Q, MAX_BLOCK};
 use crate::devices::VoicePitch;

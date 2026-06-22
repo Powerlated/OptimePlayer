@@ -4,16 +4,16 @@
 //! The pieces live in this module's children:
 //! - [`instrument`] — [`SampleInstrument`], a single pitch-shifted voice.
 //! - [`synthesizer`] — [`SampleSynthesizer`], the per-track polyphonic voice pool + stereo stage.
-//! - [`delay`] — the Haas-effect [`DelayLine`].
+//! - [`delay_line`] — the Haas-effect [`DelayLine`].
 //!
 //! The resampling front-end ([`gather_sinc`](crate::resample::gather_sinc)) lives in
 //! [`crate::resample`].
 
-mod delay;
+mod delay_line;
 mod instrument;
 mod synthesizer;
 
-pub use delay::DelayLine;
+pub use delay_line::DelayLine;
 pub use instrument::SampleInstrument;
 pub use synthesizer::SampleSynthesizer;
 
