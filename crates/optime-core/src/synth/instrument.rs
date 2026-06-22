@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::devices::VoicePitch;
 use crate::dsp::resample::{gather_sinc, GatherSource, ResampleTables};
-use crate::sample::{ResampleMode, Sample};
+use crate::sample::{InstrumentResampleMode, Sample};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
 
 /// Seconds a pop-smoothed PSG voice takes to slew across the full gain range. Short enough to
@@ -94,7 +94,7 @@ impl SampleInstrument {
     /// it, turning the abrupt hardware on/off transitions into click-free ramps.
     pub fn advance(
         &mut self,
-        mode: ResampleMode,
+        mode: InstrumentResampleMode,
         tables: Option<&ResampleTables>,
         smooth_pops: bool,
     ) {
@@ -194,7 +194,7 @@ impl SampleInstrument {
     /// a block — the controller only changes them on sequencer ticks, and blocks never span one.
     pub fn advance_block(
         &mut self,
-        mode: ResampleMode,
+        mode: InstrumentResampleMode,
         tables: Option<&ResampleTables>,
         smooth_pops: bool,
         out: &mut [f64],
@@ -327,7 +327,7 @@ impl SampleInstrument {
     }
 }
 
-/// The gather a voice actually runs after resolving the global [`ResampleMode`] against the
+/// The gather a voice actually runs after resolving the global [`InstrumentResampleMode`] against the
 /// voice's sample kind.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EffectiveGather {
@@ -347,15 +347,15 @@ enum EffectiveGather {
 /// hard ZOH edges are band-limited to the *output* Nyquist instead of being smoothed down to the
 /// (tiny) source Nyquist of an 8-sample loop, preserving their square character alias-free. The
 /// crunchy (OutputNyquist) mode additionally applies the user's per-kind cutoff slider.
-fn effective_gather(mode: ResampleMode, is_psg: bool) -> EffectiveGather {
+fn effective_gather(mode: InstrumentResampleMode, is_psg: bool) -> EffectiveGather {
     match mode {
-        ResampleMode::NearestNeighbor => EffectiveGather::Nearest,
-        ResampleMode::Linear => EffectiveGather::Linear,
-        ResampleMode::SincSampleNyquist { .. } => EffectiveGather::Sinc {
+        InstrumentResampleMode::NearestNeighbor => EffectiveGather::Nearest,
+        InstrumentResampleMode::Linear => EffectiveGather::Linear,
+        InstrumentResampleMode::SincSampleNyquist { .. } => EffectiveGather::Sinc {
             step_mode: is_psg,
             cutoff_hz: None,
         },
-        ResampleMode::SincOutputNyquist {
+        InstrumentResampleMode::SincOutputNyquist {
             psg_cutoff_hz,
             sampler_cutoff_hz,
             ..
@@ -417,11 +417,11 @@ mod tests {
     // (aliasing).
 
     /// The crunchy mode with both cutoff sliders parked at "off".
-    fn crunch(half_taps: usize) -> ResampleMode {
-        ResampleMode::SincOutputNyquist {
+    fn crunch(half_taps: usize) -> InstrumentResampleMode {
+        InstrumentResampleMode::SincOutputNyquist {
             half_taps,
-            psg_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
-            sampler_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+            psg_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+            sampler_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
         }
     }
 
@@ -440,7 +440,7 @@ mod tests {
     fn render(
         out_rate: f64,
         sample: Arc<Sample>,
-        mode: ResampleMode,
+        mode: InstrumentResampleMode,
         tables: Option<&ResampleTables>,
         n: usize,
     ) -> Vec<f64> {
@@ -503,7 +503,7 @@ mod tests {
         let clean = render(
             out_rate,
             sample,
-            ResampleMode::SincSampleNyquist { half_taps: 16 },
+            InstrumentResampleMode::SincSampleNyquist { half_taps: 16 },
             Some(&tables),
             warmup + n,
         );
@@ -557,7 +557,7 @@ mod tests {
         let nearest = render(
             out_rate,
             sample.clone(),
-            ResampleMode::NearestNeighbor,
+            InstrumentResampleMode::NearestNeighbor,
             None,
             warmup + n,
         );
@@ -615,7 +615,7 @@ mod tests {
         let clean_mode = render(
             out_rate,
             sample,
-            ResampleMode::SincSampleNyquist { half_taps: 16 },
+            InstrumentResampleMode::SincSampleNyquist { half_taps: 16 },
             Some(&tables),
             n,
         );
@@ -641,8 +641,8 @@ mod tests {
                 Arc::get_mut(&mut s).unwrap().is_psg_square = true;
             }
             let mode_with = |this_kind_hz: u32| {
-                let other = ResampleMode::CUTOFF_OFF_HZ;
-                ResampleMode::SincOutputNyquist {
+                let other = InstrumentResampleMode::CUTOFF_OFF_HZ;
+                InstrumentResampleMode::SincOutputNyquist {
                     half_taps: 32,
                     psg_cutoff_hz: if is_psg { this_kind_hz } else { other },
                     sampler_cutoff_hz: if is_psg { other } else { this_kind_hz },
@@ -664,17 +664,17 @@ mod tests {
             );
             // The *other* kind's slider must not touch this voice.
             let other_cut = {
-                let other = ResampleMode::SincOutputNyquist {
+                let other = InstrumentResampleMode::SincOutputNyquist {
                     half_taps: 32,
                     psg_cutoff_hz: if is_psg {
-                        ResampleMode::CUTOFF_OFF_HZ
+                        InstrumentResampleMode::CUTOFF_OFF_HZ
                     } else {
                         1_000
                     },
                     sampler_cutoff_hz: if is_psg {
                         1_000
                     } else {
-                        ResampleMode::CUTOFF_OFF_HZ
+                        InstrumentResampleMode::CUTOFF_OFF_HZ
                     },
                 };
                 render(out_rate, s, other, Some(&tables), warmup + n)
@@ -717,7 +717,7 @@ mod tests {
         instr.set_pitch(pitch, TuningSystem::Equal);
         instr.playing = true;
         instr.begin_note(1.0, true);
-        instr.advance(ResampleMode::NearestNeighbor, None, true);
+        instr.advance(InstrumentResampleMode::NearestNeighbor, None, true);
         assert!(
             instr.output < 0.05,
             "smoothed start must ramp from silence, got {}",
@@ -726,7 +726,7 @@ mod tests {
         let mut prev = instr.output;
         let mut reached = false;
         for _ in 0..1024 {
-            instr.advance(ResampleMode::NearestNeighbor, None, true);
+            instr.advance(InstrumentResampleMode::NearestNeighbor, None, true);
             // DC source ⇒ output equals the applied gain.
             let delta = instr.output - prev;
             assert!((-1e-12..0.02).contains(&delta), "ramp step {delta}");
@@ -743,7 +743,7 @@ mod tests {
             if !instr.playing {
                 break;
             }
-            instr.advance(ResampleMode::NearestNeighbor, None, true);
+            instr.advance(InstrumentResampleMode::NearestNeighbor, None, true);
         }
         assert!(!instr.playing, "fade-out must stop the voice");
         assert_eq!(instr.output, 0.0);
@@ -752,7 +752,7 @@ mod tests {
         hard.set_pitch(pitch, TuningSystem::Equal);
         hard.playing = true;
         hard.begin_note(1.0, false);
-        hard.advance(ResampleMode::NearestNeighbor, None, false);
+        hard.advance(InstrumentResampleMode::NearestNeighbor, None, false);
         assert!(
             (hard.output - 1.0).abs() < 1e-12,
             "unsmoothed start must step to full gain, got {}",
@@ -777,7 +777,7 @@ mod tests {
         let out = render(
             out_rate,
             sample,
-            ResampleMode::SincSampleNyquist { half_taps },
+            InstrumentResampleMode::SincSampleNyquist { half_taps },
             Some(&tables),
             warmup + n,
         );

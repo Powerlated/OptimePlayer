@@ -1,15 +1,15 @@
 //! Every out-of-the-box setting in one place.
 //!
-//! The `Default` impls for the persisted state ([`Persisted`](crate::library::Persisted) and
-//! [`ResampleSettings`](crate::library::ResampleSettings)) read their values from here, so the
+//! The `Default` impls for the persisted state ([`Persisted`](crate::persisted::Persisted) and
+//! [`ResampleSettings`](crate::persisted::InstrumentResampleSettings)) read their values from here, so the
 //! app's defaults are easy to find and tweak without hunting through the UI code.
 //!
 //! Note the distinction these constants keep that the engine does not: a *default* cutoff is the
 //! listenable value the user starts on, whereas
-//! [`ResampleMode::CUTOFF_OFF_HZ`](optime_core::ResampleMode::CUTOFF_OFF_HZ) is the transparent
+//! [`ResampleMode::CUTOFF_OFF_HZ`](optime_core::InstrumentResampleMode::CUTOFF_OFF_HZ) is the transparent
 //! "no extra filtering" position (and the slider's maximum). They are not the same number.
 
-use crate::library::{RepeatMode, SortMode};
+use crate::persisted::{RepeatMode, InstrumentResampleChoice, SortMode};
 
 // ── Playback ────────────────────────────────────────────────────────────────
 /// Start with shuffle off.
@@ -31,6 +31,8 @@ pub const BASS_MONO: bool = true;
 pub const BASS_MONO_FREQ_HZ: f32 = 200.0;
 /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
 pub const DELAY_SMOOTHING_CHOICE: usize = 0;
+/// Sample rate for the intermediate mixing step
+pub const MIXER_SAMPLE_RATE: u32 = 48000;
 
 // ── Tuning ──────────────────────────────────────────────────────────────────
 /// 0 = equal temperament, 1 = pure (Pythagorean).
@@ -39,8 +41,8 @@ pub const TUNING_CHOICE: usize = 0;
 pub const PURE_TONIC: i32 = 0;
 
 // ── Resampling (per device) ──────────────────────────────────────────────────
-/// Resample mode index: 0=Nearest, 1=Linear, 2=Crunchy sinc, 3=Clean sinc.
-pub const RESAMPLE_CHOICE: usize = 2;
+/// Resample mode choice
+pub const RESAMPLE_CHOICE: InstrumentResampleChoice = InstrumentResampleChoice::SincOutputNyquist;
 /// Total source-tap count for the sinc/reconstruction kernel.
 pub const SINC_TAPS: usize = 32;
 /// Listenable default low-pass cutoff (Hz) for PSG (square/wave/noise) voices. The slider can

@@ -33,7 +33,7 @@ pub use devices::{DevicePlayer, SoundData, SynthEvent, VoiceId, VoicePitch};
 pub use dsp::biquad_filter;
 use dsp::resample;
 pub use dsp::resample::{ResampleTables};
-pub use sample::{decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, ResampleMode, Sample};
+pub use sample::{decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, InstrumentResampleMode, Sample};
 pub use synth::{DelayLine, SampleInstrument, SampleSynthesizer, CROSSOVER_Q};
 pub use synth_controller::{
     DelaySmoothing, FsVisController, HighShelf, SynthConfig, SynthController, VisNote,

@@ -5,7 +5,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::window;
 
-use crate::library::TrackRef;
+use crate::persisted::TrackRef;
 
 /// Fetches `url` (relative to the page) and returns its bytes, or `None` on any error.
 pub async fn fetch_bytes(url: &str) -> Option<Vec<u8>> {

@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use optime_core::{ResampleMode, SoundData, SynthConfig, SynthController};
+use optime_core::{InstrumentResampleMode, SoundData, SynthConfig, SynthController};
 
 fn load_demo() -> SoundData {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../demos/super-mario-64-ds.sdat");
@@ -53,7 +53,7 @@ fn assert_fill_matches_next_sample(config: &SynthConfig, label: &str) {
 #[test]
 fn fill_matches_next_sample_sinc_stereo() {
     let config = SynthConfig {
-        resample: ResampleMode::SincOutputNyquist {
+        resample: InstrumentResampleMode::SincOutputNyquist {
             half_taps: 4,
             psg_cutoff_hz: 8_000,
             sampler_cutoff_hz: 12_000,
@@ -68,7 +68,7 @@ fn fill_matches_next_sample_sinc_stereo() {
 #[test]
 fn fill_matches_next_sample_clean_plain() {
     let config = SynthConfig {
-        resample: ResampleMode::SincSampleNyquist { half_taps: 4 },
+        resample: InstrumentResampleMode::SincSampleNyquist { half_taps: 4 },
         stereo_separation: false,
         ..SynthConfig::default()
     };
@@ -78,7 +78,7 @@ fn fill_matches_next_sample_clean_plain() {
 #[test]
 fn fill_matches_next_sample_smoothed_psg_pops() {
     let config = SynthConfig {
-        resample: ResampleMode::SincOutputNyquist {
+        resample: InstrumentResampleMode::SincOutputNyquist {
             half_taps: 4,
             psg_cutoff_hz: 8_000,
             sampler_cutoff_hz: 12_000,
@@ -92,7 +92,7 @@ fn fill_matches_next_sample_smoothed_psg_pops() {
 #[test]
 fn fill_matches_next_sample_nearest() {
     let config = SynthConfig {
-        resample: ResampleMode::NearestNeighbor,
+        resample: InstrumentResampleMode::NearestNeighbor,
         stereo_separation: true,
         ..SynthConfig::default()
     };

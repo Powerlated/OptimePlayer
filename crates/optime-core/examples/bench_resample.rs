@@ -12,7 +12,7 @@
 
 use std::time::Instant;
 
-use optime_core::{ResampleMode, SoundData, SynthConfig, SynthController};
+use optime_core::{InstrumentResampleMode, SoundData, SynthConfig, SynthController};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -38,14 +38,14 @@ fn main() {
     for (name, mode) in [
         (
             "clean (SampleNyquist)",
-            ResampleMode::SincSampleNyquist { half_taps },
+            InstrumentResampleMode::SincSampleNyquist { half_taps },
         ),
         (
             "crunch (OutputNyquist)",
-            ResampleMode::SincOutputNyquist {
+            InstrumentResampleMode::SincOutputNyquist {
                 half_taps,
-                psg_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
-                sampler_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+                psg_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+                sampler_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
             },
         ),
     ] {

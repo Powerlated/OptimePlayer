@@ -6,7 +6,7 @@
 //! Run with `cargo run -p optime-core --example golden` (add `--no-default-features` to capture a
 //! baseline for the scalar gather; the SIMD and scalar builds hash differently by design).
 
-use optime_core::{ResampleMode, SoundData, SynthConfig, SynthController, TuningSystem};
+use optime_core::{InstrumentResampleMode, SoundData, SynthConfig, SynthController, TuningSystem};
 
 const SAMPLE_RATE: f64 = 32768.0;
 const FRAMES: usize = 32768 * 4; // ~4 seconds of stereo audio per config.
@@ -41,17 +41,17 @@ fn configs() -> Vec<(&'static str, SynthConfig)> {
                 stereo_separation: true,
                 bass_mono: true,
                 tuning: TuningSystem::Pure { tonic: 0 },
-                resample: ResampleMode::SincSampleNyquist { half_taps: 16 },
+                resample: InstrumentResampleMode::SincSampleNyquist { half_taps: 16 },
                 ..SynthConfig::default()
             },
         ),
         (
             "crunch",
             SynthConfig {
-                resample: ResampleMode::SincOutputNyquist {
+                resample: InstrumentResampleMode::SincOutputNyquist {
                     half_taps: 8,
-                    psg_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
-                    sampler_cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
+                    psg_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+                    sampler_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
                 },
                 ..SynthConfig::default()
             },

@@ -1,6 +1,6 @@
 //! [`SynthConfig`] — the runtime-tunable synthesis options threaded through every render call.
 
-use crate::sample::ResampleMode;
+use crate::sample::InstrumentResampleMode;
 use crate::tuning::TuningSystem;
 use crate::TRACK_COUNT;
 
@@ -70,7 +70,7 @@ pub struct SynthConfig {
     /// Which of the 16 tracks are mixed into the output.
     pub track_enables: [bool; TRACK_COUNT],
     /// Sample interpolation / anti-aliasing mode.
-    pub resample: ResampleMode,
+    pub resample: InstrumentResampleMode,
     /// Smooth out the pops and clicks of PSG channels turning abruptly on and off (a ~2 ms
     /// gain slew). Off preserves the hard-edged hardware behaviour.
     pub smooth_psg_pops: bool,
@@ -89,7 +89,7 @@ impl Default for SynthConfig {
             bass_mono_freq: 200.0,
             tuning: TuningSystem::Equal,
             track_enables: [true; TRACK_COUNT],
-            resample: ResampleMode::NearestNeighbor,
+            resample: InstrumentResampleMode::NearestNeighbor,
             smooth_psg_pops: false,
             delay_smoothing: DelaySmoothing::None,
             high_shelf: HighShelf::default(),

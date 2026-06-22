@@ -110,13 +110,21 @@ impl Library {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum InstrumentResampleChoice {
+    Nearest,
+    Linear,
+    SincOutputNyquist,
+    SincSampleNyquist,
+}
+
 /// Per-device resampling settings — each console keeps its own, so e.g. the DS can play
 /// Crunchy sinc while the GBA plays Clean sinc.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub struct ResampleSettings {
-    /// Mode index: 0=Nearest, 1=Linear, 2=Crunchy sinc, 3=Clean sinc.
-    pub choice: usize,
+pub struct InstrumentResampleSettings {
+    /// Resampling choice enum
+    pub choice: InstrumentResampleChoice,
     /// Total source-tap count for the sinc/reconstruction kernel.
     pub sinc_taps: usize,
     /// Crunchy-mode low-pass cutoff (Hz) for PSG voices.
@@ -127,7 +135,7 @@ pub struct ResampleSettings {
     pub smooth_psg_pops: bool,
 }
 
-impl Default for ResampleSettings {
+impl Default for InstrumentResampleSettings {
     fn default() -> Self {
         use crate::default_settings as d;
         Self {
@@ -187,7 +195,7 @@ pub struct Persisted {
     pub bass_mono_freq: f32,
     pub tuning_choice: usize,
     pub pure_tonic: i32,
-    pub resample: ResampleSettings,
+    pub instrument_resample: InstrumentResampleSettings,
     pub shelf: ShelfSettings,
     /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
     pub delay_smoothing_choice: usize,
@@ -195,6 +203,8 @@ pub struct Persisted {
     pub sort_mode: SortMode,
     /// Whether the sort runs in descending order.
     pub sort_descending: bool,
+
+    pub mixer_sample_rate: u32,
 }
 
 impl Default for Persisted {
@@ -212,11 +222,12 @@ impl Default for Persisted {
             bass_mono_freq: d::BASS_MONO_FREQ_HZ,
             tuning_choice: d::TUNING_CHOICE,
             pure_tonic: d::PURE_TONIC,
-            resample: ResampleSettings::default(),
+            instrument_resample: InstrumentResampleSettings::default(),
             shelf: ShelfSettings::default(),
             delay_smoothing_choice: d::DELAY_SMOOTHING_CHOICE,
             sort_mode: d::SORT_MODE,
             sort_descending: d::SORT_DESCENDING,
+            mixer_sample_rate: d::MIXER_SAMPLE_RATE,
         }
     }
 }

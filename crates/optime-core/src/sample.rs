@@ -5,7 +5,7 @@ use crate::util::{read_u16, read_u32, read_u8};
 
 /// How a sample is interpolated during pitch-shifting / resampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResampleMode {
+pub enum InstrumentResampleMode {
     /// No interpolation; pick the nearest source sample (the DS hardware's own behaviour).
     NearestNeighbor,
     /// Linear interpolation between adjacent source samples.
@@ -34,7 +34,7 @@ pub enum ResampleMode {
     },
 }
 
-impl ResampleMode {
+impl InstrumentResampleMode {
     /// A cutoff high enough to never bite below any practical output Nyquist — the "no extra
     /// filtering" slider position (and the slider's maximum). This is a *transparent* sentinel,
     /// not a default: the out-of-the-box cutoff the user actually starts on is a lower,
