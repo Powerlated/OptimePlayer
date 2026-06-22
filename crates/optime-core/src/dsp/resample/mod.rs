@@ -31,18 +31,21 @@
 //! - [`kernels`] — the process-wide oversampled tables and their lookups.
 //! - [`gather`] / [`simd`] — the scalar and portable-SIMD gather kernels.
 //! - [`source`] — the loop-aware source-staging gather ([`gather_sinc`]) that feeds a voice.
+//! - [`stream`] — the streaming, fixed-ratio [`StreamResampler`] for the mixer-bus → output stage.
 
 mod gather;
 mod kernels;
-mod source;
 #[cfg(feature = "simd")]
 mod simd;
+mod source;
+mod stream;
 
 #[cfg(test)]
 mod tests;
 
 pub use kernels::MAX_HALF_TAPS;
 pub use source::{gather_sinc, GatherSource};
+pub use stream::StreamResampler;
 
 use kernels::{kernels, OVERSAMPLE, WIN_OVERSAMPLE};
 

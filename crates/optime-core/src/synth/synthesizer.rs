@@ -97,9 +97,7 @@ impl SampleSynthesizer {
         self.delay_line_r.set_capacity(capacity);
         self.delay_line_l.set_delay(delay_l);
         self.delay_line_r.set_delay(delay_r);
-        self.pending_delays = self
-            .pending_delays
-            .map(|(l, r)| (rescale(l), rescale(r)));
+        self.pending_delays = self.pending_delays.map(|(l, r)| (rescale(l), rescale(r)));
 
         // Rebuild the crossover for the new rate at its current cutoff.
         self.crossover_lp
@@ -372,7 +370,10 @@ mod tests {
         assert_eq!(synth.voice_count(), 8, "the voice pool must be preserved");
         // Capacity tracks the new 100 ms window, and the delay length is rescaled by the ratio.
         let ratio = 96_000.0 / 44_100.0;
-        assert_eq!(synth.delay_line_l.delay(), (delay_44k as f64 * ratio).round() as usize);
+        assert_eq!(
+            synth.delay_line_l.delay(),
+            (delay_44k as f64 * ratio).round() as usize
+        );
 
         // No-op when the rate is unchanged.
         let before = synth.delay_line_l.delay();

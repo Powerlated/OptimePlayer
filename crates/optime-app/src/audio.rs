@@ -128,7 +128,7 @@ fn update_meters(st: &mut crate::player::AudioState, t0: f64, frames: usize) {
     st.voices = st
         .controller
         .as_ref()
-        .map(|c| c.synthesizers.iter().map(|s| s.active_voice_count()).sum())
+        .map(|c| c.active_voice_count())
         .unwrap_or(0);
     let budget = (frames as f64 / st.sample_rate.max(1.0)).max(1e-9);
     let load = ((now_seconds() - t0) / budget) as f32;

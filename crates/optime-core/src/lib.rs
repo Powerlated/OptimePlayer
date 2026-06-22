@@ -11,19 +11,19 @@
 //! ```
 //!
 //! Each console lives in its own folder under [`devices`] (`nintendo_ds`, `gba`); the
-//! synthesis layer ([`synth_controller`], [`synth`], [`resample`], [`dsp`]) is shared and
+//! synthesis layer ([`synth_controller`], [`synth`], [`dsp`] incl. `dsp::resample`) is shared and
 //! knows nothing about any console's formats.
 //!
 //! The engine is deliberately free of any I/O or platform dependencies: feed it bytes, pull
 //! samples. The browser/audio/UI concerns live in the `optime-app` crate.
 
 pub mod devices;
+mod dsp;
 pub mod sample;
 pub mod synth;
 pub mod synth_controller;
 pub mod tuning;
 pub mod util;
-mod dsp;
 
 pub use devices::nintendo_ds::{
     calc_channel_volume, BankInfo, InstrumentBank, InstrumentRecord, InstrumentType, Message,
@@ -31,12 +31,14 @@ pub use devices::nintendo_ds::{
 };
 pub use devices::{DevicePlayer, SoundData, SynthEvent, VoiceId, VoicePitch};
 pub use dsp::biquad_filter;
-use dsp::resample;
-pub use dsp::resample::{ResampleTables};
-pub use sample::{decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, InstrumentResampleMode, Sample};
+pub use dsp::resample::ResampleTables;
+pub use sample::{
+    decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, InstrumentResampleMode, Sample,
+};
 pub use synth::{DelayLine, SampleInstrument, SampleSynthesizer, CROSSOVER_Q};
 pub use synth_controller::{
-    DelaySmoothing, FsVisController, HighShelf, SynthConfig, SynthController, VisNote,
+    DelaySmoothing, FsVisController, HighShelf, MixerResampleMode, SynthConfig, SynthController,
+    VisNote,
 };
 pub use tuning::{midi_note_to_hz, TuningSystem};
 

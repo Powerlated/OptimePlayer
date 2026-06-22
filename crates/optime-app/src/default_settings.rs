@@ -9,7 +9,7 @@
 //! [`ResampleMode::CUTOFF_OFF_HZ`](optime_core::InstrumentResampleMode::CUTOFF_OFF_HZ) is the transparent
 //! "no extra filtering" position (and the slider's maximum). They are not the same number.
 
-use crate::persisted::{RepeatMode, InstrumentResampleChoice, SortMode, MixerResampleSettings, MixerResampleChoice};
+use crate::persisted::{InstrumentResampleChoice, MixerResampleChoice, RepeatMode, SortMode};
 
 // ── Playback ────────────────────────────────────────────────────────────────
 /// Start with shuffle off.
@@ -33,6 +33,8 @@ pub const BASS_MONO_FREQ_HZ: f32 = 200.0;
 pub const DELAY_SMOOTHING_CHOICE: usize = 0;
 /// Sample rate for the intermediate mixing step
 pub const MIXER_SAMPLE_RATE: u32 = 48000;
+/// Whether sampled (non-PSG) voices are routed through the intermediate mixer by default.
+pub const USE_MIXER: bool = false;
 
 // ── Tuning ──────────────────────────────────────────────────────────────────
 /// 0 = equal temperament, 1 = pure (Pythagorean).
@@ -42,7 +44,8 @@ pub const PURE_TONIC: i32 = 0;
 
 // ── Resampling (per device) ──────────────────────────────────────────────────
 /// Resample mode choice
-pub const INSTRUMENT_RESAMPLE_CHOICE: InstrumentResampleChoice = InstrumentResampleChoice::SincOutputNyquist;
+pub const INSTRUMENT_RESAMPLE_CHOICE: InstrumentResampleChoice =
+    InstrumentResampleChoice::SincOutputNyquist;
 /// Total source-tap count for the sinc/reconstruction kernel.
 pub const INSTRUMENT_RESAMPLE_SINC_TAPS: usize = 32;
 /// Listenable default low-pass cutoff (Hz) for PSG (square/wave/noise) voices. The slider can
@@ -53,7 +56,6 @@ pub const SAMPLER_CUTOFF_HZ: u32 = 15_000;
 
 pub const MIXER_RESAMPLE_CHOICE: MixerResampleChoice = MixerResampleChoice::Sinc;
 pub const MIXER_RESAMPLE_SINC_TAPS: usize = 32;
-
 
 /// Preserve the hardware's hard PSG on/off edges by default (don't slew the pops).
 pub const SMOOTH_PSG_POPS: bool = false;

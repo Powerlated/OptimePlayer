@@ -251,6 +251,8 @@ pub struct Persisted {
     pub sort_descending: bool,
 
     pub mixer_sample_rate: u32,
+    /// Route sampled (non-PSG) voices through the intermediate mixer (then upsample to output).
+    pub use_mixer: bool,
 }
 
 impl Default for Persisted {
@@ -275,6 +277,7 @@ impl Default for Persisted {
             sort_mode: d::SORT_MODE,
             sort_descending: d::SORT_DESCENDING,
             mixer_sample_rate: d::MIXER_SAMPLE_RATE,
+            use_mixer: d::USE_MIXER,
         }
     }
 }

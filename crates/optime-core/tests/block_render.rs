@@ -5,7 +5,9 @@
 
 use std::path::PathBuf;
 
-use optime_core::{InstrumentResampleMode, SoundData, SynthConfig, SynthController};
+use optime_core::{
+    InstrumentResampleMode, MixerResampleMode, SoundData, SynthConfig, SynthController,
+};
 
 fn load_demo() -> SoundData {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../demos/super-mario-64-ds.sdat");
@@ -97,4 +99,37 @@ fn fill_matches_next_sample_nearest() {
         ..SynthConfig::default()
     };
     assert_fill_matches_next_sample(&config, "nearest + stereo");
+}
+
+#[test]
+fn fill_matches_next_sample_intermediate_mixer_sinc() {
+    // The mixer bus is pulled per output sample, so the block path must still match the
+    // per-sample path with sampled voices routed through the upsampling mixer.
+    let config = SynthConfig {
+        resample: InstrumentResampleMode::SincOutputNyquist {
+            half_taps: 4,
+            psg_cutoff_hz: 8_000,
+            sampler_cutoff_hz: 12_000,
+        },
+        stereo_separation: true,
+        bass_mono: true,
+        use_mixer: true,
+        mixer_sample_rate: 18_000.0,
+        mixer_resample: MixerResampleMode::Sinc { half_taps: 8 },
+        ..SynthConfig::default()
+    };
+    assert_fill_matches_next_sample(&config, "intermediate mixer (sinc)");
+}
+
+#[test]
+fn fill_matches_next_sample_intermediate_mixer_nearest() {
+    let config = SynthConfig {
+        resample: InstrumentResampleMode::NearestNeighbor,
+        stereo_separation: true,
+        use_mixer: true,
+        mixer_sample_rate: 13_379.0,
+        mixer_resample: MixerResampleMode::Nearest,
+        ..SynthConfig::default()
+    };
+    assert_fill_matches_next_sample(&config, "intermediate mixer (nearest/ZOH)");
 }

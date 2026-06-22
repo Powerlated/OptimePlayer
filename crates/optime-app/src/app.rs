@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use optime_core::{
-    DelaySmoothing, FsVisController, HighShelf, InstrumentResampleMode, SoundData, SynthConfig,
-    SynthController, TuningSystem,
+    DelaySmoothing, FsVisController, HighShelf, InstrumentResampleMode, MixerResampleMode,
+    SoundData, SynthConfig, SynthController, TuningSystem,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -12,7 +12,9 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
-use crate::persisted::{Persisted, RepeatMode, InstrumentResampleChoice, InstrumentResampleSettings, ShelfSettings, SortMode, TrackRef, MixerResampleChoice};
+use crate::persisted::{
+    InstrumentResampleChoice, MixerResampleChoice, Persisted, RepeatMode, SortMode, TrackRef,
+};
 use crate::piano_roll::PianoRoll;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
@@ -200,7 +202,7 @@ impl OptimeApp {
             archives: Vec::new(),
             songs: Vec::new(),
             current_song: None,
-            p: p,
+            p,
             track_enables: [true; TRACK_COUNT],
             paused: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
@@ -367,17 +369,21 @@ impl OptimeApp {
         let half_taps = (rs.sinc_taps / 2).max(1);
         let resample = match rs.choice {
             InstrumentResampleChoice::Linear => InstrumentResampleMode::Linear,
-            InstrumentResampleChoice::SincOutputNyquist => InstrumentResampleMode::SincOutputNyquist {
-                half_taps,
-                psg_cutoff_hz: rs.psg_cutoff_hz,
-                sampler_cutoff_hz: rs.sampler_cutoff_hz,
-            },
-            InstrumentResampleChoice::SincSampleNyquist => InstrumentResampleMode::SincSampleNyquist { half_taps },
+            InstrumentResampleChoice::SincOutputNyquist => {
+                InstrumentResampleMode::SincOutputNyquist {
+                    half_taps,
+                    psg_cutoff_hz: rs.psg_cutoff_hz,
+                    sampler_cutoff_hz: rs.sampler_cutoff_hz,
+                }
+            }
+            InstrumentResampleChoice::SincSampleNyquist => {
+                InstrumentResampleMode::SincSampleNyquist { half_taps }
+            }
             _ => InstrumentResampleMode::NearestNeighbor,
         };
         // Pop smoothing is a crunchy-mode option; the other modes keep the hardware edges.
         let smooth_psg_pops =
-            rs.smooth_psg_pops && matches!(rs.choice, InstrumentResampleChoice::SincOutputNyquist { .. });
+            rs.smooth_psg_pops && rs.choice == InstrumentResampleChoice::SincOutputNyquist;
         let sh = self.p.shelf.clone();
         let high_shelf = HighShelf {
             enabled: sh.enabled,
@@ -400,6 +406,14 @@ impl OptimeApp {
                 _ => DelaySmoothing::None,
             },
             high_shelf,
+            use_mixer: self.p.use_mixer,
+            mixer_sample_rate: f64::from(self.p.mixer_sample_rate),
+            mixer_resample: match self.p.mixer_resample.choice {
+                MixerResampleChoice::Nearest => MixerResampleMode::Nearest,
+                MixerResampleChoice::Sinc => MixerResampleMode::Sinc {
+                    half_taps: (self.p.mixer_resample.sinc_taps / 2).max(1),
+                },
+            },
         }
     }
 
@@ -1361,7 +1375,8 @@ impl OptimeApp {
         // Only the options of the selected mode are shown.
         if matches!(
             self.p.instrument_resample.choice,
-            InstrumentResampleChoice::SincOutputNyquist | InstrumentResampleChoice::SincSampleNyquist
+            InstrumentResampleChoice::SincOutputNyquist
+                | InstrumentResampleChoice::SincSampleNyquist
         ) {
             ui.add(
                 egui::Slider::new(&mut self.p.instrument_resample.sinc_taps, 4..=128)
@@ -1396,16 +1411,27 @@ impl OptimeApp {
                 .logarithmic(true),
             )
             .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
-            ui.checkbox(&mut self.p.instrument_resample.smooth_psg_pops, "Smooth PSG pops")
-                .on_hover_text(
-                    "Slew PSG channel gains over ~2 ms so notes turning abruptly on and \
+            ui.checkbox(
+                &mut self.p.instrument_resample.smooth_psg_pops,
+                "Smooth PSG pops",
+            )
+            .on_hover_text(
+                "Slew PSG channel gains over ~2 ms so notes turning abruptly on and \
                          off don't click. Unchecked preserves the hardware's hard edges.",
-                );
+            );
         }
         ui.separator();
         ui.label("Mixer settings");
         {
-            ui.add(
+            ui.checkbox(&mut self.p.use_mixer, "Use intermediate mixer")
+                .on_hover_text(
+                    "Route the sampled (non-PSG) instruments through an intermediate mixer \
+                     running at the mixer rate below, then resample that bus up to the output \
+                     rate. PSG (square/wave/noise) voices bypass it and play at the output rate. \
+                     Emulates hardware that mixes its sampled channels at a low rate.",
+                );
+            ui.add_enabled(
+                self.p.use_mixer,
                 egui::Slider::new(&mut self.p.mixer_sample_rate, 10000..=48000)
                     .step_by(10.0)
                     .text("Mixer rate")
@@ -1416,21 +1442,23 @@ impl OptimeApp {
         ui.separator();
 
         ui.label("Mixer-to-output resampling");
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("mixer-to-output-resampling")
-                .selected_text(self.p.mixer_resample.choice.text())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.p.mixer_resample.choice,
-                        MixerResampleChoice::Nearest,
-                        MixerResampleChoice::Nearest.text(),
-                    );
-                    ui.selectable_value(
-                        &mut self.p.mixer_resample.choice,
-                        MixerResampleChoice::Sinc,
-                        MixerResampleChoice::Sinc.text(),
-                    );
-                });
+        ui.add_enabled_ui(self.p.use_mixer, |ui| {
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("mixer-to-output-resampling")
+                    .selected_text(self.p.mixer_resample.choice.text())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.p.mixer_resample.choice,
+                            MixerResampleChoice::Nearest,
+                            MixerResampleChoice::Nearest.text(),
+                        );
+                        ui.selectable_value(
+                            &mut self.p.mixer_resample.choice,
+                            MixerResampleChoice::Sinc,
+                            MixerResampleChoice::Sinc.text(),
+                        );
+                    });
+            });
         });
         ui.separator();
 

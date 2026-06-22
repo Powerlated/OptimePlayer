@@ -115,14 +115,17 @@ impl SampleInstrument {
         let data_len = data.len() as i64;
         let loop_len = data_len - loop_point;
 
-        // Fold the read position back into the loop body once playback wraps. This keeps the
-        // position (and its fractional precision) bounded over arbitrarily long notes, and lets
-        // the sinc gather below read source taps without a per-tap loop-mapping division.
-        if looping && loop_len > 0 && self.sample_t >= data_len as f64 {
-            let lp = loop_point as f64;
-            self.sample_t = (self.sample_t - lp) % loop_len as f64 + lp;
-            self.wrapped = true;
-        }
+        // Fold the read position back into the loop body once playback wraps.
+        let fold = looping && loop_len > 0;
+        let (folded, wrapped) = fold_pos(
+            self.sample_t,
+            fold,
+            data_len as f64,
+            loop_point as f64,
+            loop_len as f64,
+        );
+        self.sample_t = folded;
+        self.wrapped |= wrapped;
         let pos = self.sample_t;
 
         // Resolve this sample's applied gain: pop-smoothed PSG voices slew toward the target,
@@ -248,10 +251,9 @@ impl SampleInstrument {
             // per-sample folding) only.
             for _ in 0..out.len() {
                 pos += r;
-                if fold && pos >= data_len_f {
-                    pos = (pos - lp_f) % loop_len_f + lp_f;
-                    wrapped = true;
-                }
+                let (p, w) = fold_pos(pos, fold, data_len_f, lp_f, loop_len_f);
+                pos = p;
+                wrapped |= w;
             }
             if self.fading_out && !out.is_empty() {
                 self.playing = false;
@@ -269,10 +271,9 @@ impl SampleInstrument {
         let mut last = 0.0;
         for slot in out.iter_mut() {
             pos += r;
-            if fold && pos >= data_len_f {
-                pos = (pos - lp_f) % loop_len_f + lp_f;
-                wrapped = true;
-            }
+            let (p, w) = fold_pos(pos, fold, data_len_f, lp_f, loop_len_f);
+            pos = p;
+            wrapped |= w;
             gain = if smooth {
                 slew_toward(gain, target, slew)
             } else {
@@ -396,6 +397,21 @@ fn sinc_fc(r: f64, inv_sample_rate: f64, step_mode: bool, cutoff_hz: Option<u32>
     fc
 }
 
+/// Folds the read position back into the loop body once it passes the sample end, keeping the
+/// position (and its fractional precision) bounded over arbitrarily long notes and letting the
+/// sinc gather read taps without a per-tap loop-mapping division. Returns the (possibly folded)
+/// position and whether it wrapped. `fold` must be `looping && loop_len > 0`; all lengths are in
+/// source samples. Shared by [`SampleInstrument::advance`] and [`SampleInstrument::advance_block`]
+/// so the two paths fold bit-identically.
+#[inline]
+fn fold_pos(pos: f64, fold: bool, data_len: f64, loop_point: f64, loop_len: f64) -> (f64, bool) {
+    if fold && pos >= data_len {
+        ((pos - loop_point) % loop_len + loop_point, true)
+    } else {
+        (pos, false)
+    }
+}
+
 /// Moves `gain` toward `target` by at most `max_step`, landing exactly on the target.
 fn slew_toward(gain: f64, target: f64, max_step: f64) -> f64 {
     let d = target - gain;
@@ -452,12 +468,20 @@ mod tests {
 
         // 22050 / 44100 = 0.5 source samples per output sample.
         instr.advance(InstrumentResampleMode::NearestNeighbor, None, false);
-        assert!((instr.sample_t - 0.5).abs() < 1e-9, "got {}", instr.sample_t);
+        assert!(
+            (instr.sample_t - 0.5).abs() < 1e-9,
+            "got {}",
+            instr.sample_t
+        );
 
         // Halving the output rate doubles the step (now 1.0 per sample).
         instr.set_sample_rate(22_050.0);
         instr.advance(InstrumentResampleMode::NearestNeighbor, None, false);
-        assert!((instr.sample_t - 1.5).abs() < 1e-9, "got {}", instr.sample_t);
+        assert!(
+            (instr.sample_t - 1.5).abs() < 1e-9,
+            "got {}",
+            instr.sample_t
+        );
     }
 
     /// Renders `n` output samples of `sample` played at `out_rate` with `freq_ratio == 1`

@@ -7,18 +7,30 @@
 //!
 //! - [`config`] — the [`SynthConfig`] options struct.
 //! - [`vis`] — the look-ahead [`FsVisController`] for visualizers.
+//!
+//! ## The intermediate mixer
+//!
+//! The controller owns two sets of per-track synthesizers: the output set, which renders at the
+//! output rate, and the mixer set, which renders at [`SynthConfig::mixer_sample_rate`]. With
+//! [`SynthConfig::use_mixer`] set, sampled (non-PSG) voices play on the mixer set and PSG voices on
+//! the output set; the controller *routes* each set's stereo audio to the final mix — the output
+//! set straight through, the mixer set via the [`Bank`], which upsamples the mixer-rate bus to the
+//! output rate. With the mixer off, every voice plays on the output set, so the result is
+//! bit-identical to the single-set engine. The [`Bank`] holds only the resampler; it does not own
+//! the synthesizers — audio flows *from* the synthesizers *to* the bank.
 
 mod config;
-mod vis;
 pub mod messages;
+mod vis;
 
-pub use config::{DelaySmoothing, HighShelf, SynthConfig};
+pub use config::{DelaySmoothing, HighShelf, MixerResampleMode, SynthConfig};
 pub use vis::{FsVisController, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
+use crate::dsp::biquad_filter::BiquadFilter;
+use crate::dsp::resample::StreamResampler;
 use crate::synth::MAX_BLOCK;
 use crate::{SampleSynthesizer, TRACK_COUNT};
-use crate::dsp::biquad_filter::BiquadFilter;
 
 /// Which device voice currently owns a pool slot.
 #[derive(Debug, Clone, Copy)]
@@ -27,15 +39,133 @@ struct SlotOwner {
     key: u8,
 }
 
+/// `slot_owner[track][pool_slot]` — which device voice occupies each synthesizer voice in a set.
+type SlotOwners = Vec<Vec<Option<SlotOwner>>>;
+
+/// Builds an idle set of per-track synthesizers at `sample_rate` and its empty slot bookkeeping.
+fn new_synth_set(sample_rate: f64) -> (Vec<SampleSynthesizer>, SlotOwners) {
+    let synths: Vec<_> = (0..TRACK_COUNT)
+        .map(|_| SampleSynthesizer::new(sample_rate, 16))
+        .collect();
+    let slot_owner = synths.iter().map(|s| vec![None; s.voice_count()]).collect();
+    (synths, slot_owner)
+}
+
+/// The pool slot owned by `voice` on `track` within a set, if any.
+fn find_slot(slot_owner: &SlotOwners, track: usize, voice: VoiceId) -> Option<usize> {
+    slot_owner[track]
+        .iter()
+        .position(|o| o.is_some_and(|o| o.voice == voice))
+}
+
+/// Advances every voice in a set by one sample and returns the enabled-track stereo sum.
+fn render_set(
+    synths: &mut [SampleSynthesizer],
+    enables: &[bool],
+    config: &SynthConfig,
+) -> (f64, f64) {
+    let (mut l, mut r) = (0.0, 0.0);
+    for (synth, &enabled) in synths.iter_mut().zip(enables) {
+        synth.next_sample(config);
+        if enabled {
+            l += synth.val_l;
+            r += synth.val_r;
+        }
+    }
+    (l, r)
+}
+
+/// Cuts one-shot samples in a set that ran out (only the synthesizer knows their playback
+/// position), clearing their note-grid cells and reporting each ending to the device as feedback.
+fn cut_finished(
+    synths: &mut [SampleSynthesizer],
+    slot_owner: &mut SlotOwners,
+    notes_on: &mut [[u8; 128]],
+    feedback: &mut TickFeedback,
+) {
+    for (t, synth) in synths.iter_mut().enumerate() {
+        for slot in 0..slot_owner[t].len() {
+            let Some(owner) = slot_owner[t][slot] else {
+                continue;
+            };
+            let instr = synth.instr(slot);
+            let ran_out = !instr.sample.looping && instr.sample_t > instr.sample.data.len() as f64;
+            if ran_out || !instr.playing {
+                synth.cut_instrument(slot);
+                slot_owner[t][slot] = None;
+                notes_on[t][owner.key as usize] = 0;
+                feedback.ended_voices.push((t, owner.voice));
+            }
+        }
+    }
+}
+
+/// The intermediate mixer bank: a stereo mix bus the controller routes the mixer-set audio into.
+///
+/// It owns only the resampler (and its rate bookkeeping), **not** the synthesizers — the
+/// controller renders the mixer set and routes its summed bus here, where it is upsampled from the
+/// mixer rate to the output rate.
+struct Bank {
+    resampler: StreamResampler,
+    /// The sample rate the feeding (mixer-set) synthesizers run at.
+    rate: f64,
+    /// Whether the bank was engaged on the previous render call (to reset on a fresh enable).
+    was_active: bool,
+}
+
+impl Bank {
+    fn new(rate: f64) -> Self {
+        Self {
+            resampler: StreamResampler::new(),
+            rate,
+            was_active: false,
+        }
+    }
+
+    /// Marks the bank idle so the next enable starts the resampler from a clean ring.
+    fn disable(&mut self) {
+        self.was_active = false;
+    }
+
+    /// Reconfigures the resampler from `config` for output `out_rate`, once per render call.
+    /// Resets on a fresh enable. Returns `Some(rate)` when the feeding synthesizers must be
+    /// re-targeted to a new rate (the bank doesn't own them, so the controller does it).
+    fn prepare(&mut self, config: &SynthConfig, out_rate: f64) -> Option<f64> {
+        if !self.was_active {
+            self.resampler.reset();
+            self.was_active = true;
+        }
+        let rate_change = (self.rate != config.mixer_sample_rate).then(|| {
+            self.rate = config.mixer_sample_rate;
+            self.rate
+        });
+        let half_taps = match config.mixer_resample {
+            MixerResampleMode::Nearest => None,
+            MixerResampleMode::Sinc { half_taps } => Some(half_taps),
+        };
+        self.resampler.set(self.rate, out_rate, half_taps);
+        rate_change
+    }
+
+    /// One upsampled stereo sample, pulling the mixer-rate bus from `render` on demand.
+    fn route(&mut self, render: &mut impl FnMut() -> (f64, f64)) -> (f64, f64) {
+        self.resampler.next(render)
+    }
+}
+
 /// The synthesis runtime: voice pools + master clock, driven by a device player.
 pub struct SynthController {
     sample_rate: f64,
     /// The device player generating the event stream.
     pub player: DevicePlayer,
-    /// One polyphonic synthesizer per track.
-    pub synthesizers: Vec<SampleSynthesizer>,
-    /// `slot_owner[track][pool_slot]` — which device voice occupies each synthesizer voice.
-    slot_owner: Vec<Vec<Option<SlotOwner>>>,
+    /// The output-rate synthesizers (PSG voices, and every voice when the mixer is off).
+    synths: Vec<SampleSynthesizer>,
+    slot_owner: SlotOwners,
+    /// The mixer-rate synthesizers (sampled voices when [`SynthConfig::use_mixer`] is set).
+    mixer_synths: Vec<SampleSynthesizer>,
+    mixer_slot_owner: SlotOwners,
+    /// The mixer bus the mixer set's audio is routed into (owns the resampler, not the synths).
+    bank: Bank,
     /// `notes_on[track][note]` is 1 while a sequence note sounds (drives the visualizer).
     pub notes_on: Vec<[u8; 128]>,
     /// Count of sequence loops seen (used by callers to detect loop points).
@@ -59,18 +189,17 @@ impl SynthController {
     /// Returns `None` if the song is missing or malformed.
     pub fn new(sample_rate: f64, data: &SoundData, song_id: u32) -> Option<SynthController> {
         let player = data.make_player(song_id)?;
-        let synthesizers: Vec<_> = (0..TRACK_COUNT)
-            .map(|_| SampleSynthesizer::new(sample_rate, 16))
-            .collect();
-        let slot_owner = synthesizers
-            .iter()
-            .map(|s| vec![None; s.voice_count()])
-            .collect();
+        let mixer_rate = 48_000.0;
+        let (synths, slot_owner) = new_synth_set(sample_rate);
+        let (mixer_synths, mixer_slot_owner) = new_synth_set(mixer_rate);
         Some(SynthController {
             sample_rate,
             player,
-            synthesizers,
+            synths,
             slot_owner,
+            mixer_synths,
+            mixer_slot_owner,
+            bank: Bank::new(mixer_rate),
             notes_on: vec![[0u8; 128]; TRACK_COUNT],
             jumps: 0,
             fading_start: false,
@@ -125,18 +254,28 @@ impl SynthController {
         self.sample_rate
     }
 
+    /// Total voices sounding across both synthesizer sets (drives the app's DSP-load / voice stats).
+    pub fn active_voice_count(&self) -> usize {
+        let count = |synths: &[SampleSynthesizer]| -> usize {
+            synths.iter().map(|s| s.active_voice_count()).sum()
+        };
+        count(&self.synths) + count(&self.mixer_synths)
+    }
+
     /// Changes the output sample rate at any time, re-targeting every voice and filter. A no-op
     /// when the rate is unchanged.
     ///
     /// The master clock reads `sample_rate` live (see [`Self::next_sample`]), so only the derived
-    /// state needs refreshing: the per-track synthesizers (voices, Haas delays, crossover) and the
-    /// master high-shelf, whose biquads are rebuilt against the new rate on next use.
+    /// state needs refreshing: the output set's synthesizers (voices, Haas delays, crossover) and
+    /// the master high-shelf, whose biquads are rebuilt against the new rate on next use. The mixer
+    /// set runs at its own rate and is independent; the bank picks up the new output rate on the
+    /// next render (see [`Self::prepare_mixer`]).
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         if sample_rate == self.sample_rate {
             return;
         }
         self.sample_rate = sample_rate;
-        for synth in &mut self.synthesizers {
+        for synth in &mut self.synths {
             synth.set_sample_rate(sample_rate);
         }
         self.shelf_params = None;
@@ -152,11 +291,36 @@ impl SynthController {
         self.player.step_rate()
     }
 
+    /// Reconfigures the mixer bank (and re-rates the mixer set when needed) from `config`, once per
+    /// render call.
+    fn prepare_mixer(&mut self, config: &SynthConfig) {
+        if !config.use_mixer {
+            self.bank.disable();
+            return;
+        }
+        if let Some(rate) = self.bank.prepare(config, self.sample_rate) {
+            for synth in &mut self.mixer_synths {
+                synth.set_sample_rate(rate);
+            }
+        }
+    }
+
+    /// One upsampled stereo sample routed from the mixer set through the bank: the resampler pulls
+    /// mixer-rate samples (each a fresh advance + stereo mix of the mixer set) only as its read
+    /// window consumes them.
+    fn route_mixer(&mut self, config: &SynthConfig) -> (f64, f64) {
+        let mixer_synths = &mut self.mixer_synths;
+        let enables = &config.track_enables;
+        let mut render = || render_set(mixer_synths, enables, config);
+        self.bank.route(&mut render)
+    }
+
     /// Advances the device master clock and returns one mixed stereo sample.
     ///
     /// This is the single place where the hardware tick math lives: the device clock is
     /// accumulated per output sample and the player is ticked every `cycles_per_tick` cycles.
     pub fn next_sample(&mut self, config: &SynthConfig) -> (f32, f32) {
+        self.prepare_mixer(config);
         self.timer += self.player.clock_rate();
         let threshold = self.player.cycles_per_tick() * self.sample_rate;
         while self.timer >= threshold {
@@ -164,14 +328,11 @@ impl SynthController {
             self.tick(config);
         }
 
-        let mut val_l = 0.0;
-        let mut val_r = 0.0;
-        for (synth, &enabled) in self.synthesizers.iter_mut().zip(&config.track_enables) {
-            synth.next_sample(config);
-            if enabled {
-                val_l += synth.val_l;
-                val_r += synth.val_r;
-            }
+        let (mut val_l, mut val_r) = render_set(&mut self.synths, &config.track_enables, config);
+        if config.use_mixer {
+            let (ml, mr) = self.route_mixer(config);
+            val_l += ml;
+            val_r += mr;
         }
         let (val_l, val_r) = self.master_filter(val_l, val_r, config);
         (val_l as f32, val_r as f32)
@@ -184,6 +345,7 @@ impl SynthController {
     /// is advanced with the same per-sample additions as [`Self::next_sample`], so the output is
     /// bit-identical to calling that in a loop.
     pub fn fill(&mut self, out: &mut [f32], config: &SynthConfig) {
+        self.prepare_mixer(config);
         let threshold = self.player.cycles_per_tick() * self.sample_rate;
         let clock = self.player.clock_rate();
         let frames = out.len() / 2;
@@ -207,16 +369,21 @@ impl SynthController {
                 n += 1;
             }
 
+            // The output set renders the whole block at once; the mixer set is pulled per output
+            // sample (its consumption is data-dependent), matching `next_sample` bit-for-bit.
             acc_l[..n].fill(0.0);
             acc_r[..n].fill(0.0);
-            for (synth, &enabled) in self.synthesizers.iter_mut().zip(&config.track_enables) {
+            for (synth, &enabled) in self.synths.iter_mut().zip(&config.track_enables) {
                 synth.render_block(config, n, &mut acc_l, &mut acc_r, enabled);
             }
             let block_out = &mut out[2 * frame..2 * (frame + n)];
-            for (frame_out, (&l, &r)) in block_out
-                .chunks_exact_mut(2)
-                .zip(acc_l[..n].iter().zip(&acc_r[..n]))
-            {
+            for (i, frame_out) in block_out.chunks_exact_mut(2).enumerate() {
+                let (mut l, mut r) = (acc_l[i], acc_r[i]);
+                if config.use_mixer {
+                    let (ml, mr) = self.route_mixer(config);
+                    l += ml;
+                    r += mr;
+                }
                 let (l, r) = self.master_filter(l, r, config);
                 frame_out[0] = l as f32;
                 frame_out[1] = r as f32;
@@ -234,23 +401,19 @@ impl SynthController {
     /// One device tick: report synth-side voice endings, advance the device, apply its events.
     pub fn tick(&mut self, config: &SynthConfig) {
         // One-shot samples that ran out are cut here — only the synthesizer knows their playback
-        // position — and reported to the device as feedback.
-        for (t, synth) in self.synthesizers.iter_mut().enumerate() {
-            for slot in 0..self.slot_owner[t].len() {
-                let Some(owner) = self.slot_owner[t][slot] else {
-                    continue;
-                };
-                let instr = synth.instr(slot);
-                let ran_out =
-                    !instr.sample.looping && instr.sample_t > instr.sample.data.len() as f64;
-                if ran_out || !instr.playing {
-                    synth.cut_instrument(slot);
-                    self.slot_owner[t][slot] = None;
-                    self.notes_on[t][owner.key as usize] = 0;
-                    self.feedback.ended_voices.push((t, owner.voice));
-                }
-            }
-        }
+        // position — and reported to the device as feedback (both sets).
+        cut_finished(
+            &mut self.synths,
+            &mut self.slot_owner,
+            &mut self.notes_on,
+            &mut self.feedback,
+        );
+        cut_finished(
+            &mut self.mixer_synths,
+            &mut self.mixer_slot_owner,
+            &mut self.notes_on,
+            &mut self.feedback,
+        );
 
         let mut events = std::mem::take(&mut self.events);
         self.player.tick(&mut self.feedback, config, &mut events);
@@ -258,6 +421,26 @@ impl SynthController {
             self.apply_event(event, config);
         }
         self.events = events;
+    }
+
+    /// Locates the set and pool slot owning device voice `voice` on `track`: `true` ⇒ the mixer
+    /// set, `false` ⇒ the output set.
+    fn locate(&self, track: usize, voice: VoiceId) -> Option<(bool, usize)> {
+        if let Some(slot) = find_slot(&self.slot_owner, track, voice) {
+            return Some((false, slot));
+        }
+        find_slot(&self.mixer_slot_owner, track, voice).map(|slot| (true, slot))
+    }
+
+    /// Mutable access to one synthesizer set and its slot bookkeeping: `true` ⇒ mixer, `false` ⇒
+    /// output.
+    #[inline]
+    fn set_mut(&mut self, mixer: bool) -> (&mut Vec<SampleSynthesizer>, &mut SlotOwners) {
+        if mixer {
+            (&mut self.mixer_synths, &mut self.mixer_slot_owner)
+        } else {
+            (&mut self.synths, &mut self.slot_owner)
+        }
     }
 
     /// Applies one standardized device event to the voice pools.
@@ -272,8 +455,12 @@ impl SynthController {
                 volume,
                 duration_ticks: _,
             } => {
-                let slot = self.synthesizers[track].play(sample, pitch, volume, config);
-                if let Some(old) = self.slot_owner[track][slot].replace(SlotOwner { voice, key }) {
+                // Sampled (non-PSG) voices play on the mixer set when it's engaged; PSG voices and
+                // everything in direct mode play on the output set.
+                let mixer = config.use_mixer && !sample.is_psg_square;
+                let (synths, slot_owner) = self.set_mut(mixer);
+                let slot = synths[track].play(sample, pitch, volume, config);
+                if let Some(old) = slot_owner[track][slot].replace(SlotOwner { voice, key }) {
                     // Round-robin steal: the previous occupant is gone; tell the device.
                     self.notes_on[track][old.key as usize] = 0;
                     self.feedback.ended_voices.push((track, old.voice));
@@ -285,8 +472,8 @@ impl SynthController {
                 voice,
                 volume,
             } => {
-                if let Some(slot) = self.find_slot(track, voice) {
-                    self.synthesizers[track].instr_mut(slot).volume = volume;
+                if let Some((mixer, slot)) = self.locate(track, voice) {
+                    self.set_mut(mixer).0[track].instr_mut(slot).volume = volume;
                 }
             }
             SynthEvent::VoicePitch {
@@ -294,8 +481,8 @@ impl SynthController {
                 voice,
                 pitch,
             } => {
-                if let Some(slot) = self.find_slot(track, voice) {
-                    self.synthesizers[track]
+                if let Some((mixer, slot)) = self.locate(track, voice) {
+                    self.set_mut(mixer).0[track]
                         .instr_mut(slot)
                         .set_pitch(pitch, config.tuning);
                 }
@@ -305,16 +492,17 @@ impl SynthController {
                 voice,
                 semitones,
             } => {
-                if let Some(slot) = self.find_slot(track, voice) {
-                    self.synthesizers[track]
+                if let Some((mixer, slot)) = self.locate(track, voice) {
+                    self.set_mut(mixer).0[track]
                         .instr_mut(slot)
                         .set_finetune_lfo(semitones, config.tuning);
                 }
             }
             SynthEvent::VoiceStopped { track, voice } => {
-                if let Some(slot) = self.find_slot(track, voice) {
-                    let owner = self.slot_owner[track][slot].take();
-                    self.synthesizers[track].stop_instrument(slot, config.smooth_psg_pops);
+                if let Some((mixer, slot)) = self.locate(track, voice) {
+                    let (synths, slot_owner) = self.set_mut(mixer);
+                    let owner = slot_owner[track][slot].take();
+                    synths[track].stop_instrument(slot, config.smooth_psg_pops);
                     if let Some(owner) = owner {
                         self.notes_on[track][owner.key as usize] = 0;
                     }
@@ -323,21 +511,17 @@ impl SynthController {
             SynthEvent::NoteReleased { track, key } => {
                 self.notes_on[track][key as usize] = 0;
             }
+            // Track-level pan/detune apply to both sets: a track's voices may be split across them.
             SynthEvent::TrackPan { track, pan } => {
-                self.synthesizers[track].set_pan(pan, config);
+                self.synths[track].set_pan(pan, config);
+                self.mixer_synths[track].set_pan(pan, config);
             }
             SynthEvent::TrackDetune { track, semitones } => {
-                self.synthesizers[track].set_finetune(semitones, config.tuning);
+                self.synths[track].set_finetune(semitones, config.tuning);
+                self.mixer_synths[track].set_finetune(semitones, config.tuning);
             }
             SynthEvent::Looped => self.jumps += 1,
             SynthEvent::Ended => self.fading_start = true,
         }
-    }
-
-    /// Finds the pool slot owned by `voice` on `track`.
-    fn find_slot(&self, track: usize, voice: VoiceId) -> Option<usize> {
-        self.slot_owner[track]
-            .iter()
-            .position(|o| o.is_some_and(|o| o.voice == voice))
     }
 }

@@ -52,6 +52,24 @@ impl HighShelf {
     }
 }
 
+/// How the intermediate mixer's stereo bus is brought up from the mixer rate to the output rate
+/// (see [`SynthConfig::use_mixer`]). Mirrors the per-voice resampling choices, restricted to the
+/// two that make sense for a finished stereo bus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixerResampleMode {
+    /// Zero-order hold — keep the mixer-rate stairstep (the lo-fi hardware-mixer colour).
+    Nearest,
+    /// Windowed-sinc reconstruction, band-limited to the mixer Nyquist. `half_taps` is the
+    /// kernel's source-sample half-width (shared with the voice resampler's tables).
+    Sinc { half_taps: usize },
+}
+
+impl Default for MixerResampleMode {
+    fn default() -> Self {
+        MixerResampleMode::Sinc { half_taps: 16 }
+    }
+}
+
 /// Runtime-tunable synthesis options (replaces the original engine's global flags).
 #[derive(Debug, Clone)]
 pub struct SynthConfig {
@@ -78,6 +96,15 @@ pub struct SynthConfig {
     pub delay_smoothing: DelaySmoothing,
     /// Master high-shelf EQ on the final mixed output (per-device; chosen by the caller).
     pub high_shelf: HighShelf,
+    /// Route the sampled (non-PSG) voices through an intermediate mixer running at
+    /// [`Self::mixer_sample_rate`], then resample that stereo bus up to the output rate. PSG
+    /// (square/wave/noise) voices bypass the mixer and render straight at the output rate. Off
+    /// renders every voice at the output rate (the direct path).
+    pub use_mixer: bool,
+    /// Sample rate (Hz) of the intermediate mixer bus, when [`Self::use_mixer`] is set.
+    pub mixer_sample_rate: f64,
+    /// How the intermediate mixer bus is brought up to the output rate.
+    pub mixer_resample: MixerResampleMode,
 }
 
 impl Default for SynthConfig {
@@ -93,6 +120,9 @@ impl Default for SynthConfig {
             smooth_psg_pops: false,
             delay_smoothing: DelaySmoothing::None,
             high_shelf: HighShelf::default(),
+            use_mixer: false,
+            mixer_sample_rate: 48_000.0,
+            mixer_resample: MixerResampleMode::default(),
         }
     }
 }

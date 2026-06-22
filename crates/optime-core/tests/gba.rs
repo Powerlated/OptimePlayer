@@ -122,7 +122,6 @@ fn renders_audio_and_ends() {
     );
 }
 
-
 #[test]
 fn lookahead_sees_the_note() {
     let rom = build_rom();
