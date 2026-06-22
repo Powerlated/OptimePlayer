@@ -11,9 +11,9 @@
 //! ahead to cover the final reconstruction kernel's tap window; the chain stages before it are
 //! exact integer-rate processes, so no second kernel is needed.
 
-use super::gather::{gather_sinc, GatherSource};
+use super::source::{gather_sinc, GatherSource};
+use super::{resample_sinc, tap_window, ResampleTables, MAX_HALF_TAPS};
 use crate::devices::HardwareChain;
-use crate::resample::{resample_sinc, tap_window, ResampleTables, MAX_HALF_TAPS};
 use crate::sample::Sample;
 
 /// Ring capacity in DAC-rate samples: one full tap window at the widest supported kernel.
@@ -21,7 +21,7 @@ const RING_LEN: usize = 2 * MAX_HALF_TAPS + 2;
 
 /// How a sampled voice's source is taken through the software-mixer → DAC stages of the chain.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Reconstruction {
+pub enum Reconstruction {
     /// GBA Authentic: linear interpolation to the mixer rate, nearest-neighbour hold to the DAC
     /// rate — exactly what the MP2K software mixer and the DAC do.
     HardwareHold,
@@ -31,7 +31,7 @@ pub(super) enum Reconstruction {
 }
 
 /// Per-call chain parameters, resolved by the owning voice.
-pub(super) struct ChainParams {
+pub struct ChainParams {
     /// The voice's *resolved* chain: `mixer_hz` must already be `None` for PSG voices and
     /// mixer-less devices (straight nearest-neighbour at the DAC rate).
     pub chain: HardwareChain,
@@ -47,7 +47,7 @@ pub(super) struct ChainParams {
 
 /// The running chain state of one voice.
 #[derive(Clone)]
-pub(super) struct AuthenticState {
+pub struct AuthenticState {
     /// Fractional read position on the DAC-rate grid, in DAC samples.
     t_dac: f64,
     /// Next DAC-grid index to synthesize into the ring.
@@ -69,6 +69,12 @@ pub(super) struct AuthenticState {
     mixer_ring: [f32; RING_LEN],
     /// Next mixer-grid index to synthesize into [`Self::mixer_ring`].
     next_mixer_n: i64,
+}
+
+impl Default for AuthenticState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AuthenticState {
@@ -101,7 +107,7 @@ impl AuthenticState {
     }
 
     /// The source read position, mirrored into
-    /// [`SampleInstrument::sample_t`](super::SampleInstrument::sample_t) so one-shot-end
+    /// [`SampleInstrument::sample_t`](crate::synth::SampleInstrument::sample_t) so one-shot-end
     /// detection keeps working.
     pub fn src_pos(&self) -> f64 {
         self.src_pos

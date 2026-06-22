@@ -30,11 +30,15 @@
 //! The module is split into:
 //! - [`kernels`] — the process-wide oversampled tables and their lookups.
 //! - [`gather`] / [`simd`] — the scalar and portable-SIMD gather kernels.
+//! - [`source`] — the loop-aware source-staging gather ([`gather_sinc`]) that feeds a voice.
+//! - [`authentic`] — the per-voice fixed-rate hardware chain behind the Authentic resample mode.
 //! - [`analysis`] — the `fir_kernel` / `fir_response` helpers for the UI filter plot.
 
 mod analysis;
+mod authentic;
 mod gather;
 mod kernels;
+mod source;
 #[cfg(feature = "simd")]
 mod simd;
 
@@ -42,7 +46,9 @@ mod simd;
 mod tests;
 
 pub use analysis::{fir_kernel, fir_response};
+pub use authentic::{AuthenticState, ChainParams, Reconstruction};
 pub use kernels::MAX_HALF_TAPS;
+pub use source::{gather_sinc, GatherSource};
 
 use kernels::{kernels, OVERSAMPLE, WIN_OVERSAMPLE};
 

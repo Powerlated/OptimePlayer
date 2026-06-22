@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+This file must be updated to match relevant changes made in the codebase.
+
 ## Overview
 
 Optime Player emulates retro console sound systems and plays their sequenced music in real time:
@@ -50,8 +52,8 @@ Pure-`std`. Top-level modules are the console-agnostic synthesis layer; everythi
 **Synthesis layer** (console-agnostic):
 
 - `synth_controller/` — `mod.rs` (`SynthController`: per-track voice pools via `slot_owner` bookkeeping, the master clock, `next_sample`/`fill`/`tick`, applies `SynthEvent`s and feeds `TickFeedback` — voice steals and one-shot sample endings — back to the device), `config.rs` (`SynthConfig` incl. `smooth_psg_pops` — a ~2 ms PSG gain slew — and the `DelaySmoothing` policy for the stereo expander's delay-length changes), `vis.rs` (`FsVisController`: a parallel device-sequencer runner emitting `VisNote`s for look-ahead visualizers, no audio).
-- `synth/` — `instrument.rs` (`SampleInstrument`, one voice: `VoicePitch`-driven frequency, resampling, pop-smoothing gain slew, block rendering), `authentic.rs` (the per-voice `HardwareChain` reproduction behind `ResampleMode::Authentic`: linear→mixer rate, NN-hold→DAC rate into a small ring, windowed-sinc to the output rate; PSGs NN at the DAC rate — plus `ResampleMode::CrunchyAuthentic`, the same chain with the sampled path reconstructed instead: band-limited sinc→mixer rate, band-limited ZOH→DAC rate), `synthesizer.rs` (`SampleSynthesizer`: round-robin voice pool, pan, Haas widening with optional held delay changes, bass-mono crossover), `delay.rs` (`DelayLine`), `gather.rs` (SIMD/scalar sample gather).
-- `resample/` — windowed-sinc resampling: `kernels.rs` (FIR kernel/response, `ResampleTables`), `mod.rs` (public API).
+- `synth/` — `instrument.rs` (`SampleInstrument`, one voice: `VoicePitch`-driven frequency, resampling, pop-smoothing gain slew, block rendering), `synthesizer.rs` (`SampleSynthesizer`: round-robin voice pool, pan, Haas widening with optional held delay changes, bass-mono crossover), `delay.rs` (`DelayLine`). All resampling lives in `resample/` (below); `synth` consumes it through `crate::resample::{gather_sinc, AuthenticState, …}`.
+- `resample/` — windowed-sinc resampling: `kernels.rs` (FIR kernel/response, `ResampleTables`), `gather.rs` (SIMD/scalar gather kernels), `source.rs` (the loop-aware source-staging gather `gather_sinc`/`GatherSource` that feeds a voice), `authentic.rs` (the per-voice `HardwareChain` reproduction behind `ResampleMode::Authentic`: linear→mixer rate, NN-hold→DAC rate into a small ring, windowed-sinc to the output rate; PSGs NN at the DAC rate — plus `ResampleMode::CrunchyAuthentic`, the same chain with the sampled path reconstructed instead: band-limited sinc→mixer rate, band-limited ZOH→DAC rate), `mod.rs` (public API).
 - `sample.rs` — `Sample`, `ResampleMode` (`NearestNeighbor`, `Linear`, clean `SincSampleNyquist`, crunchy `SincOutputNyquist` with per-kind PSG/sampler cutoff sliders, `Authentic` with its own cutoff, and `CrunchyAuthentic` — the reconstructed authentic chain), + `decode_pcm8`/`decode_pcm16`/`decode_adpcm`/`decode_wav`.
 - `dsp.rs` — `BiquadFilter` (cascaded biquads). `tuning.rs` — `midi_note_to_hz` (equal temperament / Pythagorean `TuningSystem`). `util.rs` — `read_u8/u16/u32` (return 0 on OOB), `search_for_sequence`, `CircularBuffer<T>`.
 

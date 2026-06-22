@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
-use super::authentic::{AuthenticState, ChainParams, Reconstruction};
-use super::gather::{gather_sinc, GatherSource};
 use crate::devices::{HardwareChain, VoicePitch};
-use crate::resample::ResampleTables;
+use crate::resample::{
+    gather_sinc, AuthenticState, ChainParams, GatherSource, Reconstruction, ResampleTables,
+};
 use crate::sample::{ResampleMode, Sample};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
 

@@ -1,12 +1,12 @@
-//! The windowed-sinc gather that feeds [`SampleInstrument`](super::SampleInstrument): it stages
-//! the exact tap window for a fractional source position so the inner resampler reads a plain,
-//! loop-mapped slice.
+//! The windowed-sinc gather that feeds [`SampleInstrument`](crate::synth::SampleInstrument): it
+//! stages the exact tap window for a fractional source position so the inner resampler reads a
+//! plain, loop-mapped slice.
 
-use crate::resample::{resample_sinc, tap_window, ResampleTables, MAX_HALF_TAPS};
+use super::{resample_sinc, tap_window, ResampleTables, MAX_HALF_TAPS};
 
 /// The source-sample view a sinc gather reads from: the decoded data plus its loop layout and
 /// whether the reading voice has already wrapped (see [`gather_sinc`]).
-pub(super) struct GatherSource<'a> {
+pub struct GatherSource<'a> {
     pub data: &'a [f32],
     pub looping: bool,
     pub loop_point: i64,
@@ -22,7 +22,7 @@ pub(super) struct GatherSource<'a> {
 /// least once (the signal under the window is then periodic in the loop); before the first wrap
 /// the one-shot data is read directly and only right-side taps peek into the first loop pass.
 #[inline]
-pub(super) fn gather_sinc(
+pub fn gather_sinc(
     src: &GatherSource,
     tbl: &ResampleTables,
     pos: f64,

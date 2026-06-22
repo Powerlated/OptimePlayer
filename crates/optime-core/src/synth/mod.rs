@@ -2,15 +2,15 @@
 //! track, and the stereo-separation [`DelayLine`].
 //!
 //! The pieces live in this module's children:
-//! - [`gather`] — the windowed-sinc tap-staging gather (resampler front-end).
 //! - [`instrument`] — [`SampleInstrument`], a single pitch-shifted voice.
-//! - [`authentic`] — the per-voice hardware-chain state behind the Authentic resample mode.
 //! - [`synthesizer`] — [`SampleSynthesizer`], the per-track polyphonic voice pool + stereo stage.
 //! - [`delay`] — the Haas-effect [`DelayLine`].
+//!
+//! The resampling front-end ([`gather_sinc`](crate::resample::gather_sinc)) and the Authentic
+//! hardware-chain state ([`AuthenticState`](crate::resample::AuthenticState)) live in
+//! [`crate::resample`].
 
-mod authentic;
 mod delay;
-mod gather;
 mod instrument;
 mod synthesizer;
 
