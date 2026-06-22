@@ -73,6 +73,41 @@ impl SampleSynthesizer {
         }
     }
 
+    /// Re-targets every voice and the rate-dependent stereo/crossover state to a new output
+    /// sample rate. A no-op when the rate is unchanged.
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        if sample_rate == self.sample_rate {
+            return;
+        }
+        let ratio = sample_rate / self.sample_rate;
+        self.sample_rate = sample_rate;
+        for instr in &mut self.instrs {
+            instr.set_sample_rate(sample_rate);
+        }
+
+        // Resize the Haas delay lines to the new 100 ms capacity, rescaling the current (and any
+        // pending) delay *length* by the rate ratio so the physical widening time is preserved.
+        let capacity = (sample_rate * 0.1).round() as usize;
+        let rescale = |len: usize| (len as f64 * ratio).round() as usize;
+        let (delay_l, delay_r) = (
+            rescale(self.delay_line_l.delay()),
+            rescale(self.delay_line_r.delay()),
+        );
+        self.delay_line_l.set_capacity(capacity);
+        self.delay_line_r.set_capacity(capacity);
+        self.delay_line_l.set_delay(delay_l);
+        self.delay_line_r.set_delay(delay_r);
+        self.pending_delays = self
+            .pending_delays
+            .map(|(l, r)| (rescale(l), rescale(r)));
+
+        // Rebuild the crossover for the new rate at its current cutoff.
+        self.crossover_lp
+            .set_low_pass(sample_rate, self.crossover_freq, CROSSOVER_Q);
+        self.crossover_hp
+            .set_high_pass(sample_rate, self.crossover_freq, CROSSOVER_Q);
+    }
+
     /// Number of voices in the pool.
     #[inline]
     pub fn voice_count(&self) -> usize {
@@ -320,6 +355,30 @@ impl SampleSynthesizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_sample_rate_resizes_delays_and_preserves_pool() {
+        let mut synth = SampleSynthesizer::new(44_100.0, 8);
+        let config = SynthConfig {
+            stereo_separation: true,
+            ..SynthConfig::default()
+        };
+        // Hard right gives the left delay line a non-zero length to rescale.
+        synth.set_pan(1.0, &config);
+        let delay_44k = synth.delay_line_l.delay();
+        assert!(delay_44k > 0, "expected a non-zero Haas delay to rescale");
+
+        synth.set_sample_rate(96_000.0);
+        assert_eq!(synth.voice_count(), 8, "the voice pool must be preserved");
+        // Capacity tracks the new 100 ms window, and the delay length is rescaled by the ratio.
+        let ratio = 96_000.0 / 44_100.0;
+        assert_eq!(synth.delay_line_l.delay(), (delay_44k as f64 * ratio).round() as usize);
+
+        // No-op when the rate is unchanged.
+        let before = synth.delay_line_l.delay();
+        synth.set_sample_rate(96_000.0);
+        assert_eq!(synth.delay_line_l.delay(), before);
+    }
 
     /// Plays a constant-amplitude looping sample hard-left, settles, and returns `(val_l, val_r)`.
     fn run_dc(config: &SynthConfig) -> (f64, f64) {

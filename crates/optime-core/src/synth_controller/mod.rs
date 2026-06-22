@@ -125,6 +125,23 @@ impl SynthController {
         self.sample_rate
     }
 
+    /// Changes the output sample rate at any time, re-targeting every voice and filter. A no-op
+    /// when the rate is unchanged.
+    ///
+    /// The master clock reads `sample_rate` live (see [`Self::next_sample`]), so only the derived
+    /// state needs refreshing: the per-track synthesizers (voices, Haas delays, crossover) and the
+    /// master high-shelf, whose biquads are rebuilt against the new rate on next use.
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        if sample_rate == self.sample_rate {
+            return;
+        }
+        self.sample_rate = sample_rate;
+        for synth in &mut self.synthesizers {
+            synth.set_sample_rate(sample_rate);
+        }
+        self.shelf_params = None;
+    }
+
     /// Sequencer steps executed (the visualizer timeline position).
     pub fn steps_elapsed(&self) -> u32 {
         self.player.steps_elapsed()

@@ -38,6 +38,15 @@ impl DelayLine {
         self.delay = length.min(self.buffer.len());
     }
 
+    /// Resizes the buffer to hold up to `max_length` samples, clearing it. The delay length is
+    /// re-clamped to the new capacity; [`Self::gain`] is preserved. Used when the output sample
+    /// rate changes (the 100 ms Haas window is a different number of samples at the new rate).
+    pub fn set_capacity(&mut self, max_length: usize) {
+        self.buffer = vec![0.0; max_length.max(1)];
+        self.pos_out = 0;
+        self.delay = self.delay.min(self.buffer.len());
+    }
+
     /// The current delay length in samples.
     pub fn delay(&self) -> usize {
         self.delay

@@ -85,6 +85,13 @@ impl SampleInstrument {
         self.fading_out = true;
     }
 
+    /// Re-targets the voice to a new output sample rate. The per-sample step
+    /// `r = freq_ratio * sample.sample_rate * inv_sample_rate` is recomputed from this on each
+    /// [`Self::advance`], so nothing else needs to change.
+    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+        self.inv_sample_rate = 1.0 / sample_rate;
+    }
+
     /// Advances playback by one output sample, updating [`Self::output`].
     ///
     /// `mode` is the global resampling choice from [`SynthConfig`](crate::SynthConfig).  `tables`
@@ -433,6 +440,24 @@ mod tests {
             .map(|k| (2.0 * PI * k as f64 / period as f64).sin() as f32)
             .collect();
         Arc::new(Sample::new(data, 440.0, src_rate, true, 0))
+    }
+
+    #[test]
+    fn set_sample_rate_rescales_playback_step() {
+        // A `DataRateHz` voice steps the source at `r = data_rate / out_rate` per output sample.
+        // A long non-looping sample avoids any loop fold so the step is read straight off sample_t.
+        let sample = Arc::new(Sample::new(vec![0.0; 4096], 440.0, 22_050.0, false, 0));
+        let mut instr = SampleInstrument::new(44_100.0, sample);
+        instr.set_pitch(VoicePitch::DataRateHz(22_050.0), TuningSystem::Equal);
+
+        // 22050 / 44100 = 0.5 source samples per output sample.
+        instr.advance(InstrumentResampleMode::NearestNeighbor, None, false);
+        assert!((instr.sample_t - 0.5).abs() < 1e-9, "got {}", instr.sample_t);
+
+        // Halving the output rate doubles the step (now 1.0 per sample).
+        instr.set_sample_rate(22_050.0);
+        instr.advance(InstrumentResampleMode::NearestNeighbor, None, false);
+        assert!((instr.sample_t - 1.5).abs() < 1e-9, "got {}", instr.sample_t);
     }
 
     /// Renders `n` output samples of `sample` played at `out_rate` with `freq_ratio == 1`
