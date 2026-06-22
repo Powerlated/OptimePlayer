@@ -1,4 +1,4 @@
-//! The egui application: song list, transport, settings, visualizer, and live keyboard input.
+//! The egui application: song list, transport, settings, visualizer.
 
 use std::sync::{Arc, Mutex};
 
@@ -189,8 +189,6 @@ pub struct OptimeApp {
 
     /// Cross-thread inbox for asynchronously-loaded file bytes: (source key, bytes).
     pending_file: FileInbox,
-    /// Keys currently held, to debounce auto-repeat for note input.
-    held_notes: [bool; 128],
 
     /// Which visualizer tab is active.
     vis_tab: VisTab,
@@ -261,7 +259,6 @@ impl OptimeApp {
             cpu_history: std::collections::VecDeque::new(),
             voice_history: std::collections::VecDeque::new(),
             pending_file: Arc::new(Mutex::new(None)),
-            held_notes: [false; 128],
             vis_tab: VisTab::PianoRoll,
             piano_roll: PianoRoll::default(),
             look_ahead: None,
@@ -946,7 +943,7 @@ impl OptimeApp {
 
     /// Pushes UI config into the audio thread and pulls a note snapshot for the visualizer.
     /// Returns the snapshot and whether autoplay should advance to the next song.
-    fn sync_audio(&mut self, ctx: &egui::Context) -> (VisSnapshot, bool) {
+    fn sync_audio(&mut self) -> (VisSnapshot, bool) {
         let config = self.config();
         let mut snap = VisSnapshot::default();
         let mut advance = false;
@@ -993,16 +990,13 @@ impl OptimeApp {
 
         if let Some(controller) = &mut st.controller {
             snap.active = true;
-            snap.active_track = controller.keyboard_track();
             snap.steps = controller.steps_elapsed();
             snap.step_rate = controller.step_rate();
             for t in 0..TRACK_COUNT {
                 for n in 0..128 {
                     snap.notes_on[t][n] = controller.notes_on[t][n] != 0;
-                    snap.notes_kbd[t][n] = controller.notes_on_keyboard[t][n] != 0;
                 }
             }
-            handle_keyboard(ctx, controller, &config, &mut self.held_notes);
         }
         (snap, advance)
     }
@@ -1022,13 +1016,11 @@ impl OptimeApp {
         };
         if let Some(controller) = &st.controller {
             snap.active = true;
-            snap.active_track = controller.keyboard_track();
             snap.steps = controller.steps_elapsed();
             snap.step_rate = controller.step_rate();
             for t in 0..TRACK_COUNT {
                 for n in 0..128 {
                     snap.notes_on[t][n] = controller.notes_on[t][n] != 0;
-                    snap.notes_kbd[t][n] = controller.notes_on_keyboard[t][n] != 0;
                 }
             }
         }
@@ -2080,7 +2072,7 @@ impl eframe::App for OptimeApp {
             self.step_song(1);
         }
 
-        let (snap, advance) = self.sync_audio(ctx);
+        let (snap, advance) = self.sync_audio();
         let snap = if advance {
             self.handle_song_end();
             // `snap` reflects the song that just ended; re-read so the piano roll and visualizer
@@ -2252,9 +2244,6 @@ impl eframe::App for OptimeApp {
             .width_range(220.0..=340.0)
             .show(ctx, |ui| {
                 self.settings_ui(ui);
-                ui.separator();
-                ui.label("Live keyboard");
-                ui.label("Click a track row to capture, then play z–m / q–p.");
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -2270,18 +2259,7 @@ impl eframe::App for OptimeApp {
                 }
                 VisTab::Tracks => {
                     egui::ScrollArea::both().show(ui, |ui| {
-                        let mut active_track = snap.active_track;
-                        visualizer::draw(ui, &snap, &mut self.track_enables, &mut active_track);
-                        // Apply any track-selection change back to the controller.
-                        if active_track != snap.active_track {
-                            if let Some(audio) = &self.audio {
-                                if let Ok(mut st) = audio.shared.lock() {
-                                    if let Some(c) = &mut st.controller {
-                                        c.set_keyboard_track(active_track);
-                                    }
-                                }
-                            }
-                        }
+                        visualizer::draw(ui, &snap, &mut self.track_enables);
                     });
                 }
             }
@@ -2365,86 +2343,3 @@ fn save_bytes(filename: &str, bytes: &[u8]) {
     }
 }
 
-/// Maps held computer-keyboard keys to live notes on the controller's active keyboard track.
-fn handle_keyboard(
-    ctx: &egui::Context,
-    controller: &mut SynthController,
-    config: &SynthConfig,
-    held_notes: &mut [bool; 128],
-) {
-    let Some(track) = controller.keyboard_track() else {
-        return;
-    };
-    ctx.input(|i| {
-        for event in &i.events {
-            if let egui::Event::Key {
-                key,
-                pressed,
-                repeat,
-                ..
-            } = event
-            {
-                if *repeat {
-                    continue;
-                }
-                if let Some(note) = key_to_note(*key) {
-                    let n = note as usize;
-                    if *pressed && !held_notes[n] {
-                        held_notes[n] = true;
-                        controller.play_keyboard_note(track, note, 127, 2000, config);
-                    } else if !*pressed && held_notes[n] {
-                        held_notes[n] = false;
-                        controller.release_keyboard_note(track, note, config);
-                    }
-                }
-            }
-        }
-    });
-}
-
-/// Maps an egui key to a MIDI note, mirroring the legacy two-row keyboard layout.
-fn key_to_note(key: egui::Key) -> Option<u8> {
-    use egui::Key::*;
-    Some(match key {
-        // Lower row: z = middle C (60).
-        Z => 60,
-        S => 61,
-        X => 62,
-        D => 63,
-        C => 64,
-        V => 65,
-        G => 66,
-        B => 67,
-        H => 68,
-        N => 69,
-        J => 70,
-        M => 71,
-        Comma => 72,
-        L => 73,
-        Period => 74,
-        Semicolon => 75,
-        Slash => 76,
-        // Upper row: q = C (72).
-        Q => 72,
-        Num2 => 73,
-        W => 74,
-        Num3 => 75,
-        E => 76,
-        R => 77,
-        Num5 => 78,
-        T => 79,
-        Num6 => 80,
-        Y => 81,
-        Num7 => 82,
-        U => 83,
-        I => 84,
-        Num9 => 85,
-        O => 86,
-        Num0 => 87,
-        P => 88,
-        OpenBracket => 89,
-        Equals => 90,
-        CloseBracket => 91,
-        _ => return None,
-    })
-}

@@ -23,8 +23,6 @@ pub enum MessageType {
 /// act on.
 #[derive(Debug, Clone, Copy)]
 pub struct Message {
-    /// Whether this note originated from live keyboard input rather than the sequence.
-    pub from_keyboard: bool,
     /// Which track emitted it.
     pub track_num: usize,
     /// The message kind.

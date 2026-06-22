@@ -64,8 +64,6 @@ pub enum SynthEvent {
         voice: VoiceId,
         /// The sounding MIDI key (drives the visualizer grid).
         key: u8,
-        /// Whether the note came from live keyboard input rather than the sequence.
-        keyboard: bool,
         /// The waveform to play.
         sample: Arc<Sample>,
         /// Initial pitch.
@@ -98,11 +96,7 @@ pub enum SynthEvent {
     VoiceStopped { track: usize, voice: VoiceId },
     /// The note is no longer held (release began): clears the visualizer grid while the
     /// release tail keeps sounding.
-    NoteReleased {
-        track: usize,
-        key: u8,
-        keyboard: bool,
-    },
+    NoteReleased { track: usize, key: u8 },
     /// Track-wide stereo pan (0 = left … 1 = right).
     TrackPan { track: usize, pan: f64 },
     /// Track-wide pitch offset in semitones (DS pitch-bend wheel).

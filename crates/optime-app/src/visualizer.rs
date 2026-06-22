@@ -1,8 +1,7 @@
 //! Procedural 16-track × 88-key piano-roll visualizer drawn with [`egui::Painter`].
 //!
 //! Replaces the original PNG-based renderer: white/black key rectangles are lit per the
-//! controller's `notes_on` state, with per-track enable toggles and an active-keyboard-track
-//! highlight. No image assets required.
+//! controller's `notes_on` state, with per-track enable toggles. No image assets required.
 
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
 
@@ -14,10 +13,6 @@ pub struct VisSnapshot {
     pub active: bool,
     /// `notes_on[track][midi]` — sequence-driven notes.
     pub notes_on: [[bool; 128]; TRACK_COUNT],
-    /// `notes_kbd[track][midi]` — live keyboard notes.
-    pub notes_kbd: [[bool; 128]; TRACK_COUNT],
-    /// The track receiving live keyboard input, if any.
-    pub active_track: Option<usize>,
     /// Sequencer steps elapsed (drives the piano-roll playhead).
     pub steps: u32,
     /// Current sequencer step rate in steps/second (tempo-dependent), for the piano roll's
@@ -30,8 +25,6 @@ impl Default for VisSnapshot {
         Self {
             active: false,
             notes_on: [[false; 128]; TRACK_COUNT],
-            notes_kbd: [[false; 128]; TRACK_COUNT],
-            active_track: None,
             steps: 0,
             step_rate: 0.0,
         }
@@ -53,16 +46,10 @@ const IS_BLACK: [bool; 12] = [
 ];
 const KEY_NUM: [u32; 12] = [0, 0, 1, 2, 2, 3, 3, 4, 4, 5, 6, 6];
 
-/// Draws the visualizer and handles clicks: toggling track enables and selecting the active
-/// keyboard track.
+/// Draws the visualizer and handles clicks: toggling track enables.
 // The track index drives per-row geometry (`row_y`), so a range loop reads clearer than `enumerate`.
 #[allow(clippy::needless_range_loop)]
-pub fn draw(
-    ui: &mut egui::Ui,
-    snap: &VisSnapshot,
-    track_enables: &mut [bool; TRACK_COUNT],
-    active_track: &mut Option<usize>,
-) {
+pub fn draw(ui: &mut egui::Ui, snap: &VisSnapshot, track_enables: &mut [bool; TRACK_COUNT]) {
     // 7 white keys per octave * ~7.5 octaves; computed conservatively wide.
     let keys_w = 53.0 * WHITE_W;
     let total_w = TOGGLE_W + PAD + keys_w + PAD * 2.0;
@@ -116,12 +103,7 @@ pub fn draw(
             painter.rect_filled(key_rect, 0.0, alpha(Color32::WHITE));
             painter.rect_stroke(key_rect, 0.0, Stroke::new(0.5_f32, alpha(Color32::GRAY)));
             if snap.notes_on[track][midi] {
-                let c = if snap.notes_kbd[track][midi] {
-                    Color32::RED
-                } else {
-                    Color32::BLACK
-                };
-                painter.rect_filled(key_rect, 0.0, alpha(c));
+                painter.rect_filled(key_rect, 0.0, alpha(Color32::BLACK));
             }
         }
 
@@ -138,28 +120,11 @@ pub fn draw(
             let key_rect =
                 Rect::from_min_size(egui::pos2(x, row_y + 2.0), Vec2::new(BLACK_W, BLACK_H));
             let base = if snap.notes_on[track][midi] {
-                if snap.notes_kbd[track][midi] {
-                    Color32::RED
-                } else {
-                    Color32::BLACK
-                }
+                Color32::BLACK
             } else {
                 Color32::from_rgb(0x33, 0x33, 0x33)
             };
             painter.rect_filled(key_rect, 0.0, alpha(base));
-        }
-
-        // Active-keyboard-track outline.
-        if *active_track == Some(track) {
-            let outline = Rect::from_min_size(
-                egui::pos2(keys_x - 1.0, row_y),
-                Vec2::new(keys_w, SECTION_H - 2.0),
-            );
-            painter.rect_stroke(
-                outline,
-                0.0,
-                Stroke::new(1.5_f32, Color32::from_rgb(0, 0x66, 0xFF)),
-            );
         }
     }
 
@@ -174,18 +139,6 @@ pub fn draw(
                 );
                 if toggle_rect.contains(pos) {
                     track_enables[track] = !track_enables[track];
-                    return;
-                }
-                let row_rect = Rect::from_min_size(
-                    egui::pos2(keys_x, row_y),
-                    Vec2::new(keys_w, SECTION_H - 2.0),
-                );
-                if row_rect.contains(pos) {
-                    *active_track = if *active_track == Some(track) {
-                        None
-                    } else {
-                        Some(track)
-                    };
                     return;
                 }
             }

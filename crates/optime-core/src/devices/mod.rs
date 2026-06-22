@@ -19,7 +19,7 @@ pub mod nintendo_ds;
 
 pub use crate::synth_controller::messages::{HardwareChain, SynthEvent, TickFeedback, VoiceId, VoicePitch};
 
-use crate::synth_controller::{messages, SynthConfig};
+use crate::synth_controller::SynthConfig;
 
 /// A loaded, parsed sound archive for some device — everything needed to list and start songs.
 pub enum SoundData {
@@ -182,44 +182,6 @@ impl DevicePlayer {
         match self {
             DevicePlayer::NintendoDs(p) => p.step_rate(),
             DevicePlayer::Gba(p) => p.step_rate(),
-        }
-    }
-
-    /// Which track receives live keyboard input, if any (devices that support it).
-    pub fn keyboard_track(&self) -> Option<usize> {
-        match self {
-            DevicePlayer::NintendoDs(p) => p.active_keyboard_track_num,
-            DevicePlayer::Gba(_) => None,
-        }
-    }
-
-    /// Routes live keyboard input to `track` (silencing that track's sequenced notes), or
-    /// back to the sequence with `None`. Currently a DS-only feature.
-    pub fn set_keyboard_track(&mut self, track: Option<usize>) {
-        if let DevicePlayer::NintendoDs(p) = self {
-            p.active_keyboard_track_num = track;
-        }
-    }
-
-    /// Starts a live keyboard note (DS only); events are appended to `events`.
-    pub fn keyboard_note_on(
-        &mut self,
-        track: usize,
-        note: u8,
-        velocity: i32,
-        duration: u32,
-        config: &SynthConfig,
-        events: &mut Vec<SynthEvent>,
-    ) {
-        if let DevicePlayer::NintendoDs(p) = self {
-            p.keyboard_note_on(track, note, velocity, duration, config, events);
-        }
-    }
-
-    /// Releases a live keyboard note (DS only).
-    pub fn keyboard_note_off(&mut self, track: usize, note: u8, events: &mut Vec<SynthEvent>) {
-        if let DevicePlayer::NintendoDs(p) = self {
-            p.keyboard_note_off(track, note, events);
         }
     }
 

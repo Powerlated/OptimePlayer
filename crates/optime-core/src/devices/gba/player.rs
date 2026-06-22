@@ -208,7 +208,6 @@ impl GbaPlayer {
                     events.push(SynthEvent::NoteReleased {
                         track,
                         key: common.midi_key,
-                        keyboard: false,
                     });
                 }
             }
@@ -228,22 +227,14 @@ impl GbaPlayer {
         for chan in self.ds_channels.iter_mut().flatten() {
             if matching(&chan.common) {
                 chan.common.stop = true;
-                events.push(SynthEvent::NoteReleased {
-                    track,
-                    key,
-                    keyboard: false,
-                });
+                events.push(SynthEvent::NoteReleased { track, key });
                 return;
             }
         }
         for chan in self.cgb_channels.iter_mut().flatten() {
             if matching(&chan.common) {
                 chan.common.stop = true;
-                events.push(SynthEvent::NoteReleased {
-                    track,
-                    key,
-                    keyboard: false,
-                });
+                events.push(SynthEvent::NoteReleased { track, key });
                 return;
             }
         }
@@ -259,7 +250,6 @@ impl GbaPlayer {
                     events.push(SynthEvent::NoteReleased {
                         track,
                         key: common.midi_key,
-                        keyboard: false,
                     });
                 }
             }
@@ -342,7 +332,6 @@ impl GbaPlayer {
                     track,
                     voice,
                     key: note.midi_key,
-                    keyboard: false,
                     sample,
                     pitch: VoicePitch::DataRateHz(rate),
                     volume: 0.0,
@@ -388,7 +377,6 @@ impl GbaPlayer {
                     track,
                     voice,
                     key: note.midi_key,
-                    keyboard: false,
                     sample,
                     pitch: VoicePitch::DataRateHz(cgb_data_rate(kind, freq)),
                     volume: 0.0,

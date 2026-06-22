@@ -34,7 +34,6 @@ struct ActiveNote {
     end_time: u32,
     adsr_state: AdsrState,
     adsr_timer: i32,
-    from_keyboard: bool,
     lfo_counter: i32,
     /// Shared LFO delay/phase counter (pokediamond's single `SNDLfo::delayCounter`).
     delay_counter: i32,
@@ -58,8 +57,6 @@ pub struct NdsPlayer {
     decoded_sample_archives: Vec<Option<Vec<Arc<Sample>>>>,
     squares: Vec<Arc<Sample>>,
     active_notes: Vec<ActiveNote>,
-    /// Which track receives live keyboard input, if any (its sequenced notes are silenced).
-    pub active_keyboard_track_num: Option<usize>,
     bpm_timer: u32,
     next_voice: VoiceId,
 }
@@ -135,7 +132,6 @@ impl NdsPlayer {
             decoded_sample_archives,
             squares,
             active_notes: Vec::new(),
-            active_keyboard_track_num: None,
             bpm_timer: 0,
             next_voice: 0,
         })
@@ -221,11 +217,6 @@ impl NdsPlayer {
     /// Starts a note from a [`MessageType::PlayNote`] message.
     fn play_note(&mut self, msg: Message, config: &SynthConfig, events: &mut Vec<SynthEvent>) {
         let t = msg.track_num;
-        // The active keyboard track is silenced by the sequence (live input drives it instead).
-        if self.active_keyboard_track_num == Some(t) && !msg.from_keyboard {
-            return;
-        }
-
         let midi_note = msg.param0;
         let velocity = msg.param1;
         let duration = msg.param2 as u32;
@@ -275,14 +266,13 @@ impl NdsPlayer {
             track: t,
             voice,
             key: midi_note as u8,
-            keyboard: msg.from_keyboard,
             sample,
             pitch: VoicePitch::Midi {
                 note: f64::from(midi_note),
                 sample_pitch_hz,
             },
             volume: initial_volume,
-            duration_ticks: (!msg.from_keyboard).then_some(duration),
+            duration_ticks: Some(duration),
         });
 
         self.active_notes.push(ActiveNote {
@@ -293,7 +283,6 @@ impl NdsPlayer {
             end_time: self.sequence.ticks_elapsed + duration,
             adsr_state: AdsrState::Attack,
             adsr_timer: -92544,
-            from_keyboard: msg.from_keyboard,
             lfo_counter: 0,
             delay_counter: 0,
             lfo_vol_db: 0,
@@ -301,48 +290,6 @@ impl NdsPlayer {
             decay_coefficient: region.decay_coefficient,
             sustain_level: region.sustain_level,
             release_coefficient: region.release_coefficient,
-        });
-    }
-
-    /// Triggers a note from live keyboard input on `track`. The note sounds until released.
-    pub fn keyboard_note_on(
-        &mut self,
-        track: usize,
-        note: u8,
-        velocity: i32,
-        duration: u32,
-        config: &SynthConfig,
-        events: &mut Vec<SynthEvent>,
-    ) {
-        if track >= TRACK_COUNT {
-            return;
-        }
-        let msg = Message {
-            from_keyboard: true,
-            track_num: track,
-            msg_type: MessageType::PlayNote,
-            param0: i32::from(note),
-            param1: velocity,
-            param2: duration as i32,
-            timestamp: self.sequence.ticks_elapsed,
-        };
-        self.play_note(msg, config, events);
-    }
-
-    /// Releases a previously-triggered keyboard note, moving it into its ADSR release stage.
-    pub fn keyboard_note_off(&mut self, track: usize, note: u8, events: &mut Vec<SynthEvent>) {
-        if track >= TRACK_COUNT {
-            return;
-        }
-        for entry in self.active_notes.iter_mut() {
-            if entry.track_num == track && entry.midi_note == note {
-                entry.adsr_state = AdsrState::Release;
-            }
-        }
-        events.push(SynthEvent::NoteReleased {
-            track,
-            key: note,
-            keyboard: true,
         });
     }
 
@@ -370,15 +317,11 @@ impl NdsPlayer {
             }
 
             // Begin release once the note's scheduled duration elapses.
-            if ticks >= entry.end_time
-                && !entry.from_keyboard
-                && entry.adsr_state != AdsrState::Release
-            {
+            if ticks >= entry.end_time && entry.adsr_state != AdsrState::Release {
                 entry.adsr_state = AdsrState::Release;
                 events.push(SynthEvent::NoteReleased {
                     track: t,
                     key: entry.midi_note,
-                    keyboard: false,
                 });
             }
 

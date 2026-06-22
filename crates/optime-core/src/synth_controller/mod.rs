@@ -38,8 +38,6 @@ pub struct SynthController {
     slot_owner: Vec<Vec<Option<SlotOwner>>>,
     /// `notes_on[track][note]` is 1 while a sequence note sounds (drives the visualizer).
     pub notes_on: Vec<[u8; 128]>,
-    /// As [`Self::notes_on`] but for live keyboard input.
-    pub notes_on_keyboard: Vec<[u8; 128]>,
     /// Count of sequence loops seen (used by callers to detect loop points).
     pub jumps: u32,
     /// Set when the song has ended and should fade out.
@@ -75,7 +73,6 @@ impl SynthController {
             synthesizers,
             slot_owner,
             notes_on: vec![[0u8; 128]; TRACK_COUNT],
-            notes_on_keyboard: vec![[0u8; 128]; TRACK_COUNT],
             jumps: 0,
             fading_start: false,
             feedback: TickFeedback::default(),
@@ -254,7 +251,6 @@ impl SynthController {
                 track,
                 voice,
                 key,
-                keyboard,
                 sample,
                 pitch,
                 volume,
@@ -267,9 +263,6 @@ impl SynthController {
                     self.feedback.ended_voices.push((track, old.voice));
                 }
                 self.notes_on[track][key as usize] = 1;
-                if keyboard {
-                    self.notes_on_keyboard[track][key as usize] = 1;
-                }
             }
             SynthEvent::VoiceVolume {
                 track,
@@ -311,16 +304,8 @@ impl SynthController {
                     }
                 }
             }
-            SynthEvent::NoteReleased {
-                track,
-                key,
-                keyboard,
-            } => {
-                if keyboard {
-                    self.notes_on_keyboard[track][key as usize] = 0;
-                } else {
-                    self.notes_on[track][key as usize] = 0;
-                }
+            SynthEvent::NoteReleased { track, key } => {
+                self.notes_on[track][key as usize] = 0;
             }
             SynthEvent::TrackPan { track, pan } => {
                 self.synthesizers[track].set_pan(pan, config);
@@ -338,43 +323,5 @@ impl SynthController {
         self.slot_owner[track]
             .iter()
             .position(|o| o.is_some_and(|o| o.voice == voice))
-    }
-
-    /// Which track receives live keyboard input, if any.
-    pub fn keyboard_track(&self) -> Option<usize> {
-        self.player.keyboard_track()
-    }
-
-    /// Routes live keyboard input to `track` (or back to the sequence with `None`).
-    pub fn set_keyboard_track(&mut self, track: Option<usize>) {
-        self.player.set_keyboard_track(track);
-    }
-
-    /// Triggers a live keyboard note. The note sounds until released.
-    pub fn play_keyboard_note(
-        &mut self,
-        track: usize,
-        note: u8,
-        velocity: i32,
-        duration: u32,
-        config: &SynthConfig,
-    ) {
-        let mut events = std::mem::take(&mut self.events);
-        self.player
-            .keyboard_note_on(track, note, velocity, duration, config, &mut events);
-        for event in events.drain(..) {
-            self.apply_event(event, config);
-        }
-        self.events = events;
-    }
-
-    /// Releases a previously-triggered keyboard note (it enters its release stage).
-    pub fn release_keyboard_note(&mut self, track: usize, note: u8, config: &SynthConfig) {
-        let mut events = std::mem::take(&mut self.events);
-        self.player.keyboard_note_off(track, note, &mut events);
-        for event in events.drain(..) {
-            self.apply_event(event, config);
-        }
-        self.events = events;
     }
 }

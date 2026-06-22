@@ -175,14 +175,12 @@ impl Sequence {
     fn send_message(
         &mut self,
         idx: usize,
-        from_keyboard: bool,
         msg_type: MessageType,
         param0: i32,
         param1: i32,
         param2: i32,
     ) {
         self.message_buffer.insert(Message {
-            from_keyboard,
             track_num: idx,
             msg_type,
             param0,
