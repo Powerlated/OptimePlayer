@@ -187,14 +187,8 @@ pub struct Persisted {
     pub bass_mono_freq: f32,
     pub tuning_choice: usize,
     pub pure_tonic: i32,
-    /// Nintendo DS resampling settings.
-    pub nds_resample: ResampleSettings,
-    /// GBA resampling settings.
-    pub gba_resample: ResampleSettings,
-    /// Nintendo DS master high-shelf EQ.
-    pub nds_shelf: ShelfSettings,
-    /// GBA master high-shelf EQ.
-    pub gba_shelf: ShelfSettings,
+    pub resample: ResampleSettings,
+    pub shelf: ShelfSettings,
     /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
     pub delay_smoothing_choice: usize,
     /// How the song list is sorted.
@@ -218,10 +212,8 @@ impl Default for Persisted {
             bass_mono_freq: d::BASS_MONO_FREQ_HZ,
             tuning_choice: d::TUNING_CHOICE,
             pure_tonic: d::PURE_TONIC,
-            nds_resample: ResampleSettings::default(),
-            gba_resample: ResampleSettings::default(),
-            nds_shelf: ShelfSettings::default(),
-            gba_shelf: ShelfSettings::default(),
+            resample: ResampleSettings::default(),
+            shelf: ShelfSettings::default(),
             delay_smoothing_choice: d::DELAY_SMOOTHING_CHOICE,
             sort_mode: d::SORT_MODE,
             sort_descending: d::SORT_DESCENDING,

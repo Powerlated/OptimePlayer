@@ -12,9 +12,7 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
-use crate::library::{
-    Library, Persisted, RepeatMode, ResampleSettings, ShelfSettings, SortMode, TrackRef,
-};
+use crate::library::{Persisted, RepeatMode, ResampleSettings, ShelfSettings, SortMode, TrackRef};
 use crate::piano_roll::PianoRoll;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
@@ -119,7 +117,6 @@ pub struct OptimeApp {
     // UI mirrors of [`SynthConfig`].
     track_enables: [bool; TRACK_COUNT],
 
-
     /// Saved state that persists across sessions
     p: Persisted,
 
@@ -196,7 +193,7 @@ impl OptimeApp {
         #[cfg(not(target_arch = "wasm32"))]
         let track = p.last_track.clone();
 
-                let mut app = Self {
+        let mut app = Self {
             audio,
             audio_failed: false,
             sample_rate,
@@ -367,24 +364,6 @@ impl OptimeApp {
         matches!(self.archives.get(idx), Some(SoundData::Gba(_)))
     }
 
-    /// The resampling settings of the active device.
-    fn active_resample(&self) -> &ResampleSettings {
-        if self.active_device_is_gba() {
-            &self.p.gba_resample
-        } else {
-            &self.p.nds_resample
-        }
-    }
-
-    /// The master high-shelf EQ settings of the active device.
-    fn active_shelf(&self) -> &ShelfSettings {
-        if self.active_device_is_gba() {
-            &self.p.gba_shelf
-        } else {
-            &self.p.nds_shelf
-        }
-    }
-
     /// The active synth config built from the UI mirrors.
     fn config(&self) -> SynthConfig {
         let tuning = if self.p.tuning_choice == 0 {
@@ -394,7 +373,7 @@ impl OptimeApp {
                 tonic: self.p.pure_tonic,
             }
         };
-        let rs = self.active_resample();
+        let rs = self.p.resample.clone();
         let half_taps = (rs.sinc_taps / 2).max(1);
         let resample = match rs.choice {
             1 => ResampleMode::Linear,
@@ -408,7 +387,7 @@ impl OptimeApp {
         };
         // Pop smoothing is a crunchy-mode option; the other modes keep the hardware edges.
         let smooth_psg_pops = rs.smooth_psg_pops && rs.choice == 2;
-        let sh = self.active_shelf();
+        let sh = self.p.shelf.clone();
         let high_shelf = HighShelf {
             enabled: sh.enabled,
             order: sh.order,
@@ -1033,7 +1012,8 @@ impl OptimeApp {
             };
             let liked = self.p.library.is_liked(&track);
             let in_playlist = self
-                .p.library
+                .p
+                .library
                 .playlists
                 .iter()
                 .any(|pl| pl.tracks.iter().any(|x| x.same_song(&track)));
@@ -1316,9 +1296,16 @@ impl OptimeApp {
     /// The synthesis settings (shared between the desktop side panel and the mobile tab).
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Settings");
-        ui.checkbox(&mut self.p.stereo_separation, "Stereo separation");
+        ui.checkbox(
+            &mut self.p.stereo_separation,
+            "Stereo separation: Apply a stereo widener to panned instruments",
+        );
         ui.add_enabled_ui(self.p.stereo_separation, |ui| {
-            ui.checkbox(&mut self.p.force_stereo_separation, "Force stereo separation");
+            ui.checkbox(
+                &mut self.p.force_stereo_separation,
+                "Force stereo separation: Apply a contrived stereo widener to instruments that are center-panned",
+            );
+            ui.label("Stereo widener smoothing (anti-pop & clicks)");
             egui::ComboBox::from_id_salt("delay_smoothing")
                 .selected_text(match self.p.delay_smoothing_choice {
                     1 => "No delay change during notes",
@@ -1332,10 +1319,10 @@ impl OptimeApp {
                         1,
                         "No delay change during notes",
                     )
-                    .on_hover_text(
-                        "Defer widening-delay changes until the track is silent, so they \
+                        .on_hover_text(
+                            "Defer widening-delay changes until the track is silent, so they \
                          never pop in the middle of a playing note.",
-                    );
+                        );
                 });
             ui.checkbox(&mut self.p.bass_mono, "Keep bass centered");
             ui.horizontal(|ui| {
@@ -1346,10 +1333,10 @@ impl OptimeApp {
                         .suffix(" Hz")
                         .logarithmic(true),
                 )
-                .on_hover_text(
-                    "Frequencies below this stay glued to the center; \
+                    .on_hover_text(
+                        "Frequencies below this stay glued to the center; \
                      mids and treble are widened.",
-                );
+                    );
             });
         });
         ui.separator();
@@ -1357,104 +1344,95 @@ impl OptimeApp {
         // console the current song plays on, so e.g. the DS can stay Crunchy sinc while the GBA
         // plays Clean sinc.
         let is_gba = self.active_device_is_gba();
-        ui.label(if is_gba {
-            "Resampling (GBA)"
-        } else {
-            "Resampling (Nintendo DS)"
+        ui.label("Resampling");
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("resample")
+                .selected_text(match self.p.resample.choice {
+                    1 => "Linear",
+                    2 => "Sinc – output Nyquist (crunch)",
+                    3 => "Sinc – sample Nyquist (clean)",
+                    _ => "Nearest neighbour",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.p.resample.choice, 0, "Nearest neighbour");
+                    ui.selectable_value(&mut self.p.resample.choice, 1, "Linear");
+                    ui.selectable_value(
+                        &mut self.p.resample.choice,
+                        2,
+                        "Sinc – output Nyquist (crunch)",
+                    );
+                    ui.selectable_value(
+                        &mut self.p.resample.choice,
+                        3,
+                        "Sinc – sample Nyquist (clean)",
+                    );
+                });
         });
-        {
-            let rs = if is_gba {
-                &mut self.p.gba_resample
-            } else {
-                &mut self.p.nds_resample
-            };
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("resample")
-                    .selected_text(match rs.choice {
-                        1 => "Linear",
-                        2 => "Sinc – output Nyquist (crunch)",
-                        3 => "Sinc – sample Nyquist (clean)",
-                        _ => "Nearest neighbour",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut rs.choice, 0, "Nearest neighbour");
-                        ui.selectable_value(&mut rs.choice, 1, "Linear");
-                        ui.selectable_value(&mut rs.choice, 2, "Sinc – output Nyquist (crunch)");
-                        ui.selectable_value(&mut rs.choice, 3, "Sinc – sample Nyquist (clean)");
-                    });
-            });
-            // Only the options of the selected mode are shown.
-            if rs.choice >= 2 {
-                ui.add(
-                    egui::Slider::new(&mut rs.sinc_taps, 4..=128)
-                        .step_by(2.0)
-                        .text("Sinc taps")
-                        .logarithmic(false),
-                )
-                .on_hover_text(
-                    "Number of source samples the kernel spans — fixed regardless of pitch, \
+        // Only the options of the selected mode are shown.
+        if self.p.resample.choice >= 2 {
+            ui.add(
+                egui::Slider::new(&mut self.p.resample.sinc_taps, 4..=128)
+                    .step_by(2.0)
+                    .text("Sinc taps")
+                    .logarithmic(false),
+            )
+            .on_hover_text(
+                "Number of source samples the kernel spans — fixed regardless of pitch, \
                      so CPU cost is constant per voice. More taps → sharper cutoff and better \
                      stopband rejection, at higher CPU cost.",
-                );
-            }
-            if rs.choice == 2 {
-                ui.add(
-                    egui::Slider::new(&mut rs.psg_cutoff_hz, 1000..=ResampleMode::CUTOFF_OFF_HZ)
-                        .text("PSG cutoff")
-                        .suffix(" Hz")
-                        .logarithmic(true),
+            );
+        }
+        if self.p.resample.choice == 2 {
+            ui.add(
+                egui::Slider::new(
+                    &mut self.p.resample.psg_cutoff_hz,
+                    1000..=ResampleMode::CUTOFF_OFF_HZ,
                 )
-                .on_hover_text("Low-pass cutoff for the PSG (square/wave/noise) channels.");
-                ui.add(
-                    egui::Slider::new(
-                        &mut rs.sampler_cutoff_hz,
-                        1000..=ResampleMode::CUTOFF_OFF_HZ,
-                    )
-                    .text("Sampler cutoff")
-                    .suffix(" Hz")
-                    .logarithmic(true),
+                .text("PSG cutoff")
+                .suffix(" Hz")
+                .logarithmic(true),
+            )
+            .on_hover_text("Low-pass cutoff for the PSG (square/wave/noise) channels.");
+            ui.add(
+                egui::Slider::new(
+                    &mut self.p.resample.sampler_cutoff_hz,
+                    1000..=ResampleMode::CUTOFF_OFF_HZ,
                 )
-                .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
-                ui.checkbox(&mut rs.smooth_psg_pops, "Smooth PSG pops")
-                    .on_hover_text(
-                        "Slew PSG channel gains over ~2 ms so notes turning abruptly on and \
+                .text("Sampler cutoff")
+                .suffix(" Hz")
+                .logarithmic(true),
+            )
+            .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
+            ui.checkbox(&mut self.p.resample.smooth_psg_pops, "Smooth PSG pops")
+                .on_hover_text(
+                    "Slew PSG channel gains over ~2 ms so notes turning abruptly on and \
                          off don't click. Unchecked preserves the hardware's hard edges.",
-                    );
-            }
+                );
         }
         ui.separator();
         // Master high-shelf EQ — per device, like the resampling settings above.
-        ui.label(if is_gba {
-            "High-shelf EQ (GBA)"
-        } else {
-            "High-shelf EQ (Nintendo DS)"
-        });
+        ui.label("High-shelf EQ");
         {
-            let sh = if is_gba {
-                &mut self.p.gba_shelf
-            } else {
-                &mut self.p.nds_shelf
-            };
-            ui.checkbox(&mut sh.enabled, "Enable high-shelf")
+            ui.checkbox(&mut self.p.shelf.enabled, "Enable high-shelf")
                 .on_hover_text(
                     "A master high-shelf EQ on the final mix. Negative gain tames harsh highs / \
                  click brightness; positive adds air.",
                 );
-            ui.add_enabled_ui(sh.enabled, |ui| {
+            ui.add_enabled_ui(self.p.shelf.enabled, |ui| {
                 ui.add(
-                    egui::Slider::new(&mut sh.gain_db, -24.0..=24.0)
+                    egui::Slider::new(&mut self.p.shelf.gain_db, -24.0..=24.0)
                         .text("Gain")
                         .suffix(" dB"),
                 );
                 ui.add(
-                    egui::Slider::new(&mut sh.cutoff_hz, 500.0..=16000.0)
+                    egui::Slider::new(&mut self.p.shelf.cutoff_hz, 500.0..=16000.0)
                         .text("Cutoff")
                         .suffix(" Hz")
                         .logarithmic(true),
                 );
-                ui.add(egui::Slider::new(&mut sh.q, 0.1..=2.0).text("Q"));
+                ui.add(egui::Slider::new(&mut self.p.shelf.q, 0.1..=2.0).text("Q"));
                 ui.add(
-                    egui::Slider::new(&mut sh.order, 2..=16)
+                    egui::Slider::new(&mut self.p.shelf.order, 2..=16)
                         .step_by(2.0)
                         .text("Order"),
                 )
@@ -2226,4 +2204,3 @@ fn save_bytes(filename: &str, bytes: &[u8]) {
         crate::web::download(filename, bytes);
     }
 }
-

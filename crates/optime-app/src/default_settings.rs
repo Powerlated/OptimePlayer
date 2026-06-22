@@ -25,7 +25,7 @@ pub const SORT_DESCENDING: bool = false;
 
 // ── Stereo / mixing ─────────────────────────────────────────────────────────
 pub const STEREO_SEPARATION: bool = true;
-pub const FORCE_STEREO_SEPARATION: bool = true;
+pub const FORCE_STEREO_SEPARATION: bool = false;
 pub const BASS_MONO: bool = true;
 /// Crossover below which the stereo expander keeps the signal centered.
 pub const BASS_MONO_FREQ_HZ: f32 = 200.0;
