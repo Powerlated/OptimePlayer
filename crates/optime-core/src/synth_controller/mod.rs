@@ -59,9 +59,8 @@ impl SynthController {
     /// Returns `None` if the song is missing or malformed.
     pub fn new(sample_rate: f64, data: &SoundData, song_id: u32) -> Option<SynthController> {
         let player = data.make_player(song_id)?;
-        let chain = player.hardware_chain();
         let synthesizers: Vec<_> = (0..TRACK_COUNT)
-            .map(|_| SampleSynthesizer::new(sample_rate, 16, chain))
+            .map(|_| SampleSynthesizer::new(sample_rate, 16))
             .collect();
         let slot_owner = synthesizers
             .iter()

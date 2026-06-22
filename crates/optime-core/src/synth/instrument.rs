@@ -3,10 +3,8 @@
 
 use std::sync::Arc;
 
-use crate::devices::{HardwareChain, VoicePitch};
-use crate::dsp::resample::{
-    gather_sinc, AuthenticState, ChainParams, GatherSource, Reconstruction, ResampleTables,
-};
+use crate::devices::VoicePitch;
+use crate::dsp::resample::{gather_sinc, GatherSource, ResampleTables};
 use crate::sample::{ResampleMode, Sample};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
 
@@ -32,10 +30,6 @@ pub struct SampleInstrument {
     gain: f64,
     /// Set by [`Self::begin_fade_out`]: the voice slews to silence and then stops itself.
     fading_out: bool,
-    /// The device's hardware output chain, reproduced by [`ResampleMode::Authentic`].
-    pub chain: HardwareChain,
-    /// Running chain state for the Authentic mode (reset by [`Self::begin_note`]).
-    authentic: AuthenticState,
     /// Fractional sample position.
     pub sample_t: f64,
     /// Whether a looping voice has wrapped past the sample end at least once. Once it has, the
@@ -65,12 +59,6 @@ impl SampleInstrument {
             playing: false,
             gain: 1.0,
             fading_out: false,
-            // The DS-style chain; SampleSynthesizer overwrites this with the device's own.
-            chain: HardwareChain {
-                mixer_hz: None,
-                dac_hz: 32768.0,
-            },
-            authentic: AuthenticState::new(),
             sample_t: 0.0,
             wrapped: false,
             finetune: 0.0,
@@ -90,7 +78,6 @@ impl SampleInstrument {
             volume
         };
         self.fading_out = false;
-        self.authentic = AuthenticState::new();
     }
 
     /// Starts a short fade to silence; the voice flips [`Self::playing`] off once it lands.
@@ -111,19 +98,6 @@ impl SampleInstrument {
         tables: Option<&ResampleTables>,
         smooth_pops: bool,
     ) {
-        let chain_mode = match mode {
-            ResampleMode::Authentic { cutoff_hz, .. } => Some((cutoff_hz, false)),
-            ResampleMode::CrunchyAuthentic { cutoff_hz, .. } => Some((cutoff_hz, true)),
-            _ => None,
-        };
-        if let Some((cutoff_hz, crunchy)) = chain_mode {
-            if let Some(tbl) = tables {
-                return self.advance_authentic(tbl, smooth_pops, cutoff_hz, crunchy);
-            }
-            // Tables not yet built; fall back to nearest for this sample.
-            return self.advance(ResampleMode::NearestNeighbor, None, smooth_pops);
-        }
-
         // r = source samples advanced per output sample (pitch-shifted playback speed).
         let r = self.freq_ratio * self.sample.sample_rate * self.inv_sample_rate;
         self.sample_t += r;
@@ -210,58 +184,6 @@ impl SampleInstrument {
             }
         };
 
-        self.output = result * self.gain;
-    }
-
-    /// The Authentic-mode body of [`Self::advance`]: one output sample through the device's
-    /// hardware chain (see [`AuthenticState`]). The chain advances even while fully attenuated
-    /// so envelope re-opens and one-shot-end detection stay seamless.
-    fn advance_authentic(
-        &mut self,
-        tables: &ResampleTables,
-        smooth_pops: bool,
-        cutoff_hz: u32,
-        crunchy: bool,
-    ) {
-        // A user switching an already-sounding voice into Authentic mode mid-note: continue
-        // from the current source position instead of restarting the waveform.
-        if self.authentic.is_fresh() && self.sample_t > 0.0 {
-            self.authentic.seed(self.sample_t);
-        }
-
-        // The same gain resolution as the standard path.
-        let target = if self.fading_out { 0.0 } else { self.volume };
-        self.gain = if smooth_pops && self.sample.is_psg_square {
-            slew_toward(self.gain, target, self.inv_sample_rate / POP_SLEW_SECONDS)
-        } else {
-            target
-        };
-        if self.fading_out && self.gain == 0.0 {
-            self.playing = false;
-        }
-
-        // PSG voices bypass the software mixer on every device — and the crunchy reconstruction
-        // only changes the sampled-voice path, so a PSG runs the plain nearest-neighbour chain
-        // either way.
-        let is_psg = self.sample.is_psg_square;
-        let params = ChainParams {
-            chain: HardwareChain {
-                mixer_hz: if is_psg { None } else { self.chain.mixer_hz },
-                dac_hz: self.chain.dac_hz,
-            },
-            cutoff_hz,
-            recon: if crunchy && !is_psg {
-                Reconstruction::Crunchy
-            } else {
-                Reconstruction::HardwareHold
-            },
-            freq_ratio: self.freq_ratio,
-            inv_sample_rate: self.inv_sample_rate,
-        };
-        let result = self
-            .authentic
-            .advance(&self.sample, &params, tables, self.gain != 0.0);
-        self.sample_t = self.authentic.src_pos();
         self.output = result * self.gain;
     }
 
@@ -429,11 +351,6 @@ fn effective_gather(mode: ResampleMode, is_psg: bool) -> EffectiveGather {
     match mode {
         ResampleMode::NearestNeighbor => EffectiveGather::Nearest,
         ResampleMode::Linear => EffectiveGather::Linear,
-        // The chain modes never reach the standard gather: `advance` branches into the chain
-        // first, and `advance_block` routes any non-Sinc resolution through per-sample `advance`.
-        ResampleMode::Authentic { .. } | ResampleMode::CrunchyAuthentic { .. } => {
-            EffectiveGather::Nearest
-        }
         ResampleMode::SincSampleNyquist { .. } => EffectiveGather::Sinc {
             step_mode: is_psg,
             cutoff_hz: None,
@@ -780,256 +697,6 @@ mod tests {
                 "is_psg={is_psg}: the other kind's slider must not apply: {a_other} vs {a_open}"
             );
         }
-    }
-
-    #[test]
-    fn authentic_psg_is_bandlimited_zoh_at_dac_rate() {
-        // A PSG voice through the Authentic chain is nearest-neighbour *sampled* into the 32768 Hz
-        // DAC ring, but the DAC's physical zero-order hold is then reproduced by a band-limited
-        // step reconstruction — a clean band-limited ZOH, NOT a raw nearest-neighbour staircase.
-        // With out == dac the final stage is the band-limited step gather of the DAC-rate stream;
-        // pin the chain output against that reference and confirm it departs from raw nearest.
-        use crate::dsp::resample::{resample_sinc, tap_window};
-        let out_rate = 32768.0;
-        let dac = 32768.0;
-        let src_rate = 16384.0;
-        let s = psg_sine_sample(16, 8, src_rate);
-        let half_taps = 16;
-        let tables = ResampleTables::new(half_taps);
-        let n = 512;
-
-        let authentic = run_gba_chain(
-            out_rate,
-            s.clone(),
-            ResampleMode::Authentic {
-                half_taps,
-                cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
-            },
-            &tables,
-            n,
-        );
-
-        // Reference: the nearest-neighbour DAC-rate stream (advance-then-read, like the chain),
-        // band-limited-ZOH reconstructed at ratio 1.
-        let data = &s.data;
-        let len = data.len() as i64;
-        let r = src_rate / dac; // source samples per DAC sample (freq_ratio 1)
-        let mut src_pos = 0.0;
-        let dac_stream: Vec<f32> = (0..n as i64 + half_taps as i64 + 2)
-            .map(|_| {
-                src_pos += r;
-                data[(src_pos.floor() as i64).rem_euclid(len) as usize]
-            })
-            .collect();
-        // out == dac ⇒ fc = output Nyquist = 0.5 (the off cutoff sits above it); t_dac = i.
-        let mut differs = 0;
-        for i in half_taps..n {
-            let (k_lo, k_hi) = tap_window(&tables, i as f64);
-            let slice = &dac_stream[k_lo as usize..=k_hi as usize];
-            let want = resample_sinc(&tables, slice, i as f64, 0.5, true);
-            assert!(
-                (authentic[i] - want).abs() < 1e-6,
-                "sample {i}: authentic={}, band-limited ZOH reference={want}",
-                authentic[i]
-            );
-            // The DAC sample at this integer position (what plain nearest would emit).
-            if (authentic[i] - f64::from(dac_stream[i])).abs() > 1e-4 {
-                differs += 1;
-            }
-        }
-        assert!(
-            differs > 50,
-            "band-limited ZOH must depart from the raw nearest-neighbour staircase (differs={differs})"
-        );
-    }
-
-    #[test]
-    fn authentic_chain_matches_reference_stages() {
-        // A sampled (non-PSG) voice with the output rate equal to the DAC rate: the Authentic
-        // output must equal the two integer-rate hardware stages computed directly — linear
-        // interpolation onto the 13379 Hz mixer grid, nearest-neighbour hold onto the
-        // 32768 Hz DAC grid (the reconstruction is transparent at ratio 1).
-        let out_rate = 32768.0;
-        let (mixer, dac) = (13379.0, 32768.0);
-        let src_rate = 8192.0;
-        let sample = sine_sample(16, 8, src_rate); // looping, loop_point 0
-        let tables = ResampleTables::new(16);
-        let n = 512usize;
-
-        let mut instr = SampleInstrument::new(out_rate, sample.clone());
-        instr.chain = HardwareChain {
-            mixer_hz: Some(mixer),
-            dac_hz: dac,
-        };
-        instr.set_pitch(
-            VoicePitch::Midi {
-                note: 69.0,
-                sample_pitch_hz: 440.0,
-            },
-            TuningSystem::Equal,
-        );
-        instr.begin_note(1.0, false);
-        instr.playing = true;
-
-        // Reference chain (loop_point 0 ⇒ source reads are simply modulo the length).
-        let data = &sample.data;
-        let len = data.len() as i64;
-        let lerp = |pos: f64| -> f64 {
-            let i = pos.floor() as i64;
-            let frac = pos - i as f64;
-            let a = f64::from(data[(i.rem_euclid(len)) as usize]);
-            let b = f64::from(data[((i + 1).rem_euclid(len)) as usize]);
-            a + (b - a) * frac
-        };
-        let r_mix = src_rate / mixer; // freq_ratio = 1
-        let (mut src_pos, mut mix_acc, mut hold) = (0.0f64, 1.0f64, 0.0f64);
-
-        for i in 0..n {
-            instr.advance(
-                ResampleMode::Authentic {
-                    half_taps: 16,
-                    cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
-                },
-                Some(&tables),
-                false,
-            );
-            mix_acc += mixer / dac;
-            while mix_acc >= 1.0 {
-                mix_acc -= 1.0;
-                src_pos += r_mix;
-                hold = lerp(src_pos);
-            }
-            // The ring stores f32, so allow its rounding.
-            assert!(
-                (instr.output - hold).abs() < 1e-6,
-                "sample {i}: authentic={}, reference={hold}",
-                instr.output
-            );
-        }
-    }
-
-    /// A [`sine_sample`] flagged as a PSG square voice.
-    fn psg_sine_sample(period: usize, periods: usize, src_rate: f64) -> Arc<Sample> {
-        let len = period * periods;
-        let data: Vec<f32> = (0..len)
-            .map(|k| (2.0 * PI * k as f64 / period as f64).sin() as f32)
-            .collect();
-        let mut s = Sample::new(data, 440.0, src_rate, true, 0);
-        s.is_psg_square = true;
-        Arc::new(s)
-    }
-
-    /// Runs one GBA-chain voice (`mixer_hz = 13379`) for `n` output samples at `out_rate`.
-    fn run_gba_chain(
-        out_rate: f64,
-        sample: Arc<Sample>,
-        mode: ResampleMode,
-        tables: &ResampleTables,
-        n: usize,
-    ) -> Vec<f64> {
-        let mut instr = SampleInstrument::new(out_rate, sample);
-        instr.chain = HardwareChain {
-            mixer_hz: Some(13379.0),
-            dac_hz: 32768.0,
-        };
-        instr.set_pitch(
-            VoicePitch::Midi {
-                note: 69.0,
-                sample_pitch_hz: 440.0,
-            },
-            TuningSystem::Equal,
-        );
-        instr.begin_note(1.0, false);
-        instr.playing = true;
-        (0..n)
-            .map(|_| {
-                instr.advance(mode, Some(tables), false);
-                instr.output
-            })
-            .collect()
-    }
-
-    #[test]
-    fn crunchy_authentic_psg_matches_authentic() {
-        // A PSG voice is untouched by the crunchy reconstruction (it bypasses the software mixer),
-        // so GBA Crunchy Authentic must produce bit-identical output to GBA Authentic for one.
-        let tables = ResampleTables::new(16);
-        let s = psg_sine_sample(16, 8, 16384.0);
-        let n = 512;
-        let auth = run_gba_chain(
-            32768.0,
-            s.clone(),
-            ResampleMode::Authentic {
-                half_taps: 16,
-                cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
-            },
-            &tables,
-            n,
-        );
-        let crunchy = run_gba_chain(
-            32768.0,
-            s,
-            ResampleMode::CrunchyAuthentic {
-                half_taps: 16,
-                cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
-            },
-            &tables,
-            n,
-        );
-        for (i, (a, b)) in auth.iter().zip(&crunchy).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-12,
-                "sample {i}: authentic={a}, crunchy={b}"
-            );
-        }
-    }
-
-    #[test]
-    fn crunchy_authentic_reconstructs_sampled_voice() {
-        // A sampled (non-PSG) sine through the crunchy chain must still pass its fundamental, and
-        // it must differ from the hardware-hold (linear + NN) chain — proving the sinc
-        // reconstruction and band-limited ZOH stages are actually engaged for sampled voices.
-        let out_rate = 32768.0;
-        let src_rate = 8192.0;
-        let sample = sine_sample(16, 8, src_rate); // 512 Hz fundamental
-        let tables = ResampleTables::new(32);
-        let warmup = 128;
-        let n = 2048; // 512 Hz lands on a bin (rate/n = 16 Hz)
-        let off = ResampleMode::CUTOFF_OFF_HZ;
-        let crunchy = run_gba_chain(
-            out_rate,
-            sample.clone(),
-            ResampleMode::CrunchyAuthentic {
-                half_taps: 32,
-                cutoff_hz: off,
-            },
-            &tables,
-            warmup + n,
-        );
-        let hardware = run_gba_chain(
-            out_rate,
-            sample,
-            ResampleMode::Authentic {
-                half_taps: 32,
-                cutoff_hz: off,
-            },
-            &tables,
-            warmup + n,
-        );
-        let fund = amp_at(&crunchy[warmup..], 512.0, out_rate);
-        assert!(
-            fund > 0.8,
-            "crunchy chain should pass the fundamental: {fund}"
-        );
-        let max_diff = crunchy
-            .iter()
-            .zip(&hardware)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0, f64::max);
-        assert!(
-            max_diff > 1e-6,
-            "crunchy reconstruction should differ from the hardware-hold chain: {max_diff}"
-        );
     }
 
     #[test]

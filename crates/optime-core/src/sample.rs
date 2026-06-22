@@ -32,30 +32,6 @@ pub enum ResampleMode {
         /// Low-pass cutoff (Hz) for sampled (DirectSound) voices.
         sampler_cutoff_hz: u32,
     },
-    /// Reproduce the device's fixed-rate hardware output chain
-    /// ([`HardwareChain`](crate::devices::HardwareChain)): sampled voices are
-    /// linear-interpolated to the software-mixer rate (GBA: 13379 Hz), nearest-neighbour held at
-    /// the DAC rate (32768 Hz), and properly rate-converted to the output rate; PSG voices are
-    /// nearest-neighbour sampled straight at the DAC rate. Indistinguishable from hardware
-    /// output by construction.
-    Authentic {
-        /// Half-width of the final-stage reconstruction kernel in DAC samples (≥ 1).
-        half_taps: usize,
-        /// Extra low-pass cutoff (Hz) applied by the final reconstruction stage
-        /// ([`CUTOFF_OFF_HZ`](Self::CUTOFF_OFF_HZ) = no extra filtering).
-        cutoff_hz: u32,
-    },
-    /// Like [`Authentic`](Self::Authentic), but the sampled-voice chain is reconstructed instead
-    /// of point-held: the source is band-limited-sinc resampled up to the software-mixer rate
-    /// (GBA: 13379 Hz) and a band-limited zero-order hold takes that to the DAC rate (32768 Hz),
-    /// before the same final rate conversion to the output. PSG voices are unchanged
-    /// (nearest-neighbour at the DAC rate).
-    CrunchyAuthentic {
-        /// Half-width of every kernel in the chain (≥ 1).
-        half_taps: usize,
-        /// Extra low-pass cutoff (Hz) applied by the final reconstruction stage.
-        cutoff_hz: u32,
-    },
 }
 
 impl ResampleMode {

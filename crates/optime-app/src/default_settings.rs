@@ -39,7 +39,7 @@ pub const TUNING_CHOICE: usize = 0;
 pub const PURE_TONIC: i32 = 0;
 
 // ── Resampling (per device) ──────────────────────────────────────────────────
-/// Resample mode index: 0=Nearest, 1=Linear, 2=Crunchy sinc, 3=Clean sinc, 4=Authentic.
+/// Resample mode index: 0=Nearest, 1=Linear, 2=Crunchy sinc, 3=Clean sinc.
 pub const RESAMPLE_CHOICE: usize = 2;
 /// Total source-tap count for the sinc/reconstruction kernel.
 pub const SINC_TAPS: usize = 32;
@@ -48,10 +48,6 @@ pub const SINC_TAPS: usize = 32;
 pub const PSG_CUTOFF_HZ: u32 = 15_000;
 /// Listenable default low-pass cutoff (Hz) for sampled (DirectSound/SWAR) voices.
 pub const SAMPLER_CUTOFF_HZ: u32 = 15_000;
-/// Listenable default low-pass cutoff (Hz) for the GBA Authentic reconstruction stage.
-pub const AUTHENTIC_CUTOFF_HZ: u32 = 15_000;
-/// Listenable default low-pass cutoff (Hz) for the GBA Crunchy Authentic reconstruction stage.
-pub const CRUNCHY_AUTHENTIC_CUTOFF_HZ: u32 = 15_000;
 /// Preserve the hardware's hard PSG on/off edges by default (don't slew the pops).
 pub const SMOOTH_PSG_POPS: bool = false;
 

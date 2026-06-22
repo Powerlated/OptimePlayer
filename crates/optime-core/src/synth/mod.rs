@@ -6,8 +6,7 @@
 //! - [`synthesizer`] — [`SampleSynthesizer`], the per-track polyphonic voice pool + stereo stage.
 //! - [`delay`] — the Haas-effect [`DelayLine`].
 //!
-//! The resampling front-end ([`gather_sinc`](crate::resample::gather_sinc)) and the Authentic
-//! hardware-chain state ([`AuthenticState`](crate::resample::AuthenticState)) live in
+//! The resampling front-end ([`gather_sinc`](crate::resample::gather_sinc)) lives in
 //! [`crate::resample`].
 
 mod delay;

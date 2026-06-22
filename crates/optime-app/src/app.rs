@@ -467,14 +467,6 @@ impl OptimeApp {
                 sampler_cutoff_hz: rs.sampler_cutoff_hz,
             },
             3 => ResampleMode::SincSampleNyquist { half_taps },
-            4 => ResampleMode::Authentic {
-                half_taps,
-                cutoff_hz: rs.authentic_cutoff_hz,
-            },
-            5 => ResampleMode::CrunchyAuthentic {
-                half_taps,
-                cutoff_hz: rs.crunchy_authentic_cutoff_hz,
-            },
             _ => ResampleMode::NearestNeighbor,
         };
         // Pop smoothing is a crunchy-mode option; the other modes keep the hardware edges.
@@ -1425,8 +1417,8 @@ impl OptimeApp {
         });
         ui.separator();
         // Resampling settings are per device: the section edits the settings of whichever
-        // console the current song plays on, so e.g. the DS can stay Crunchy while the GBA
-        // plays Authentic.
+        // console the current song plays on, so e.g. the DS can stay Crunchy sinc while the GBA
+        // plays Clean sinc.
         let is_gba = self.active_device_is_gba();
         ui.label(if is_gba {
             "Resampling (GBA)"
@@ -1445,8 +1437,6 @@ impl OptimeApp {
                         1 => "Linear",
                         2 => "Sinc – output Nyquist (crunch)",
                         3 => "Sinc – sample Nyquist (clean)",
-                        4 => "GBA Authentic (GBA hardware chain)",
-                        5 => "GBA Crunchy Authentic",
                         _ => "Nearest neighbour",
                     })
                     .show_ui(ui, |ui| {
@@ -1454,25 +1444,6 @@ impl OptimeApp {
                         ui.selectable_value(&mut rs.choice, 1, "Linear");
                         ui.selectable_value(&mut rs.choice, 2, "Sinc – output Nyquist (crunch)");
                         ui.selectable_value(&mut rs.choice, 3, "Sinc – sample Nyquist (clean)");
-                        ui.selectable_value(
-                            &mut rs.choice,
-                            4,
-                            "GBA Authentic (GBA hardware chain)",
-                        )
-                        .on_hover_text(
-                            "Reproduce the console's output chain exactly: GBA DirectSound \
-                                 is linear-interpolated to the 13379 Hz mixer, \
-                                 nearest-neighbour held at the 32768 Hz DAC, then properly \
-                                 converted to the output rate; PSGs are nearest-neighbour \
-                                 sampled at the DAC rate.",
-                        );
-                        ui.selectable_value(&mut rs.choice, 5, "GBA Crunchy Authentic")
-                            .on_hover_text(
-                                "The Authentic chain, but reconstructed: DirectSound is \
-                                 band-limited-sinc resampled to the 13379 Hz mixer and a \
-                                 band-limited zero-order hold takes it to the 32768 Hz DAC \
-                                 (instead of linear + nearest-hold). PSGs are unchanged.",
-                            );
                     });
             });
             // Only the options of the selected mode are shown.
@@ -1512,30 +1483,6 @@ impl OptimeApp {
                         "Slew PSG channel gains over ~2 ms so notes turning abruptly on and \
                          off don't click. Unchecked preserves the hardware's hard edges.",
                     );
-            }
-            if rs.choice == 4 {
-                ui.add(
-                    egui::Slider::new(
-                        &mut rs.authentic_cutoff_hz,
-                        1000..=ResampleMode::CUTOFF_OFF_HZ,
-                    )
-                    .text("Cutoff")
-                    .suffix(" Hz")
-                    .logarithmic(true),
-                )
-                .on_hover_text("Low-pass cutoff applied by the final reconstruction stage.");
-            }
-            if rs.choice == 5 {
-                ui.add(
-                    egui::Slider::new(
-                        &mut rs.crunchy_authentic_cutoff_hz,
-                        1000..=ResampleMode::CUTOFF_OFF_HZ,
-                    )
-                    .text("Cutoff")
-                    .suffix(" Hz")
-                    .logarithmic(true),
-                )
-                .on_hover_text("Low-pass cutoff applied by the final reconstruction stage.");
             }
         }
         ui.separator();

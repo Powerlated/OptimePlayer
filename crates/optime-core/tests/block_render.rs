@@ -90,19 +90,6 @@ fn fill_matches_next_sample_smoothed_psg_pops() {
 }
 
 #[test]
-fn fill_matches_next_sample_authentic() {
-    let config = SynthConfig {
-        resample: ResampleMode::Authentic {
-            half_taps: 8,
-            cutoff_hz: ResampleMode::CUTOFF_OFF_HZ,
-        },
-        stereo_separation: true,
-        ..SynthConfig::default()
-    };
-    assert_fill_matches_next_sample(&config, "authentic hardware chain");
-}
-
-#[test]
 fn fill_matches_next_sample_nearest() {
     let config = SynthConfig {
         resample: ResampleMode::NearestNeighbor,

@@ -111,11 +111,11 @@ impl Library {
 }
 
 /// Per-device resampling settings — each console keeps its own, so e.g. the DS can play
-/// Crunchy while the GBA plays Authentic.
+/// Crunchy sinc while the GBA plays Clean sinc.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ResampleSettings {
-    /// Mode index: 0=Nearest, 1=Linear, 2=Crunchy sinc, 3=Clean sinc, 4=Authentic.
+    /// Mode index: 0=Nearest, 1=Linear, 2=Crunchy sinc, 3=Clean sinc.
     pub choice: usize,
     /// Total source-tap count for the sinc/reconstruction kernel.
     pub sinc_taps: usize,
@@ -123,10 +123,6 @@ pub struct ResampleSettings {
     pub psg_cutoff_hz: u32,
     /// Crunchy-mode low-pass cutoff (Hz) for DirectSound/sampled voices.
     pub sampler_cutoff_hz: u32,
-    /// Authentic-mode low-pass cutoff (Hz) on the final reconstruction.
-    pub authentic_cutoff_hz: u32,
-    /// Crunchy-Authentic-mode low-pass cutoff (Hz) on the final reconstruction.
-    pub crunchy_authentic_cutoff_hz: u32,
     /// Crunchy-mode option: smooth out PSG on/off pops instead of preserving the clicks.
     pub smooth_psg_pops: bool,
 }
@@ -139,8 +135,6 @@ impl Default for ResampleSettings {
             sinc_taps: d::SINC_TAPS,
             psg_cutoff_hz: d::PSG_CUTOFF_HZ,
             sampler_cutoff_hz: d::SAMPLER_CUTOFF_HZ,
-            authentic_cutoff_hz: d::AUTHENTIC_CUTOFF_HZ,
-            crunchy_authentic_cutoff_hz: d::CRUNCHY_AUTHENTIC_CUTOFF_HZ,
             smooth_psg_pops: d::SMOOTH_PSG_POPS,
         }
     }
