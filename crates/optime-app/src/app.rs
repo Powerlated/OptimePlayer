@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use optime_core::{
-    DelaySmoothing, FsVisController, InstrumentResampleMode, PopSmoothing, SoundData,
-    SynthConfig, SynthController, TuningSystem,
+    DelaySmoothing, FsVisController, InstrumentResampleMode, PopSmoothing, SoundData, SynthConfig,
+    SynthController, TuningSystem,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -713,8 +713,7 @@ impl OptimeApp {
         self.overview_tex = None;
         #[cfg(not(target_arch = "wasm32"))]
         if self.current_song == Some(index) {
-            self.overview =
-                FsVisController::overview(&self.archives[archive_index], song_id);
+            self.overview = FsVisController::overview(&self.archives[archive_index], song_id);
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -748,10 +747,10 @@ impl OptimeApp {
     /// Drives the OS media-transport controls: lazily creates them once the window handle is
     /// available, applies any transport commands the user triggered (media keys / AirPods taps),
     /// then pushes the current track + playback state to the system "now playing" display.
-    fn handle_media_controls(&mut self, frame: &eframe::Frame) {
+    fn handle_media_controls(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if !self.media_tried {
             self.media_tried = true;
-            self.media = media_controls::MediaControls::new(frame);
+            self.media = media_controls::MediaControls::new(ctx, frame);
         }
         let Some(actions) = self.media.as_mut().map(|m| m.poll()) else {
             return;
@@ -1107,9 +1106,11 @@ impl OptimeApp {
         if self.overview_tex.is_none() {
             if let Some(ov) = &self.overview {
                 let img = crate::piano_roll::overview_image(ov, 1024, 72);
-                self.overview_tex =
-                    Some(ui.ctx()
-                        .load_texture("piano_overview", img, egui::TextureOptions::LINEAR));
+                self.overview_tex = Some(ui.ctx().load_texture(
+                    "piano_overview",
+                    img,
+                    egui::TextureOptions::LINEAR,
+                ));
             }
         }
 
@@ -1129,18 +1130,15 @@ impl OptimeApp {
             let frac = |t: f64| (t / total).clamp(0.0, 1.0) as f32;
             let x0 = bar.min.x + frac(vs) * bar.width();
             let x1 = bar.min.x + frac(ve) * bar.width();
-            let win = egui::Rect::from_min_max(egui::pos2(x0, bar.min.y), egui::pos2(x1, bar.max.y));
+            let win =
+                egui::Rect::from_min_max(egui::pos2(x0, bar.min.y), egui::pos2(x1, bar.max.y));
             painter.rect_filled(win, 0.0, egui::Color32::from_white_alpha(36));
             painter.rect_stroke(
                 win,
                 0.0,
                 egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(170)),
             );
-            painter.rect_stroke(
-                bar,
-                2.0,
-                egui::Stroke::new(1.0_f32, crate::theme::HAIRLINE),
-            );
+            painter.rect_stroke(bar, 2.0, egui::Stroke::new(1.0_f32, crate::theme::HAIRLINE));
         }
 
         // The current tempo marking, below the bar.
@@ -1889,19 +1887,17 @@ impl OptimeApp {
         };
         painter.rect_filled(rect, 12.0, bg);
 
-        // Animated EQ bars (frozen when paused).
+        // A small EQ-bar "now playing" indicator. Deliberately static (a fixed silhouette when
+        // playing, flat when paused) rather than animated: the mini-player only appears on the
+        // non-piano-roll tabs, which idle at 1 Hz to save battery, so animating it here would
+        // force continuous repaints and defeat that.
         let accent = crate::theme::ACCENT;
-        let t = ui.input(|i| i.time);
         let playing = !self.paused;
         let bar_w = 4.0;
         let max_h = height - 16.0;
-        for b in 0..4 {
-            let phase = b as f64 * 1.3;
-            let level = if playing {
-                ((t * (4.0 + b as f64 * 0.9) + phase).sin() * 0.5 + 0.5) as f32
-            } else {
-                0.15
-            };
+        let levels = [0.7, 0.4, 0.9, 0.55];
+        for (b, &level) in levels.iter().enumerate() {
+            let level = if playing { level } else { 0.15 };
             let h = 4.0 + level * (max_h - 4.0);
             let x = rect.left() + 12.0 + b as f32 * (bar_w + 3.0);
             let bar = egui::Rect::from_min_max(
@@ -1909,9 +1905,6 @@ impl OptimeApp {
                 egui::pos2(x + bar_w, rect.center().y + max_h / 2.0),
             );
             painter.rect_filled(bar, 2.0, accent);
-        }
-        if playing {
-            ui.ctx().request_repaint();
         }
 
         // Song title.
@@ -2211,7 +2204,7 @@ impl eframe::App for OptimeApp {
             self.step_song(1);
         }
 
-        self.handle_media_controls(frame);
+        self.handle_media_controls(ctx, frame);
 
         let (snap, advance) = self.sync_audio();
         let snap = if advance {
@@ -2245,10 +2238,18 @@ impl eframe::App for OptimeApp {
         // Narrow screens (phones) get the Spotify-style mobile layout.
         if ctx.screen_rect().width() < 600.0 {
             self.mobile_ui(ctx, &snap);
-            #[cfg(target_arch = "wasm32")]
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
-            #[cfg(not(target_arch = "wasm32"))]
-            ctx.request_repaint();
+            // The animated piano roll lives on the Now Playing tab; the Library / Playlists /
+            // Settings tabs are essentially static, so idle the repaint clock down to 1 Hz there
+            // to save battery on phones. (The mini-player intentionally stops animating so it
+            // doesn't force a faster repaint — see `mini_player`.)
+            if self.mobile_tab == MobileTab::NowPlaying {
+                #[cfg(target_arch = "wasm32")]
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+                #[cfg(not(target_arch = "wasm32"))]
+                ctx.request_repaint();
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
             return;
         }
 

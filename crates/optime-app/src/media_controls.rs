@@ -2,10 +2,13 @@
 //! keys (e.g. double-tapping AirPods to skip a track, or the keyboard's play/pause key).
 //!
 //! Native builds use [`souvlaki`] — System Media Transport Controls on Windows, MPRIS on Linux,
-//! the Now Playing center on macOS. The web build is a no-op for now (the browser's Media Session
-//! API could fill the same role later). The app polls [`MediaControls::poll`] each frame for any
+//! the Now Playing center on macOS. The web build uses the browser's [Media Session API]
+//! (`navigator.mediaSession`), which drives the phone lock-screen / notification transport and
+//! Bluetooth/headset media keys on mobile. The app polls [`MediaControls::poll`] each frame for any
 //! [`MediaAction`]s the user triggered and pushes the current track/playback state back with
 //! [`MediaControls::set_now_playing`].
+//!
+//! [Media Session API]: https://developer.mozilla.org/en-US/docs/Web/API/Media_Session_API
 
 /// A transport command coming *from* the OS (a media key / Now Playing button press).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +30,7 @@ pub enum MediaAction {
 pub use native::MediaControls;
 
 #[cfg(target_arch = "wasm32")]
-pub use stub::MediaControls;
+pub use web::MediaControls;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -51,8 +54,9 @@ mod native {
     impl MediaControls {
         /// Builds the controls bound to the app window (`frame` supplies the native window handle,
         /// required for the Windows transport controls). Returns `None` if the handle or the OS
-        /// controls are unavailable.
-        pub fn new(frame: &eframe::Frame) -> Option<Self> {
+        /// controls are unavailable. `ctx` is unused natively (the OS callback already wakes the
+        /// event loop); the web build uses it to repaint when a media key fires.
+        pub fn new(_ctx: &egui::Context, frame: &eframe::Frame) -> Option<Self> {
             // Windows' SMTC needs the host HWND; other platforms ignore it.
             let hwnd = match frame.window_handle().ok()?.as_raw() {
                 RawWindowHandle::Win32(h) => Some(h.hwnd.get() as *mut std::ffi::c_void),
@@ -126,19 +130,92 @@ mod native {
 }
 
 #[cfg(target_arch = "wasm32")]
-mod stub {
+mod web {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    use web_sys::{MediaMetadata, MediaSession, MediaSessionAction, MediaSessionPlaybackState};
+
     use super::MediaAction;
 
-    /// No-op media controls for the web build.
-    pub struct MediaControls;
+    /// Transport commands the Media Session callbacks push for the next `poll`. wasm is
+    /// single-threaded, so an `Rc<RefCell<…>>` shared with the JS closures is enough.
+    type Queue = Rc<RefCell<Vec<MediaAction>>>;
+
+    /// Drives the browser's `navigator.mediaSession`: the phone lock-screen transport plus
+    /// hardware/Bluetooth media keys.
+    pub struct MediaControls {
+        session: MediaSession,
+        queue: Queue,
+        /// The action-handler closures, kept alive for as long as the session references them.
+        _handlers: Vec<Closure<dyn FnMut()>>,
+        /// The last `(title, playing)` pushed, to avoid re-sending unchanged metadata every frame.
+        last: Option<(String, bool)>,
+    }
 
     impl MediaControls {
-        pub fn new(_frame: &eframe::Frame) -> Option<Self> {
-            None
+        pub fn new(ctx: &egui::Context, _frame: &eframe::Frame) -> Option<Self> {
+            let session = web_sys::window()?.navigator().media_session();
+            let queue: Queue = Rc::new(RefCell::new(Vec::new()));
+            let mut handlers: Vec<Closure<dyn FnMut()>> = Vec::new();
+            {
+                // Register one handler per supported action. Each pushes its command and wakes the
+                // egui repaint clock, so a key press is applied on the very next frame even while
+                // the UI is idling at a low refresh rate.
+                let mut bind = |action: MediaSessionAction, ev: MediaAction| {
+                    let queue = queue.clone();
+                    let ctx = ctx.clone();
+                    let cb = Closure::wrap(Box::new(move || {
+                        queue.borrow_mut().push(ev);
+                        ctx.request_repaint();
+                    }) as Box<dyn FnMut()>);
+                    session.set_action_handler(action, Some(cb.as_ref().unchecked_ref()));
+                    handlers.push(cb);
+                };
+                // The Media Session API has no single "toggle"; play and pause are separate.
+                bind(MediaSessionAction::Play, MediaAction::Play);
+                bind(MediaSessionAction::Pause, MediaAction::Pause);
+                bind(MediaSessionAction::Previoustrack, MediaAction::Prev);
+                bind(MediaSessionAction::Nexttrack, MediaAction::Next);
+                bind(MediaSessionAction::Stop, MediaAction::Stop);
+            }
+
+            Some(Self {
+                session,
+                queue,
+                _handlers: handlers,
+                last: None,
+            })
         }
+
+        /// Drains any transport commands the user triggered since the last call.
         pub fn poll(&mut self) -> Vec<MediaAction> {
-            Vec::new()
+            std::mem::take(&mut *self.queue.borrow_mut())
         }
-        pub fn set_now_playing(&mut self, _title: &str, _artist: &str, _playing: bool) {}
+
+        /// Updates the system "now playing" title and play/pause state. Cheap to call every frame:
+        /// it only talks to the browser when the title or playing state actually changed.
+        pub fn set_now_playing(&mut self, title: &str, artist: &str, playing: bool) {
+            if self
+                .last
+                .as_ref()
+                .is_some_and(|(t, p)| t == title && *p == playing)
+            {
+                return;
+            }
+            if let Ok(meta) = MediaMetadata::new() {
+                meta.set_title(title);
+                meta.set_artist(artist);
+                self.session.set_metadata(Some(&meta));
+            }
+            self.session.set_playback_state(if playing {
+                MediaSessionPlaybackState::Playing
+            } else {
+                MediaSessionPlaybackState::Paused
+            });
+            self.last = Some((title.to_owned(), playing));
+        }
     }
 }

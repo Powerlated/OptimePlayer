@@ -12,3 +12,10 @@ rustflags = ["-C", "target-cpu=native"]
 
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "target-cpu=native"]
+
+# The web build drives the browser Media Session API (lock-screen / Bluetooth media controls on
+# mobile), which web-sys still gates behind this cfg. Applies to both local
+# `--target wasm32-unknown-unknown` builds and the Trunk release build (cargo finds this file by
+# searching up from crates/optime-app).
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]
