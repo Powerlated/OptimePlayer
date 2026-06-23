@@ -18,7 +18,7 @@
 use std::io::Write as _;
 
 use optime_core::{
-    InstrumentResampleMode, SoundData, StreamResampler, SynthConfig, SynthController,
+    InstrumentResampleMode, PerDeviceSettings, SoundData, StreamResampler, SynthController,
 };
 
 /// Mixer-bus (DirectSound) rate — deliberately below the output rate so nearest-neighbour ZOH
@@ -38,15 +38,17 @@ const SONGS: &[u32] = &[
     548, 413, 465, 403, 429, 444, 374, 539, 398, 474, 538, 479, 524,
 ];
 
-fn mixer_config(mode: InstrumentResampleMode) -> SynthConfig {
-    SynthConfig {
+/// A config that captures the isolated mixer (DirectSound) bus at [`MIXER_RATE`]. The captured bus
+/// is independent of the mixer→output resampler (`fill_mixer_bus` reads the bus directly), so the
+/// neutral mixer_resample is fine; the per-voice resampling stays at neutral's nearest-neighbour.
+fn mixer_config() -> PerDeviceSettings {
+    PerDeviceSettings {
         use_mixer: true,
-        mixer_sample_rate: MIXER_RATE,
-        mixer_resample: mode,
+        mixer_sample_rate: MIXER_RATE as u32,
         // Mono-summed analysis: keep the stereo expander out of the captured bus.
         stereo_separation: false,
         bass_mono: false,
-        ..SynthConfig::default()
+        ..PerDeviceSettings::neutral()
     }
 }
 
@@ -103,7 +105,7 @@ fn main() {
             SynthController::new(OUT_RATE, data, song).expect("controller for song");
 
         // Capture the isolated DirectSound bus at the mixer rate.
-        let cfg = mixer_config(crunch); // capture is mode-independent; reuse one config
+        let cfg = mixer_config(); // capture is mode-independent; reuse one config
         let mut buf = vec![0.0f32; 2 * frames];
         controller.fill_mixer_bus(&mut buf, &cfg);
         let bus: Vec<(f32, f32)> = buf.chunks_exact(2).map(|c| (c[0], c[1])).collect();

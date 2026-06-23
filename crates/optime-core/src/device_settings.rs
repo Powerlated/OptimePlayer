@@ -5,11 +5,14 @@
 //! into the synthesis layer. Defaults are intentionally *not* defined here; the app owns the
 //! out-of-the-box values.
 
-use crate::synth_controller::HighShelf;
+use crate::sample::InstrumentResampleMode;
+use crate::synth_controller::{DelaySmoothing, HighShelf, PopSmoothing};
+use crate::tuning::TuningSystem;
+use crate::TRACK_COUNT;
 
 /// Which resampling algorithm a stage uses. Mirrors the variants of
 /// [`InstrumentResampleMode`](crate::InstrumentResampleMode) at the settings level.
-#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum InstrumentResampleChoice {
     Nearest,
     Linear,
@@ -30,7 +33,7 @@ impl InstrumentResampleChoice {
 
 /// Per-device resampling settings — each console keeps its own, so e.g. the DS can play
 /// Crunchy sinc while the GBA plays Clean sinc.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct InstrumentResampleSettings {
     /// Resampling choice enum
     pub choice: InstrumentResampleChoice,
@@ -47,10 +50,23 @@ pub struct InstrumentResampleSettings {
     pub smooth_sample_pops: bool,
 }
 
+impl InstrumentResampleSettings {
+    /// Resolve the choice + per-kind cutoffs into the concrete [`InstrumentResampleMode`] the
+    /// synthesis layer consumes. `half_taps` is half the (even) source-tap count, at least 1.
+    pub fn mode(&self) -> InstrumentResampleMode {
+        resolve_mode(
+            &self.choice,
+            self.sinc_taps,
+            self.psg_cutoff_hz,
+            self.sampler_cutoff_hz,
+        )
+    }
+}
+
 /// Mixer-to-output resampling settings. Reuses the same algorithm choice as the per-instrument
 /// stage ([`InstrumentResampleChoice`]); the bus is a finished mix (no PSG/sampled split), so the
 /// crunch mode carries a single `cutoff_hz` rather than the per-kind PSG/sampler cutoffs.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct MixerResampleSettings {
     /// Resampling choice enum (shared with the instrument stage).
     pub choice: InstrumentResampleChoice,
@@ -60,9 +76,49 @@ pub struct MixerResampleSettings {
     pub cutoff_hz: u32,
 }
 
+impl MixerResampleSettings {
+    /// Resolve into the concrete [`InstrumentResampleMode`]. The bus is a finished (non-PSG) mix,
+    /// so the single `cutoff_hz` feeds both per-kind cutoff slots.
+    pub fn mode(&self) -> InstrumentResampleMode {
+        resolve_mode(&self.choice, self.sinc_taps, self.cutoff_hz, self.cutoff_hz)
+    }
+}
+
+/// Shared choice → [`InstrumentResampleMode`] resolution for both resampling stages.
+fn resolve_mode(
+    choice: &InstrumentResampleChoice,
+    sinc_taps: usize,
+    psg_cutoff_hz: u32,
+    sampler_cutoff_hz: u32,
+) -> InstrumentResampleMode {
+    let half_taps = (sinc_taps / 2).max(1);
+    match choice {
+        InstrumentResampleChoice::Nearest => InstrumentResampleMode::NearestNeighbor,
+        InstrumentResampleChoice::Linear => InstrumentResampleMode::Linear,
+        InstrumentResampleChoice::SincSampleNyquist => {
+            InstrumentResampleMode::SincSampleNyquist { half_taps }
+        }
+        InstrumentResampleChoice::SincOutputNyquist => InstrumentResampleMode::SincOutputNyquist {
+            half_taps,
+            psg_cutoff_hz,
+            sampler_cutoff_hz,
+        },
+    }
+}
+
+/// Every track enabled — the default for the runtime-only [`PerDeviceSettings::track_enables`]
+/// (so old persisted data, which never stored it, deserializes to "all on").
+fn all_tracks_enabled() -> [bool; TRACK_COUNT] {
+    [true; TRACK_COUNT]
+}
+
 /// The synth/audio settings that belong to a single console — the DS and GBA each keep their own
 /// copy, so e.g. one can run crunchy resampling and a high-shelf cut while the other stays clean.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+///
+/// This is also the runtime config the synthesis layer consumes directly: the resolver methods
+/// ([`Self::resample`], [`Self::tuning`], …) turn the settings-level choices into the concrete
+/// values the engine wants, so there is no separate "resolved config" struct.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct PerDeviceSettings {
     pub stereo_separation: bool,
     pub force_stereo_separation: bool,
@@ -80,4 +136,86 @@ pub struct PerDeviceSettings {
     /// Route sampled (non-PSG) voices through the intermediate mixer (then upsample to output).
     pub use_mixer: bool,
     pub psg_crunch_compensation: bool,
+    /// Which of the 16 tracks are mixed into the output. Runtime UI state (the app injects the
+    /// live piano-roll mutes each frame), **not** persisted — deserializing old data falls back to
+    /// "all enabled".
+    #[serde(skip, default = "all_tracks_enabled")]
+    pub track_enables: [bool; TRACK_COUNT],
+}
+
+impl PerDeviceSettings {
+    /// The per-voice sample interpolation / anti-aliasing mode.
+    pub fn resample(&self) -> InstrumentResampleMode {
+        self.instrument_resample.mode()
+    }
+
+    /// How the intermediate mixer bus is brought up to the output rate. (The field
+    /// `mixer_resample` is the settings struct; this resolves it to the concrete mode.)
+    pub fn mixer_resample_mode(&self) -> InstrumentResampleMode {
+        self.mixer_resample.mode()
+    }
+
+    /// The active tuning system (`tuning_choice == 0` is equal temperament; otherwise Pythagorean
+    /// pure tuning anchored at `pure_tonic`).
+    pub fn tuning(&self) -> TuningSystem {
+        if self.tuning_choice == 0 {
+            TuningSystem::Equal
+        } else {
+            TuningSystem::Pure {
+                tonic: self.pure_tonic,
+            }
+        }
+    }
+
+    /// Per-voice-kind de-click gain slew. Orthogonal to the resampling mode, so it applies in every
+    /// mode.
+    pub fn pop_smoothing(&self) -> PopSmoothing {
+        PopSmoothing {
+            psg: self.instrument_resample.smooth_psg_pops,
+            sample: self.instrument_resample.smooth_sample_pops,
+        }
+    }
+
+    /// How the stereo expander handles delay-line length changes.
+    pub fn delay_smoothing(&self) -> DelaySmoothing {
+        match self.delay_smoothing_choice {
+            1 => DelaySmoothing::HoldDuringNotes,
+            _ => DelaySmoothing::None,
+        }
+    }
+
+    /// An engine-neutral baseline — every effect off, nearest-neighbour resampling, equal tuning,
+    /// all tracks enabled. This is *not* the user-facing default (the app owns those in
+    /// `Persisted::default`); it exists so the core's tests and examples have a config to start
+    /// from and override (`..PerDeviceSettings::neutral()`).
+    pub fn neutral() -> Self {
+        Self {
+            stereo_separation: false,
+            force_stereo_separation: false,
+            bass_mono: false,
+            bass_mono_freq: 200.0,
+            tuning_choice: 0,
+            pure_tonic: 0,
+            instrument_resample: InstrumentResampleSettings {
+                choice: InstrumentResampleChoice::Nearest,
+                sinc_taps: 32,
+                psg_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+                sampler_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+                smooth_psg_pops: false,
+                smooth_sample_pops: false,
+            },
+            // Clean reconstruction is the sane default for upsampling a finished bus.
+            mixer_resample: MixerResampleSettings {
+                choice: InstrumentResampleChoice::SincSampleNyquist,
+                sinc_taps: 32,
+                cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+            },
+            shelf: HighShelf::default(),
+            delay_smoothing_choice: 0,
+            mixer_sample_rate: 48_000,
+            use_mixer: false,
+            psg_crunch_compensation: false,
+            track_enables: all_tracks_enabled(),
+        }
+    }
 }

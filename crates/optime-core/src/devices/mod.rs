@@ -19,7 +19,7 @@ pub mod nintendo_ds;
 
 pub use crate::synth_controller::messages::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
 
-use crate::synth_controller::SynthConfig;
+use crate::PerDeviceSettings;
 
 /// A loaded, parsed sound archive for some device — everything needed to list and start songs.
 pub enum SoundData {
@@ -90,7 +90,7 @@ impl SoundData {
     pub fn song_length_seconds(&self, id: u32) -> Option<f64> {
         let mut player = self.make_player(id)?;
         let tick_rate = player.tick_rate();
-        let config = SynthConfig::default();
+        let config = PerDeviceSettings::neutral();
         let mut feedback = TickFeedback::default();
         let mut events = Vec::new();
         let max_ticks = (tick_rate * 15.0 * 60.0) as u64;
@@ -192,7 +192,7 @@ impl DevicePlayer {
     pub fn tick(
         &mut self,
         feedback: &mut TickFeedback,
-        config: &SynthConfig,
+        config: &PerDeviceSettings,
         events: &mut Vec<SynthEvent>,
     ) {
         match self {

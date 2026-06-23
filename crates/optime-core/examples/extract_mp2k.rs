@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use optime_core::{SoundData, SynthConfig, SynthController};
+use optime_core::{PerDeviceSettings, SoundData, SynthController};
 
 fn main() -> ExitCode {
     let Some(path) = std::env::args().nth(1) else {
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let sr = 32768.0;
-    let config = SynthConfig::default();
+    let config = PerDeviceSettings::neutral();
     let step = (song_ids.len() / 8).max(1);
     for &id in song_ids.iter().step_by(step) {
         let (Some(mut a), Some(mut b)) = (

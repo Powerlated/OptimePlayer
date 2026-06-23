@@ -182,6 +182,9 @@ impl Default for Persisted {
                     cutoff_hz: 12700.0,
                     gain_db: -10.0,
                 },
+                // Runtime-only (the app injects the live piano-roll mutes each frame); start
+                // with every track audible.
+                track_enables: [true; optime_core::TRACK_COUNT],
             },
             gba: PerDeviceSettings {
                 stereo_separation: true,
@@ -214,6 +217,7 @@ impl Default for Persisted {
                     cutoff_hz: 12700.0,
                     gain_db: -20.0,
                 },
+                track_enables: [true; optime_core::TRACK_COUNT],
             },
         }
     }

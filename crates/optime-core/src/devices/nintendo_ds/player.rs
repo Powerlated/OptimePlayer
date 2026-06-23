@@ -10,9 +10,9 @@ use super::volume::{calc_channel_volume, decibel_db};
 use super::{InstrumentType, Sdat};
 use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
 use crate::sample::{decode_adpcm, decode_pcm16, decode_pcm8, Sample};
-use crate::synth_controller::SynthConfig;
 use crate::tuning::midi_note_to_hz;
 use crate::util::{read_u16, read_u32, read_u8};
+use crate::PerDeviceSettings;
 use crate::TRACK_COUNT;
 
 /// ADSR envelope stage.
@@ -153,7 +153,7 @@ impl NdsPlayer {
     pub fn tick(
         &mut self,
         feedback: &mut TickFeedback,
-        config: &SynthConfig,
+        config: &PerDeviceSettings,
         events: &mut Vec<SynthEvent>,
     ) {
         self.process_active_notes(feedback, config, events);
@@ -180,7 +180,12 @@ impl NdsPlayer {
     }
 
     /// Applies one sequence message, translating it into standardized events.
-    fn handle_message(&mut self, msg: Message, config: &SynthConfig, events: &mut Vec<SynthEvent>) {
+    fn handle_message(
+        &mut self,
+        msg: Message,
+        config: &PerDeviceSettings,
+        events: &mut Vec<SynthEvent>,
+    ) {
         match msg.msg_type {
             MessageType::PlayNote => self.play_note(msg, config, events),
             MessageType::Jump => events.push(SynthEvent::Looped),
@@ -215,7 +220,12 @@ impl NdsPlayer {
     }
 
     /// Starts a note from a [`MessageType::PlayNote`] message.
-    fn play_note(&mut self, msg: Message, config: &SynthConfig, events: &mut Vec<SynthEvent>) {
+    fn play_note(
+        &mut self,
+        msg: Message,
+        config: &PerDeviceSettings,
+        events: &mut Vec<SynthEvent>,
+    ) {
         let t = msg.track_num;
         let midi_note = msg.param0;
         let velocity = msg.param1;
@@ -249,7 +259,7 @@ impl NdsPlayer {
             };
             (
                 sample.clone(),
-                midi_note_to_hz(f64::from(region.note_number), config.tuning),
+                midi_note_to_hz(f64::from(region.note_number), config.tuning()),
             )
         };
 
@@ -298,7 +308,7 @@ impl NdsPlayer {
     fn process_active_notes(
         &mut self,
         feedback: &TickFeedback,
-        config: &SynthConfig,
+        config: &PerDeviceSettings,
         events: &mut Vec<SynthEvent>,
     ) {
         let mut index_to_delete: Option<usize> = None;
@@ -348,7 +358,7 @@ impl NdsPlayer {
     fn apply_lfo(
         &mut self,
         entry: &mut ActiveNote,
-        _config: &SynthConfig,
+        _config: &PerDeviceSettings,
         events: &mut Vec<SynthEvent>,
     ) {
         let track = &self.sequence.tracks[entry.track_num];

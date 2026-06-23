@@ -227,8 +227,7 @@ impl FsVisController {
                         }
                     }
                     VisEvent::EndTie { track, key } => {
-                        if let Some(i) =
-                            open.iter().position(|t| t.track == track && t.key == key)
+                        if let Some(i) = open.iter().position(|t| t.track == track && t.key == key)
                         {
                             resolve(&mut open, &mut notes, i, now);
                         }
@@ -326,12 +325,8 @@ impl Lookahead {
                             duration: u32::from(note.gate),
                             timestamp: sequencer.steps,
                         })),
-                        Mp2kOp::EndTie { track, key } => {
-                            out.push(VisEvent::EndTie { track, key })
-                        }
-                        Mp2kOp::TrackEnded { track } => {
-                            out.push(VisEvent::TrackEnded { track })
-                        }
+                        Mp2kOp::EndTie { track, key } => out.push(VisEvent::EndTie { track, key }),
+                        Mp2kOp::TrackEnded { track } => out.push(VisEvent::TrackEnded { track }),
                         Mp2kOp::Looped => out.push(VisEvent::Looped),
                         Mp2kOp::Finished => out.push(VisEvent::Ended),
                         Mp2kOp::GateTick { .. } => {}

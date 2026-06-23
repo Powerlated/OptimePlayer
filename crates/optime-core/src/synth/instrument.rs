@@ -97,7 +97,8 @@ impl SampleInstrument {
 
     /// Advances playback by one output sample, updating [`Self::output`].
     ///
-    /// `mode` is the global resampling choice from [`SynthConfig`](crate::SynthConfig).  `tables`
+    /// `mode` is the resolved resampling choice from
+    /// [`PerDeviceSettings::resample`](crate::PerDeviceSettings::resample).  `tables`
     /// is required for the two sinc modes and may be `None` otherwise (falls back to
     /// nearest-neighbour).  When `pops` enables smoothing for this voice's kind, it slews its gain
     /// toward the envelope volume (and toward silence after [`Self::begin_fade_out`]) instead of

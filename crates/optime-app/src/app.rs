@@ -2,10 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use optime_core::{
-    DelaySmoothing, FsVisController, InstrumentResampleMode, PopSmoothing, SoundData, SynthConfig,
-    SynthController, TuningSystem,
-};
+use optime_core::{FsVisController, InstrumentResampleMode, SoundData, SynthController};
 
 #[cfg(target_arch = "wasm32")]
 use crate::web::get_track_ref_from_query_string;
@@ -20,30 +17,6 @@ use crate::piano_roll::PianoRoll;
 use crate::song_names;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
-
-/// Resolves a UI resampling choice + slider values into the engine's [`InstrumentResampleMode`].
-/// Shared by the per-instrument and mixer-to-output stages (the mixer passes its single bus cutoff
-/// as both the PSG and sampler cutoff — the bus is non-PSG, so only the sampler cutoff bites).
-fn resample_mode(
-    choice: &InstrumentResampleChoice,
-    sinc_taps: usize,
-    psg_cutoff_hz: u32,
-    sampler_cutoff_hz: u32,
-) -> InstrumentResampleMode {
-    let half_taps = (sinc_taps / 2).max(1);
-    match choice {
-        InstrumentResampleChoice::Nearest => InstrumentResampleMode::NearestNeighbor,
-        InstrumentResampleChoice::Linear => InstrumentResampleMode::Linear,
-        InstrumentResampleChoice::SincSampleNyquist => {
-            InstrumentResampleMode::SincSampleNyquist { half_taps }
-        }
-        InstrumentResampleChoice::SincOutputNyquist => InstrumentResampleMode::SincOutputNyquist {
-            half_taps,
-            psg_cutoff_hz,
-            sampler_cutoff_hz,
-        },
-    }
-}
 
 /// The four-option resampling-algorithm combo box, shared by the resampling settings sections.
 fn resample_combo(ui: &mut egui::Ui, id_salt: &str, choice: &mut InstrumentResampleChoice) {
@@ -184,7 +157,8 @@ pub struct OptimeApp {
     /// Whether media-control creation has been attempted (so it's tried only once).
     media_tried: bool,
 
-    // UI mirrors of [`SynthConfig`].
+    // Live piano-roll track mutes, injected into the per-device config each frame (see
+    // [`Self::config`]).
     track_enables: [bool; TRACK_COUNT],
 
     /// Saved state that persists across sessions
@@ -467,52 +441,12 @@ impl OptimeApp {
         }
     }
 
-    /// The active synth config built from the UI mirrors.
-    fn config(&self) -> SynthConfig {
-        let d = self.device_settings();
-        let tuning = if d.tuning_choice == 0 {
-            TuningSystem::Equal
-        } else {
-            TuningSystem::Pure {
-                tonic: d.pure_tonic,
-            }
-        };
-        let rs = d.instrument_resample.clone();
-        let resample = resample_mode(
-            &rs.choice,
-            rs.sinc_taps,
-            rs.psg_cutoff_hz,
-            rs.sampler_cutoff_hz,
-        );
-        // Pop smoothing is orthogonal to the resampling mode — a gain slew on note edges — so it
-        // applies in every mode, not just crunch.
-        let pop_smoothing = PopSmoothing {
-            psg: rs.smooth_psg_pops,
-            sample: rs.smooth_sample_pops,
-        };
-        // The mixer bus is a finished (non-PSG) mix, so its single cutoff feeds both cutoff slots.
-        let ms = &d.mixer_resample;
-        let mixer_resample = resample_mode(&ms.choice, ms.sinc_taps, ms.cutoff_hz, ms.cutoff_hz);
-        let high_shelf = d.shelf;
-        SynthConfig {
-            stereo_separation: d.stereo_separation,
-            force_stereo_separation: d.force_stereo_separation,
-            bass_mono: d.bass_mono,
-            bass_mono_freq: d.bass_mono_freq as f64,
-            tuning,
-            track_enables: self.track_enables,
-            resample,
-            pop_smoothing,
-            delay_smoothing: match d.delay_smoothing_choice {
-                1 => DelaySmoothing::HoldDuringNotes,
-                _ => DelaySmoothing::None,
-            },
-            high_shelf,
-            use_mixer: d.use_mixer,
-            mixer_sample_rate: f64::from(d.mixer_sample_rate),
-            mixer_resample,
-            psg_crunch_compensation: d.psg_crunch_compensation,
-        }
+    /// The active synth config: the current device's persisted settings (which the synthesis layer
+    /// consumes directly via its resolver methods) with the live piano-roll track mutes injected.
+    fn config(&self) -> PerDeviceSettings {
+        let mut c = self.device_settings().clone();
+        c.track_enables = self.track_enables;
+        c
     }
 
     /// Parses sound archives from `bytes` (DS `.nds`/`.sdat`, or a GBA ROM) and rebuilds the

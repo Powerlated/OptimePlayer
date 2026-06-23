@@ -2,7 +2,7 @@
 //! single DirectSound note. Exercises ROM parsing (heuristic song-table scan), the sequencer,
 //! the player's channel/envelope model, and the shared synthesis path.
 
-use optime_core::{SoundData, SynthConfig, SynthController};
+use optime_core::{PerDeviceSettings, SoundData, SynthController};
 
 /// GBA ROM-space base address.
 const ROM_BASE: u32 = 0x0800_0000;
@@ -108,7 +108,7 @@ fn renders_audio_and_ends() {
     let data = SoundData::load_all(&rom).remove(0);
     let sr = 32768.0;
     let mut controller = SynthController::new(sr, &data, 0).expect("song 0 should load");
-    let config = SynthConfig::default();
+    let config = PerDeviceSettings::neutral();
 
     // The note is 24 steps at 1 step/frame ≈ 0.4 s; render 2 s so the song finishes.
     let mut out = vec![0.0f32; 2 * (2.0 * sr) as usize];
@@ -164,7 +164,7 @@ fn audio_extraction_strips_non_audio_and_plays_identically() {
 
     // And it renders bit-identically to the original ROM.
     let sr = 32768.0;
-    let config = SynthConfig::default();
+    let config = PerDeviceSettings::neutral();
     let mut original = SynthController::new(sr, &data, 0).expect("song 0 in the original");
     let mut audio_only = SynthController::new(sr, &stripped, 0).expect("song 0 in the extract");
     let mut a = vec![0.0f32; 2 * sr as usize];

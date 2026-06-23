@@ -1,12 +1,15 @@
 //! Golden-output harness: renders a fixed slice of audio from every demo SDAT under a few
-//! `SynthConfig` variants and prints an FNV-1a hash of the rendered f32 bits. Used to verify that
+//! `PerDeviceSettings` variants and prints an FNV-1a hash of the rendered f32 bits. Used to verify that
 //! refactors are behavior-preserving (the hashes must not change). Not a correctness oracle —
 //! just a bit-for-bit baseline of the current engine.
 //!
 //! Run with `cargo run -p optime-core --example golden` (add `--no-default-features` to capture a
 //! baseline for the scalar gather; the SIMD and scalar builds hash differently by design).
 
-use optime_core::{InstrumentResampleMode, SoundData, SynthConfig, SynthController, TuningSystem};
+use optime_core::{
+    InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
+    PerDeviceSettings, SoundData, SynthController,
+};
 
 const SAMPLE_RATE: f64 = 32768.0;
 const FRAMES: usize = 32768 * 4; // ~4 seconds of stereo audio per config.
@@ -20,7 +23,7 @@ fn fnv1a(hash: &mut u64, bytes: &[u8]) {
 
 /// Renders `FRAMES` stereo frames of song 0 from `data` under `config`, folding every output
 /// f32's raw bits into `hash`.
-fn render_into(hash: &mut u64, data: &SoundData, config: &SynthConfig) {
+fn render_into(hash: &mut u64, data: &SoundData, config: &PerDeviceSettings) {
     let Some(mut ctrl) = SynthController::new(SAMPLE_RATE, data, 0) else {
         fnv1a(hash, b"<no-controller>");
         return;
@@ -32,28 +35,39 @@ fn render_into(hash: &mut u64, data: &SoundData, config: &SynthConfig) {
     }
 }
 
-fn configs() -> Vec<(&'static str, SynthConfig)> {
+fn configs() -> Vec<(&'static str, PerDeviceSettings)> {
     vec![
-        ("default", SynthConfig::default()),
+        ("default", PerDeviceSettings::neutral()),
         (
             "sinc+stereo",
-            SynthConfig {
+            PerDeviceSettings {
                 stereo_separation: true,
                 bass_mono: true,
-                tuning: TuningSystem::Pure { tonic: 0 },
-                resample: InstrumentResampleMode::SincSampleNyquist { half_taps: 16 },
-                ..SynthConfig::default()
+                tuning_choice: 1, // Pure, tonic 0
+                pure_tonic: 0,
+                instrument_resample: InstrumentResampleSettings {
+                    choice: InstrumentResampleChoice::SincSampleNyquist,
+                    sinc_taps: 32,
+                    psg_cutoff_hz: 0,
+                    sampler_cutoff_hz: 0,
+                    smooth_psg_pops: false,
+                    smooth_sample_pops: false,
+                },
+                ..PerDeviceSettings::neutral()
             },
         ),
         (
             "crunch",
-            SynthConfig {
-                resample: InstrumentResampleMode::SincOutputNyquist {
-                    half_taps: 8,
+            PerDeviceSettings {
+                instrument_resample: InstrumentResampleSettings {
+                    choice: InstrumentResampleChoice::SincOutputNyquist,
+                    sinc_taps: 16,
                     psg_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
                     sampler_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+                    smooth_psg_pops: false,
+                    smooth_sample_pops: false,
                 },
-                ..SynthConfig::default()
+                ..PerDeviceSettings::neutral()
             },
         ),
     ]

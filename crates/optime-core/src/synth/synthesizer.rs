@@ -10,8 +10,9 @@ use crate::devices::VoicePitch;
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::resample::{mode_half_taps, ResampleTables};
 use crate::sample::Sample;
-use crate::synth_controller::{DelaySmoothing, PopSmoothing, SynthConfig};
+use crate::synth_controller::{DelaySmoothing, PopSmoothing};
 use crate::tuning::TuningSystem;
+use crate::PerDeviceSettings;
 
 /// A polyphonic synthesizer for one sequence track. Holds a fixed pool of voices and mixes the
 /// active ones into a stereo sample, optionally widened by per-channel delay lines.
@@ -136,9 +137,9 @@ impl SampleSynthesizer {
         sample: Arc<Sample>,
         pitch: VoicePitch,
         volume: f64,
-        config: &SynthConfig,
+        config: &PerDeviceSettings,
     ) -> usize {
-        let tuning = config.tuning;
+        let tuning = config.tuning();
         let index = self.playing_index;
         if self.instrs[index].playing {
             self.cut_instrument(index);
@@ -150,7 +151,7 @@ impl SampleSynthesizer {
             instr.set_finetune_lfo(0.0, tuning);
             instr.set_finetune(self.finetune, tuning);
             instr.set_pitch(pitch, tuning);
-            instr.begin_note(volume, config.pop_smoothing);
+            instr.begin_note(volume, config.pop_smoothing());
             instr.sample_t = 0.0;
             instr.wrapped = false;
             instr.playing = true;
@@ -187,8 +188,8 @@ impl SampleSynthesizer {
     }
 
     /// Rebuilds the sinc tables if the mode switched to a sinc variant or the tap count changed.
-    fn ensure_tables(&mut self, config: &SynthConfig) {
-        let needed_taps = mode_half_taps(config.resample);
+    fn ensure_tables(&mut self, config: &PerDeviceSettings) {
+        let needed_taps = mode_half_taps(config.resample());
         if let Some(ht) = needed_taps {
             if self.resample_tables.is_none() || self.resample_half_taps != ht {
                 self.resample_tables = Some(ResampleTables::new(ht));
@@ -198,13 +199,15 @@ impl SampleSynthesizer {
     }
 
     /// Advances all active voices by one sample and mixes them into `val_l`/`val_r`.
-    pub fn next_sample(&mut self, config: &SynthConfig) {
+    pub fn next_sample(&mut self, config: &PerDeviceSettings) {
         self.ensure_tables(config);
         let tables = self.resample_tables.as_ref();
+        let resample = config.resample();
+        let pop_smoothing = config.pop_smoothing();
 
         let mut mono = 0.0;
         for &i in &self.active_instrs {
-            self.instrs[i].advance(config.resample, tables, config.pop_smoothing);
+            self.instrs[i].advance(resample, tables, pop_smoothing);
             mono += self.instrs[i].output;
         }
         self.prune_stopped();
@@ -224,7 +227,7 @@ impl SampleSynthesizer {
     /// [`SynthController::next_sample`]: crate::synth_controller::SynthController::next_sample
     pub fn render_block(
         &mut self,
-        config: &SynthConfig,
+        config: &PerDeviceSettings,
         n: usize,
         acc_l: &mut [f64],
         acc_r: &mut [f64],
@@ -233,15 +236,12 @@ impl SampleSynthesizer {
         assert!(n <= MAX_BLOCK && acc_l.len() >= n && acc_r.len() >= n);
         self.ensure_tables(config);
         let tables = self.resample_tables.as_ref();
+        let resample = config.resample();
+        let pop_smoothing = config.pop_smoothing();
 
         let mut mono = [0.0f64; MAX_BLOCK];
         for &i in &self.active_instrs {
-            self.instrs[i].advance_block(
-                config.resample,
-                tables,
-                config.pop_smoothing,
-                &mut mono[..n],
-            );
+            self.instrs[i].advance_block(resample, tables, pop_smoothing, &mut mono[..n]);
         }
         self.prune_stopped();
         self.apply_pending_delays();
@@ -257,7 +257,7 @@ impl SampleSynthesizer {
 
     /// The per-sample stereo stage: pan, optional Haas widening, and the bass-mono crossover.
     /// Consumes the voice-mixed `mono` sample and sets `val_l`/`val_r`.
-    fn apply_stereo(&mut self, mono: f64, config: &SynthConfig) {
+    fn apply_stereo(&mut self, mono: f64, config: &PerDeviceSettings) {
         if !config.stereo_separation {
             self.val_l = mono * (1.0 - self.pan) * self.volume;
             self.val_r = mono * self.pan * self.volume;
@@ -266,7 +266,7 @@ impl SampleSynthesizer {
 
         if config.bass_mono {
             // Split into a centered low band and a widened high band via crossover.
-            self.ensure_crossover(config.bass_mono_freq);
+            self.ensure_crossover(f64::from(config.bass_mono_freq));
             let lo = self.crossover_lp.transform(mono);
             let hi = self.crossover_hp.transform(mono);
             let center = lo * 0.5;
@@ -304,7 +304,7 @@ impl SampleSynthesizer {
     /// The pan gains always apply immediately; under
     /// [`DelaySmoothing::HoldDuringNotes`] a delay-*length* change (which would click in the
     /// middle of flowing audio) is deferred until the track has no notes playing.
-    pub fn set_pan(&mut self, pan: f64, config: &SynthConfig) {
+    pub fn set_pan(&mut self, pan: f64, config: &PerDeviceSettings) {
         const SPEED_OF_SOUND: f64 = 343.0;
         let r = 3.0;
         let ear_x = 0.20;
@@ -321,7 +321,7 @@ impl SampleSynthesizer {
         dist_r -= min_dist;
         let delay_l = (dist_l / SPEED_OF_SOUND * 50.0 * self.sample_rate).round() as usize;
         let delay_r = (dist_r / SPEED_OF_SOUND * 50.0 * self.sample_rate).round() as usize;
-        match config.delay_smoothing {
+        match config.delay_smoothing() {
             DelaySmoothing::HoldDuringNotes if !self.active_instrs.is_empty() => {
                 self.pending_delays = Some((delay_l, delay_r));
             }
@@ -353,9 +353,9 @@ mod tests {
     #[test]
     fn set_sample_rate_resizes_delays_and_preserves_pool() {
         let mut synth = SampleSynthesizer::new(44_100.0, 8);
-        let config = SynthConfig {
+        let config = PerDeviceSettings {
             stereo_separation: true,
-            ..SynthConfig::default()
+            ..PerDeviceSettings::neutral()
         };
         // Hard right gives the left delay line a non-zero length to rescale.
         synth.set_pan(1.0, &config);
@@ -378,7 +378,7 @@ mod tests {
     }
 
     /// Plays a constant-amplitude looping sample hard-left, settles, and returns `(val_l, val_r)`.
-    fn run_dc(config: &SynthConfig) -> (f64, f64) {
+    fn run_dc(config: &PerDeviceSettings) -> (f64, f64) {
         let sample_rate = 32768.0;
         let mut synth = SampleSynthesizer::new(sample_rate, 16);
         // DC sample so essentially all energy is in the low (bass) band.
@@ -405,10 +405,10 @@ mod tests {
     #[test]
     fn bass_mono_centers_low_frequencies() {
         // With plain separation, a hard-left DC tone barely reaches the right channel.
-        let separated = SynthConfig {
+        let separated = PerDeviceSettings {
             stereo_separation: true,
             bass_mono: false,
-            ..SynthConfig::default()
+            ..PerDeviceSettings::neutral()
         };
         let (l, r) = run_dc(&separated);
         assert!(
@@ -418,11 +418,11 @@ mod tests {
         assert!(r.abs() < 1e-3, "right should be nearly silent, got {r}");
 
         // With bass-mono on, the (low-frequency) DC tone is glued to the center: equal L/R.
-        let glued = SynthConfig {
+        let glued = PerDeviceSettings {
             stereo_separation: true,
             bass_mono: true,
             bass_mono_freq: 200.0,
-            ..SynthConfig::default()
+            ..PerDeviceSettings::neutral()
         };
         let (l, r) = run_dc(&glued);
         assert!(
@@ -437,10 +437,10 @@ mod tests {
         // Under HoldDuringNotes, a pan change while a note sounds must not move the widening
         // delay lines (only the gains); the deferred lengths land once the track is silent.
         let sample_rate = 32768.0;
-        let config = SynthConfig {
+        let config = PerDeviceSettings {
             stereo_separation: true,
-            delay_smoothing: DelaySmoothing::HoldDuringNotes,
-            ..SynthConfig::default()
+            delay_smoothing_choice: 1, // HoldDuringNotes
+            ..PerDeviceSettings::neutral()
         };
         let mut synth = SampleSynthesizer::new(sample_rate, 4);
         synth.set_pan(0.0, &config); // hard left while silent: applies immediately
@@ -477,10 +477,10 @@ mod tests {
         );
 
         // With smoothing off the same change applies instantly, even mid-note.
-        let immediate = SynthConfig {
+        let immediate = PerDeviceSettings {
             stereo_separation: true,
-            delay_smoothing: DelaySmoothing::None,
-            ..SynthConfig::default()
+            delay_smoothing_choice: 0, // None
+            ..PerDeviceSettings::neutral()
         };
         synth.play(
             Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0)),

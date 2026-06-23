@@ -12,7 +12,10 @@
 
 use std::time::Instant;
 
-use optime_core::{InstrumentResampleMode, SoundData, SynthConfig, SynthController};
+use optime_core::{
+    InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
+    PerDeviceSettings, SoundData, SynthController,
+};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -35,23 +38,35 @@ fn main() {
     let render_secs = 20.0;
     let total = (sr * render_secs) as u64;
 
-    for (name, mode) in [
+    // `half_taps` maps to the settings-level `sinc_taps` (total taps = 2 × half-taps).
+    let sinc_taps = half_taps * 2;
+    for (name, instrument_resample) in [
         (
             "clean (SampleNyquist)",
-            InstrumentResampleMode::SincSampleNyquist { half_taps },
+            InstrumentResampleSettings {
+                choice: InstrumentResampleChoice::SincSampleNyquist,
+                sinc_taps,
+                psg_cutoff_hz: 0,
+                sampler_cutoff_hz: 0,
+                smooth_psg_pops: false,
+                smooth_sample_pops: false,
+            },
         ),
         (
             "crunch (OutputNyquist)",
-            InstrumentResampleMode::SincOutputNyquist {
-                half_taps,
+            InstrumentResampleSettings {
+                choice: InstrumentResampleChoice::SincOutputNyquist,
+                sinc_taps,
                 psg_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
                 sampler_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+                smooth_psg_pops: false,
+                smooth_sample_pops: false,
             },
         ),
     ] {
-        let config = SynthConfig {
-            resample: mode,
-            ..SynthConfig::default()
+        let config = PerDeviceSettings {
+            instrument_resample,
+            ..PerDeviceSettings::neutral()
         };
         let Some(mut controller) = SynthController::new(sr, data, sseq_id) else {
             eprintln!("SSEQ {sseq_id} not found");

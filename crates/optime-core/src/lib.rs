@@ -41,8 +41,8 @@ pub use sample::{
 };
 pub use synth::{DelayLine, SampleInstrument, SampleSynthesizer, CROSSOVER_Q};
 pub use synth_controller::{
-    DelaySmoothing, FsVisController, HighShelf, PopSmoothing, SongOverview, SynthConfig,
-    SynthController, VisNote,
+    DelaySmoothing, FsVisController, HighShelf, PopSmoothing, SongOverview, SynthController,
+    VisNote,
 };
 pub use tuning::{midi_note_to_hz, TuningSystem};
 

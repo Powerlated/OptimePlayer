@@ -12,7 +12,7 @@ use super::voice::{CgbKind, ToneKind, WaveData};
 use super::ENGINE_RATE;
 use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
 use crate::sample::Sample;
-use crate::synth_controller::SynthConfig;
+use crate::PerDeviceSettings;
 
 /// `MAX_DIRECTSOUND_CHANNELS` — we run the full hardware-struct count rather than the
 /// game-configured `maxChans` (usually 5), so dense songs don't drop notes.
@@ -150,7 +150,7 @@ impl GbaPlayer {
     pub fn tick(
         &mut self,
         feedback: &mut TickFeedback,
-        _config: &SynthConfig,
+        _config: &PerDeviceSettings,
         events: &mut Vec<SynthEvent>,
     ) {
         // Channels whose voices the synthesizer stopped (one-shot samples that ran out).
