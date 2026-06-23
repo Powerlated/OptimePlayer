@@ -1520,14 +1520,13 @@ impl OptimeApp {
         // keep independent copies.
         let device_name = self.current_device_name();
         let d = self.device_settings_mut();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("Settings");
-            ui.label(format!("Settings are stored independently for each supported emulated device. You are currently editing the settings for: {device_name}"));
-            ui.checkbox(
-                &mut d.stereo_separation,
-                "Stereo separation: Apply a stereo widener to panned instruments",
-            );
-            ui.add_enabled_ui(d.stereo_separation, |ui| {
+        ui.heading("Settings");
+        ui.label(format!("Settings are stored independently for each supported emulated device. You are currently editing the settings for: {device_name}"));
+        ui.checkbox(
+            &mut d.stereo_separation,
+            "Stereo separation: Apply a stereo widener to panned instruments",
+        );
+        ui.add_enabled_ui(d.stereo_separation, |ui| {
                 ui.checkbox(
                     &mut d.force_stereo_separation,
                     "Force stereo separation: Apply a contrived stereo widener to instruments that are center-panned",
@@ -1566,64 +1565,64 @@ impl OptimeApp {
                         );
                 });
             });
-            ui.separator();
-            ui.label("Instrument-to-mixer resampling");
-            resample_combo(
-                ui,
-                "instrument-to-mixer-resampling",
-                &mut d.instrument_resample.choice,
-            );
-            // Only the options of the selected mode are shown.
-            if matches!(
-                d.instrument_resample.choice,
-                InstrumentResampleChoice::SincOutputNyquist
-                    | InstrumentResampleChoice::SincSampleNyquist
-            ) {
-                sinc_taps_slider(ui, &mut d.instrument_resample.sinc_taps);
-            }
-            if d.instrument_resample.choice == InstrumentResampleChoice::SincOutputNyquist {
-                ui.add(
-                    egui::Slider::new(
-                        &mut d.instrument_resample.psg_cutoff_hz,
-                        1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
-                    )
-                    .text("PSG cutoff")
-                    .suffix(" Hz")
-                    .logarithmic(true),
+        ui.separator();
+        ui.label("Instrument-to-mixer resampling");
+        resample_combo(
+            ui,
+            "instrument-to-mixer-resampling",
+            &mut d.instrument_resample.choice,
+        );
+        // Only the options of the selected mode are shown.
+        if matches!(
+            d.instrument_resample.choice,
+            InstrumentResampleChoice::SincOutputNyquist
+                | InstrumentResampleChoice::SincSampleNyquist
+        ) {
+            sinc_taps_slider(ui, &mut d.instrument_resample.sinc_taps);
+        }
+        if d.instrument_resample.choice == InstrumentResampleChoice::SincOutputNyquist {
+            ui.add(
+                egui::Slider::new(
+                    &mut d.instrument_resample.psg_cutoff_hz,
+                    1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
                 )
-                .on_hover_text("Low-pass cutoff for the PSG (square/wave/noise) channels.");
-                ui.add(
-                    egui::Slider::new(
-                        &mut d.instrument_resample.sampler_cutoff_hz,
-                        1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
-                    )
-                    .text("Sampler cutoff")
-                    .suffix(" Hz")
-                    .logarithmic(true),
-                )
-                .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
-            }
-            // Pop smoothing is independent of the resampling mode, so it's always available.
-            ui.checkbox(
-                &mut d.instrument_resample.smooth_psg_pops,
-                "Smooth PSG pops",
+                .text("PSG cutoff")
+                .suffix(" Hz")
+                .logarithmic(true),
             )
-            .on_hover_text(
-                "Slew PSG channel gains over ~2 ms so notes turning abruptly on and off don't \
+            .on_hover_text("Low-pass cutoff for the PSG (square/wave/noise) channels.");
+            ui.add(
+                egui::Slider::new(
+                    &mut d.instrument_resample.sampler_cutoff_hz,
+                    1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
+                )
+                .text("Sampler cutoff")
+                .suffix(" Hz")
+                .logarithmic(true),
+            )
+            .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
+        }
+        // Pop smoothing is independent of the resampling mode, so it's always available.
+        ui.checkbox(
+            &mut d.instrument_resample.smooth_psg_pops,
+            "Smooth PSG pops",
+        )
+        .on_hover_text(
+            "Slew PSG channel gains over ~2 ms so notes turning abruptly on and off don't \
                 click. Unchecked preserves the hardware's hard edges.",
-            );
-            ui.checkbox(
-                &mut d.instrument_resample.smooth_sample_pops,
-                "Smooth sample pops",
-            )
-            .on_hover_text(
-                "Slew sampled (DirectSound / SWAR) voice gains over ~2 ms so notes starting or cut \
+        );
+        ui.checkbox(
+            &mut d.instrument_resample.smooth_sample_pops,
+            "Smooth sample pops",
+        )
+        .on_hover_text(
+            "Slew sampled (DirectSound / SWAR) voice gains over ~2 ms so notes starting or cut \
                 mid-waveform don't click. Unchecked preserves the original edges.",
-            );
-            ui.separator();
-            ui.label("Mixer settings");
-            {
-                ui.checkbox(
+        );
+        ui.separator();
+        ui.label("Mixer settings");
+        {
+            ui.checkbox(
                     &mut d.use_mixer,
                     "Use intermediate mixer for sampled instruments",
                 )
@@ -1633,106 +1632,103 @@ impl OptimeApp {
                         rate. PSG (square/wave/noise) voices bypass it and play at the output rate. \
                         Emulates hardware that mixes its sampled channels at a low rate.",
                 );
-                ui.add_enabled(
-                    d.use_mixer,
-                    egui::Slider::new(&mut d.mixer_sample_rate, 10000..=48000)
-                        .step_by(1.0)
-                        .text("Mixer rate")
-                        .suffix(" Hz")
-                        .logarithmic(false),
-                );
+            ui.add_enabled(
+                d.use_mixer,
+                egui::Slider::new(&mut d.mixer_sample_rate, 10000..=48000)
+                    .step_by(1.0)
+                    .text("Mixer rate")
+                    .suffix(" Hz")
+                    .logarithmic(false),
+            );
+        }
+        ui.separator();
+
+        ui.label("Mixer-to-output resampling");
+        let use_mixer = d.use_mixer;
+        let ms = &mut d.mixer_resample;
+        let psg_crunch_compensation = &mut d.psg_crunch_compensation;
+        ui.add_enabled_ui(use_mixer, |ui| {
+            resample_combo(ui, "mixer-to-output-resampling", &mut ms.choice);
+            // Same per-selected-mode controls as the instrument stage, minus the PSG-specific ones
+            // (the bus is a finished mix): the sinc modes show taps, crunch shows a single cutoff.
+            if matches!(
+                ms.choice,
+                InstrumentResampleChoice::SincOutputNyquist
+                    | InstrumentResampleChoice::SincSampleNyquist
+            ) {
+                sinc_taps_slider(ui, &mut ms.sinc_taps);
             }
-            ui.separator();
-
-            ui.label("Mixer-to-output resampling");
-            let use_mixer = d.use_mixer;
-            let ms = &mut d.mixer_resample;
-            let psg_crunch_compensation = &mut d.psg_crunch_compensation;
-            ui.add_enabled_ui(use_mixer, |ui| {
-                resample_combo(ui, "mixer-to-output-resampling", &mut ms.choice);
-                // Same per-selected-mode controls as the instrument stage, minus the PSG-specific ones
-                // (the bus is a finished mix): the sinc modes show taps, crunch shows a single cutoff.
-                if matches!(
-                    ms.choice,
-                    InstrumentResampleChoice::SincOutputNyquist
-                        | InstrumentResampleChoice::SincSampleNyquist
-                ) {
-                    sinc_taps_slider(ui, &mut ms.sinc_taps);
-                }
-                if ms.choice == InstrumentResampleChoice::SincOutputNyquist {
-                    ui.add(
-                        egui::Slider::new(
-                            &mut ms.cutoff_hz,
-                            1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
-                        )
-                        .text("Cutoff")
-                        .suffix(" Hz")
-                        .logarithmic(true),
+            if ms.choice == InstrumentResampleChoice::SincOutputNyquist {
+                ui.add(
+                    egui::Slider::new(
+                        &mut ms.cutoff_hz,
+                        1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
                     )
-                    .on_hover_text("Low-pass cutoff for the mixer bus in crunch mode.");
+                    .text("Cutoff")
+                    .suffix(" Hz")
+                    .logarithmic(true),
+                )
+                .on_hover_text("Low-pass cutoff for the mixer bus in crunch mode.");
 
-                    ui.checkbox(
-                        psg_crunch_compensation,
-                        "Compensate PSG level for crunch high-end loss",
-                    )
-                    .on_hover_text(
-                        "Crunch resampling darkens the DirectSound bus' high end (less aliasing \
+                ui.checkbox(
+                    psg_crunch_compensation,
+                    "Compensate PSG level for crunch high-end loss",
+                )
+                .on_hover_text(
+                    "Crunch resampling darkens the DirectSound bus' high end (less aliasing \
                         energy), leaving the PSG voices sitting too loud. This colours the PSG bus \
                         with the same measured high-frequency rolloff so the two stay balanced.",
-                    );
-                }
-            });
-            ui.separator();
-
-            // Master high-shelf EQ — per device, like the resampling settings above.
-            ui.label("Master high-shelf EQ");
-            {
-                ui.checkbox(&mut d.shelf.enabled, "Enable high-shelf")
-                    .on_hover_text(
-                        "A master high-shelf EQ on the final mix. Negative gain tames harsh highs / \
-                    click brightness; positive adds air.",
-                    );
-                ui.add_enabled_ui(d.shelf.enabled, |ui| {
-                    ui.add(
-                        egui::Slider::new(&mut d.shelf.gain_db, -24.0..=24.0)
-                            .text("Gain")
-                            .suffix(" dB"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut d.shelf.cutoff_hz, 500.0..=16000.0)
-                            .text("Cutoff")
-                            .suffix(" Hz")
-                            .logarithmic(true),
-                    );
-                    ui.add(egui::Slider::new(&mut d.shelf.q, 0.1..=2.0).text("Q"));
-                    ui.add(
-                        egui::Slider::new(&mut d.shelf.order, 2..=16)
-                            .step_by(2.0)
-                            .text("Order"),
-                    )
-                    .on_hover_text(
-                        "Higher order steepens the shelf transition (more biquad sections).",
-                    );
-                });
-            }
-            ui.separator();
-            ui.label("Tuning system");
-            egui::ComboBox::from_id_salt("tuning")
-                .selected_text(if d.tuning_choice == 0 {
-                    "Equal temperament"
-                } else {
-                    "Pure (Pythagorean)"
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut d.tuning_choice, 0, "Equal temperament");
-                    ui.selectable_value(&mut d.tuning_choice, 1, "Pure (Pythagorean)");
-                });
-            if d.tuning_choice == 1 {
-                ui.add(
-                    egui::Slider::new(&mut d.pure_tonic, 0..=11).text("Tonic (semitones from A)"),
                 );
             }
         });
+        ui.separator();
+
+        // Master high-shelf EQ — per device, like the resampling settings above.
+        ui.label("Master high-shelf EQ");
+        {
+            ui.checkbox(&mut d.shelf.enabled, "Enable high-shelf")
+                .on_hover_text(
+                    "A master high-shelf EQ on the final mix. Negative gain tames harsh highs / \
+                    click brightness; positive adds air.",
+                );
+            ui.add_enabled_ui(d.shelf.enabled, |ui| {
+                ui.add(
+                    egui::Slider::new(&mut d.shelf.gain_db, -24.0..=24.0)
+                        .text("Gain")
+                        .suffix(" dB"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut d.shelf.cutoff_hz, 500.0..=16000.0)
+                        .text("Cutoff")
+                        .suffix(" Hz")
+                        .logarithmic(true),
+                );
+                ui.add(egui::Slider::new(&mut d.shelf.q, 0.1..=2.0).text("Q"));
+                ui.add(
+                    egui::Slider::new(&mut d.shelf.order, 2..=16)
+                        .step_by(2.0)
+                        .text("Order"),
+                )
+                .on_hover_text(
+                    "Higher order steepens the shelf transition (more biquad sections).",
+                );
+            });
+        }
+        ui.separator();
+        ui.label("Tuning system");
+        egui::ComboBox::from_id_salt("tuning")
+            .selected_text(if d.tuning_choice == 0 {
+                "Equal temperament"
+            } else {
+                "Pure (Pythagorean)"
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut d.tuning_choice, 0, "Equal temperament");
+                ui.selectable_value(&mut d.tuning_choice, 1, "Pure (Pythagorean)");
+            });
+        if d.tuning_choice == 1 {
+            ui.add(egui::Slider::new(&mut d.pure_tonic, 0..=11).text("Tonic (semitones from A)"));
+        }
     }
 
     /// The compact phone layout: a bottom navigation bar (Now Playing / Library / Playlists /
@@ -2385,7 +2381,9 @@ impl eframe::App for OptimeApp {
             .default_width(240.0)
             .width_range(220.0..=340.0)
             .show(ctx, |ui| {
-                self.settings_ui(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.settings_ui(ui);
+                });
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
