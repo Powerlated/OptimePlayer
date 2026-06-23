@@ -17,6 +17,7 @@
 //! The engine is deliberately free of any I/O or platform dependencies: feed it bytes, pull
 //! samples. The browser/audio/UI concerns live in the `optime-app` crate.
 
+pub mod device_settings;
 pub mod devices;
 mod dsp;
 pub mod sample;
@@ -25,6 +26,9 @@ pub mod synth_controller;
 pub mod tuning;
 pub mod util;
 
+pub use device_settings::{
+    InstrumentResampleChoice, InstrumentResampleSettings, MixerResampleSettings, PerDeviceSettings,
+};
 pub use devices::nintendo_ds::{
     calc_channel_volume, BankInfo, InstrumentBank, InstrumentRecord, InstrumentType, Message,
     MessageType, Sdat, Sequence, SequenceTrack, SseqInfo, SwarInfo,
