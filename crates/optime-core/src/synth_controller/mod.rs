@@ -24,7 +24,7 @@ pub mod messages;
 mod vis;
 
 pub use config::{DelaySmoothing, HighShelf, PopSmoothing, SynthConfig};
-pub use vis::{FsVisController, VisNote};
+pub use vis::{FsVisController, SongOverview, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
 use crate::dsp::biquad_filter::BiquadFilter;
@@ -347,6 +347,17 @@ impl SynthController {
     /// Current sequencer step rate (steps per second at the current tempo).
     pub fn step_rate(&self) -> f64 {
         self.player.step_rate()
+    }
+
+    /// The current musical tempo in quarter-note beats per minute, derived from the live step
+    /// rate and the device's steps-per-beat. Tracks tempo changes as the song plays.
+    pub fn current_bpm(&self) -> f64 {
+        let spb = self.player.steps_per_beat();
+        if spb > 0.0 {
+            self.player.step_rate() * 60.0 / spb
+        } else {
+            0.0
+        }
     }
 
     /// Reconfigures the mixer bank (and re-rates the mixer set when needed) from `config`, once per

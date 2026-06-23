@@ -13,9 +13,9 @@
 //! All rendering is isolated here so the draw layer can later be swapped for a `wgpu` paint
 //! callback (true shader bloom / particles) without touching the app.
 
-use egui::{Color32, Pos2, Rect, Sense, Stroke};
+use egui::{Color32, ColorImage, Pos2, Rect, Sense, Stroke};
 
-use optime_core::FsVisController;
+use optime_core::{FsVisController, SongOverview};
 
 use crate::visualizer::VisSnapshot;
 use crate::TRACK_COUNT;
@@ -33,8 +33,10 @@ const CURSOR_FRAC: f32 = 0.22;
 pub const RUN_AHEAD_TICKS: u32 = 560;
 /// Spacing of the scrolling vertical time grid, in steps.
 const GRID_TICKS: f64 = 96.0;
-/// Minimum bar length so zero/short-duration notes are still visible as they cross.
-const MIN_NOTE_TICKS: f64 = 24.0;
+/// Minimum drawn note width, in points, so very short (or not-yet-resolved) notes still show as a
+/// sliver. Applied at draw time rather than as a tick floor, so the stored lengths stay true to
+/// the real note durations.
+const MIN_NOTE_PX: f32 = 2.0;
 /// Width of the vertical keyboard, in points.
 const KEYBOARD_W: f32 = 40.0;
 
@@ -74,6 +76,13 @@ impl PianoRoll {
         self.display_tick
     }
 
+    /// The `[start, end)` step range currently visible in the roll (the cursor sits
+    /// [`CURSOR_FRAC`] of the way in). Used to highlight the visible window on the overview bar.
+    pub fn visible_range(&self) -> (f64, f64) {
+        let start = self.display_tick - WINDOW_TICKS * CURSOR_FRAC as f64;
+        (start, start + WINDOW_TICKS)
+    }
+
     /// Advances the smoothed playhead clock by `dt` seconds toward the audio position.
     ///
     /// The audio thread advances ticks in coarse bursts (one full output buffer at a time), so we
@@ -108,8 +117,11 @@ impl PianoRoll {
             if !(MIDI_LO..=MIDI_HI).contains(&n.key) {
                 continue;
             }
+            // Real note length: gate time for GBA (ties resolved in the look-ahead), the note's
+            // duration in ticks for DS. A minimum *width* is enforced at draw time instead of
+            // padding the length here, so the bars match the true note durations.
             let start = n.timestamp as f64;
-            let end = start + (n.duration as f64).max(MIN_NOTE_TICKS);
+            let end = start + n.duration as f64;
             self.notes.push(NoteEvent {
                 track: n.track,
                 pitch: n.key,
@@ -207,7 +219,8 @@ impl PianoRoll {
     ) {
         for n in &self.notes {
             let x_start = xt(n.start);
-            let x_end = xt(n.end);
+            // Keep at least a sliver visible for very short / still-held notes.
+            let x_end = xt(n.end).max(x_start + MIN_NOTE_PX);
             if x_end < roll.min.x || x_start > roll.max.x {
                 continue;
             }
@@ -325,6 +338,42 @@ impl PianoRoll {
             [Pos2::new(kb.max.x, kb.min.y), Pos2::new(kb.max.x, kb.max.y)],
             Stroke::new(1.0_f32, Color32::from_rgb(0x05, 0x06, 0x0a)),
         );
+    }
+}
+
+/// Rasterizes an entire song's note timeline into a small image for the piano-roll overview bar:
+/// time spans the width left→right, pitch the height (low at the bottom), one dot per note tinted
+/// by track. Background matches the roll so it reads as a zoomed-out mini piano roll.
+pub fn overview_image(overview: &SongOverview, width: usize, height: usize) -> ColorImage {
+    let bg = Color32::from_rgb(0x0c, 0x0e, 0x14);
+    let mut pixels = vec![bg; width.max(1) * height.max(1)];
+    let (w, h) = (width.max(1), height.max(1));
+    let total = overview.total_steps.max(1) as f64;
+
+    let mut plot = |x: usize, y: usize, c: Color32| {
+        if x < w && y < h {
+            pixels[y * w + x] = c;
+        }
+    };
+
+    for n in &overview.notes {
+        if !(MIDI_LO..=MIDI_HI).contains(&n.key) {
+            continue;
+        }
+        let start = n.timestamp as f64;
+        let end = start + n.duration.max(1) as f64;
+        let x0 = ((start / total) * w as f64).floor() as usize;
+        let x1 = (((end / total) * w as f64).ceil() as usize).max(x0 + 1);
+        let lane = (n.key - MIDI_LO) as f64 / (LANES - 1) as f64;
+        let row = ((h - 1) as f64 * (1.0 - lane)).round() as usize;
+        let color = track_color(n.track);
+        for x in x0..x1.min(w) {
+            plot(x, row, color);
+        }
+    }
+    ColorImage {
+        size: [w, h],
+        pixels,
     }
 }
 

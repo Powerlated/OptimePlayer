@@ -55,6 +55,10 @@ pub struct CircularBuffer<T> {
     read_pos: usize,
     write_pos: usize,
     entries: usize,
+    /// Total successful inserts over the buffer's lifetime. Each item's *serial* is its insert
+    /// index; combined with `entries` it gives a stable handle that survives later evictions
+    /// (see [`Self::peek_mut_serial`]).
+    inserted: u64,
 }
 
 impl<T> CircularBuffer<T> {
@@ -67,6 +71,7 @@ impl<T> CircularBuffer<T> {
             read_pos: 0,
             write_pos: 0,
             entries: 0,
+            inserted: 0,
         }
     }
 
@@ -98,6 +103,7 @@ impl<T> CircularBuffer<T> {
     pub fn insert(&mut self, data: T) -> bool {
         if self.entries < self.buffer.len() {
             self.entries += 1;
+            self.inserted += 1;
             self.buffer[self.write_pos] = Some(data);
             self.write_pos += 1;
             if self.write_pos >= self.buffer.len() {
@@ -107,6 +113,27 @@ impl<T> CircularBuffer<T> {
         } else {
             false
         }
+    }
+
+    /// The serial of the most recently inserted item, or `None` if nothing has been inserted.
+    ///
+    /// A serial is a monotonically increasing id (the insert index); it stays valid as a handle
+    /// even after the item ahead of it is popped/evicted, until the item itself is evicted.
+    #[inline]
+    pub fn last_serial(&self) -> Option<u64> {
+        self.inserted.checked_sub(1)
+    }
+
+    /// Mutable access to the item with the given `serial`, or `None` if it has been evicted (or
+    /// never existed). See [`Self::last_serial`].
+    pub fn peek_mut_serial(&mut self, serial: u64) -> Option<&mut T> {
+        let first = self.inserted - self.entries as u64; // serial of the current front
+        if serial < first || serial >= self.inserted {
+            return None;
+        }
+        let offset = (serial - first) as usize;
+        let len = self.buffer.len();
+        self.buffer[(self.read_pos + offset) % len].as_mut()
     }
 
     /// Pops the front item, or `None` if empty.
@@ -140,6 +167,7 @@ impl<T> CircularBuffer<T> {
         self.read_pos = 0;
         self.write_pos = 0;
         self.entries = 0;
+        self.inserted = 0;
     }
 }
 
@@ -202,5 +230,28 @@ mod tests {
         assert_eq!(cb.pop(), Some(3));
         assert_eq!(cb.pop(), Some(4));
         assert_eq!(cb.pop(), None);
+    }
+
+    #[test]
+    fn serial_handles_survive_eviction() {
+        let mut cb = CircularBuffer::new(2);
+        cb.insert(10);
+        let s_a = cb.last_serial().unwrap(); // serial 0
+        cb.insert(20);
+        let s_b = cb.last_serial().unwrap(); // serial 1
+        assert_eq!(cb.peek_mut_serial(s_a).copied(), Some(10));
+        assert_eq!(cb.peek_mut_serial(s_b).copied(), Some(20));
+
+        // Mutate through the handle.
+        *cb.peek_mut_serial(s_a).unwrap() = 11;
+        assert_eq!(cb.peek(0).copied(), Some(11));
+
+        // Evict the front; its handle goes stale, the survivor's stays valid.
+        cb.pop();
+        cb.insert(30);
+        let s_c = cb.last_serial().unwrap(); // serial 2
+        assert_eq!(cb.peek_mut_serial(s_a), None, "evicted handle is stale");
+        assert_eq!(cb.peek_mut_serial(s_b).copied(), Some(20));
+        assert_eq!(cb.peek_mut_serial(s_c).copied(), Some(30));
     }
 }

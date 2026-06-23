@@ -18,6 +18,8 @@ pub struct VisSnapshot {
     /// Current sequencer step rate in steps/second (tempo-dependent), for the piano roll's
     /// smoothed scroll clock.
     pub step_rate: f64,
+    /// Current musical tempo in quarter-note BPM (tracks tempo changes), for the tempo marking.
+    pub bpm: f64,
 }
 
 impl Default for VisSnapshot {
@@ -27,6 +29,7 @@ impl Default for VisSnapshot {
             notes_on: [[false; 128]; TRACK_COUNT],
             steps: 0,
             step_rate: 0.0,
+            bpm: 0.0,
         }
     }
 }

@@ -178,6 +178,16 @@ impl DevicePlayer {
         }
     }
 
+    /// Sequencer steps per quarter-note beat (DS SSEQ: 48 ticks; GBA MP2K: 24 steps). Lets a
+    /// visualizer convert the tempo-dependent [`Self::step_rate`] into a musical BPM:
+    /// `bpm = step_rate * 60 / steps_per_beat`.
+    pub fn steps_per_beat(&self) -> f64 {
+        match self {
+            DevicePlayer::NintendoDs(_) => 48.0,
+            DevicePlayer::Gba(_) => 24.0,
+        }
+    }
+
     /// Advances the device by one tick, draining `feedback` and appending events to `events`.
     pub fn tick(
         &mut self,

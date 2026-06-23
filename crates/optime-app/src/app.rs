@@ -238,6 +238,10 @@ pub struct OptimeApp {
     piano_roll: PianoRoll,
     /// Parallel look-ahead sequence runner feeding upcoming notes to the piano roll.
     look_ahead: Option<FsVisController>,
+    /// Whole-track note timeline for the overview bar, rendered once when the song loads.
+    overview: Option<optime_core::SongOverview>,
+    /// GPU texture of [`Self::overview`], (re)built lazily from the active [`egui::Context`].
+    overview_tex: Option<egui::TextureHandle>,
 }
 
 impl OptimeApp {
@@ -295,6 +299,8 @@ impl OptimeApp {
             vis_tab: VisTab::PianoRoll,
             piano_roll: PianoRoll::default(),
             look_ahead: None,
+            overview: None,
+            overview_tex: None,
         };
 
         // Resume where the last session left off (paused), if the last track was from a demo
@@ -641,6 +647,7 @@ impl OptimeApp {
         let Some(song) = self.songs.get(index) else {
             return;
         };
+        let (archive_index, song_id) = (song.archive_index, song.song_id);
         let data = &self.archives[song.archive_index];
         match SynthController::new(self.sample_rate, data, song.song_id) {
             Some(controller) => {
@@ -669,9 +676,22 @@ impl OptimeApp {
             None => self.status = format!("Failed to load: {}", song.label),
         }
 
+        // Pre-render the whole-track overview bar (desktop only). Cleared first so a failed load
+        // or a song switch never shows the previous track's overview.
+        self.overview = None;
+        self.overview_tex = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.current_song == Some(index) {
+            self.overview =
+                FsVisController::overview(&self.archives[archive_index], song_id);
+        }
+
         #[cfg(target_arch = "wasm32")]
-        if let Some(track_ref) = self.current_track_ref() {
-            let _ = update_query_string(track_ref);
+        {
+            let _ = (archive_index, song_id);
+            if let Some(track_ref) = self.current_track_ref() {
+                let _ = update_query_string(track_ref);
+            }
         }
     }
 
@@ -1012,6 +1032,7 @@ impl OptimeApp {
             snap.active = true;
             snap.steps = controller.steps_elapsed();
             snap.step_rate = controller.step_rate();
+            snap.bpm = controller.current_bpm();
             for t in 0..TRACK_COUNT {
                 for n in 0..128 {
                     snap.notes_on[t][n] = controller.notes_on[t][n] != 0;
@@ -1038,6 +1059,7 @@ impl OptimeApp {
             snap.active = true;
             snap.steps = controller.steps_elapsed();
             snap.step_rate = controller.step_rate();
+            snap.bpm = controller.current_bpm();
             for t in 0..TRACK_COUNT {
                 for n in 0..128 {
                     snap.notes_on[t][n] = controller.notes_on[t][n] != 0;
@@ -1045,6 +1067,64 @@ impl OptimeApp {
             }
         }
         snap
+    }
+
+    /// The desktop piano-roll panel: a pre-rendered whole-track overview bar with the visible
+    /// window highlighted, the current tempo marking beneath it, then the scrolling roll.
+    fn piano_roll_panel(&mut self, ui: &mut egui::Ui, snap: &VisSnapshot) {
+        // Lazily (re)build the overview texture from the song loaded in `play_song_keep_queue`.
+        if self.overview_tex.is_none() {
+            if let Some(ov) = &self.overview {
+                let img = crate::piano_roll::overview_image(ov, 1024, 72);
+                self.overview_tex =
+                    Some(ui.ctx()
+                        .load_texture("piano_overview", img, egui::TextureOptions::LINEAR));
+            }
+        }
+
+        // The overview bar (whole track) with the on-screen window highlighted.
+        if let (Some(tex), Some(ov)) = (&self.overview_tex, &self.overview) {
+            let bar_h = 32.0;
+            let (bar, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), bar_h),
+                egui::Sense::hover(),
+            );
+            let painter = ui.painter_at(bar);
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(tex.id(), bar, uv, egui::Color32::WHITE);
+
+            let total = ov.total_steps.max(1) as f64;
+            let (vs, ve) = self.piano_roll.visible_range();
+            let frac = |t: f64| (t / total).clamp(0.0, 1.0) as f32;
+            let x0 = bar.min.x + frac(vs) * bar.width();
+            let x1 = bar.min.x + frac(ve) * bar.width();
+            let win = egui::Rect::from_min_max(egui::pos2(x0, bar.min.y), egui::pos2(x1, bar.max.y));
+            painter.rect_filled(win, 0.0, egui::Color32::from_white_alpha(36));
+            painter.rect_stroke(
+                win,
+                0.0,
+                egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(170)),
+            );
+            painter.rect_stroke(
+                bar,
+                2.0,
+                egui::Stroke::new(1.0_f32, crate::theme::HAIRLINE),
+            );
+        }
+
+        // The current tempo marking, below the bar.
+        if snap.active && snap.bpm > 0.0 {
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(format!("\u{2669} = {}", snap.bpm.round() as i64))
+                    .monospace()
+                    .color(egui::Color32::from_gray(0xc0)),
+            );
+        }
+        ui.add_space(2.0);
+
+        // The scrolling roll fills the rest of the panel.
+        self.piano_roll.draw(ui, snap.active);
     }
 
     /// The full song list with like / add-to-playlist menus and status badges.
@@ -2278,7 +2358,7 @@ impl eframe::App for OptimeApp {
 
             match self.vis_tab {
                 VisTab::PianoRoll => {
-                    self.piano_roll.draw(ui, snap.active);
+                    self.piano_roll_panel(ui, &snap);
                 }
                 VisTab::Tracks => {
                     egui::ScrollArea::both().show(ui, |ui| {
