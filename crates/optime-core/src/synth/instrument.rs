@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use crate::devices::VoicePitch;
-use crate::dsp::resample::{gather_sinc, GatherSource, ResampleTables};
+use crate::dsp::resample::{
+    effective_gather, gather_sinc, sinc_fc, EffectiveGather, GatherSource, ResampleTables,
+};
 use crate::sample::{InstrumentResampleMode, Sample};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
 
@@ -333,68 +335,6 @@ impl SampleInstrument {
         self.finetune = semitones;
         self.recompute_freq(tuning);
     }
-}
-
-/// The gather a voice actually runs after resolving the global [`InstrumentResampleMode`] against the
-/// voice's sample kind.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum EffectiveGather {
-    Nearest,
-    Linear,
-    /// Windowed-sinc. `step_mode` selects the BLEP step kernel (output-Nyquist crunch);
-    /// `cutoff_hz` is an extra low-pass on top of the mode's natural cutoff.
-    Sinc {
-        step_mode: bool,
-        cutoff_hz: Option<u32>,
-    },
-}
-
-/// Resolves the global mode for one voice.
-///
-/// PSG waveforms under the clean (SampleNyquist) mode still take the BLEP step gather: their
-/// hard ZOH edges are band-limited to the *output* Nyquist instead of being smoothed down to the
-/// (tiny) source Nyquist of an 8-sample loop, preserving their square character alias-free. The
-/// crunchy (OutputNyquist) mode additionally applies the user's per-kind cutoff slider.
-fn effective_gather(mode: InstrumentResampleMode, is_psg: bool) -> EffectiveGather {
-    match mode {
-        InstrumentResampleMode::NearestNeighbor => EffectiveGather::Nearest,
-        InstrumentResampleMode::Linear => EffectiveGather::Linear,
-        InstrumentResampleMode::SincSampleNyquist { .. } => EffectiveGather::Sinc {
-            step_mode: is_psg,
-            cutoff_hz: None,
-        },
-        InstrumentResampleMode::SincOutputNyquist {
-            psg_cutoff_hz,
-            sampler_cutoff_hz,
-            ..
-        } => EffectiveGather::Sinc {
-            step_mode: true,
-            cutoff_hz: Some(if is_psg {
-                psg_cutoff_hz
-            } else {
-                sampler_cutoff_hz
-            }),
-        },
-    }
-}
-
-/// The sinc gather's low-pass cutoff in cycles/source-sample (source Nyquist = 0.5) for playback
-/// speed `r` (source samples per output sample).
-///
-/// - Impulse mode (clean reconstruction): `min(0.5, 0.5/r)` — removes ZOH images when
-///   upsampling, anti-aliases when downsampling.
-/// - Step mode (BLEP): `0.5/r`, the *output* Nyquist, so the stairstep edges are band-limited to
-///   the output rate. For `r > 1` (downsampling) this is `< 0.5` and anti-aliases; for `r ≤ 1`
-///   (upsampling) it is `≥ 0.5`, keeping the crunch images that sit below output Nyquist while
-///   still band-limiting the hard edges (no nearest-neighbour jitter).
-/// - `cutoff_hz` (the crunchy-mode sliders) lowers either further: an output-domain frequency
-///   `f` Hz is `f / (r · sample_rate)` cycles/source-sample.
-fn sinc_fc(r: f64, inv_sample_rate: f64, step_mode: bool, cutoff_hz: Option<u32>) -> f64 {
-    let mut fc = if step_mode || r > 1.0 { 0.5 / r } else { 0.5 };
-    if let Some(hz) = cutoff_hz {
-        fc = fc.min(f64::from(hz) * inv_sample_rate / r);
-    }
-    fc
 }
 
 /// Folds the read position back into the loop body once it passes the sample end, keeping the

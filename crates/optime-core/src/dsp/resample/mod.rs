@@ -32,6 +32,10 @@
 //! - [`gather`] / [`simd`] — the scalar and portable-SIMD gather kernels.
 //! - [`source`] — the loop-aware source-staging gather ([`gather_sinc`]) that feeds a voice.
 //! - [`stream`] — the streaming, fixed-ratio [`StreamResampler`] for the mixer-bus → output stage.
+//!
+//! Resolving an [`InstrumentResampleMode`](crate::sample::InstrumentResampleMode) into the concrete
+//! gather + cutoff ([`effective_gather`] / [`sinc_fc`] / [`mode_half_taps`]) lives here too, shared
+//! by the voice gather and the stream resampler.
 
 mod gather;
 mod kernels;
@@ -47,7 +51,85 @@ pub use kernels::MAX_HALF_TAPS;
 pub use source::{gather_sinc, GatherSource};
 pub use stream::StreamResampler;
 
+use crate::sample::InstrumentResampleMode;
 use kernels::{kernels, OVERSAMPLE, WIN_OVERSAMPLE};
+
+/// The gather a read actually runs after resolving the global [`InstrumentResampleMode`] against
+/// the signal kind (a voice's sample, or the mixer bus).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EffectiveGather {
+    Nearest,
+    Linear,
+    /// Windowed-sinc. `step_mode` selects the BLEP step kernel (output-Nyquist crunch);
+    /// `cutoff_hz` is an extra low-pass on top of the mode's natural cutoff.
+    Sinc {
+        step_mode: bool,
+        cutoff_hz: Option<u32>,
+    },
+}
+
+/// Resolves the global mode for one signal. `is_psg` marks a PSG waveform (square/wave/noise); the
+/// mixer bus passes `false` (a finished mix has no PSG/sampled distinction).
+///
+/// PSG waveforms under the clean (SampleNyquist) mode still take the BLEP step gather: their
+/// hard ZOH edges are band-limited to the *output* Nyquist instead of being smoothed down to the
+/// (tiny) source Nyquist of an 8-sample loop, preserving their square character alias-free. The
+/// crunchy (OutputNyquist) mode additionally applies the user's per-kind cutoff slider.
+pub(crate) fn effective_gather(mode: InstrumentResampleMode, is_psg: bool) -> EffectiveGather {
+    match mode {
+        InstrumentResampleMode::NearestNeighbor => EffectiveGather::Nearest,
+        InstrumentResampleMode::Linear => EffectiveGather::Linear,
+        InstrumentResampleMode::SincSampleNyquist { .. } => EffectiveGather::Sinc {
+            step_mode: is_psg,
+            cutoff_hz: None,
+        },
+        InstrumentResampleMode::SincOutputNyquist {
+            psg_cutoff_hz,
+            sampler_cutoff_hz,
+            ..
+        } => EffectiveGather::Sinc {
+            step_mode: true,
+            cutoff_hz: Some(if is_psg {
+                psg_cutoff_hz
+            } else {
+                sampler_cutoff_hz
+            }),
+        },
+    }
+}
+
+/// The half-width of the kernel support a sinc mode needs (`None` for the 1–2 tap / nearest modes).
+pub(crate) fn mode_half_taps(mode: InstrumentResampleMode) -> Option<usize> {
+    match mode {
+        InstrumentResampleMode::SincSampleNyquist { half_taps }
+        | InstrumentResampleMode::SincOutputNyquist { half_taps, .. } => Some(half_taps),
+        _ => None,
+    }
+}
+
+/// The sinc gather's low-pass cutoff in cycles/source-sample (source Nyquist = 0.5) for playback
+/// speed `r` (source samples per output sample).
+///
+/// - Impulse mode (clean reconstruction): `min(0.5, 0.5/r)` — removes ZOH images when
+///   upsampling, anti-aliases when downsampling.
+/// - Step mode (BLEP): `0.5/r`, the *output* Nyquist, so the stairstep edges are band-limited to
+///   the output rate. For `r > 1` (downsampling) this is `< 0.5` and anti-aliases; for `r ≤ 1`
+///   (upsampling) it is `≥ 0.5`, keeping the crunch images that sit below output Nyquist while
+///   still band-limiting the hard edges (no nearest-neighbour jitter).
+/// - `cutoff_hz` (the crunchy-mode sliders) lowers either further: an output-domain frequency
+///   `f` Hz is `f / (r · sample_rate)` cycles/source-sample.
+pub(crate) fn sinc_fc(
+    r: f64,
+    inv_sample_rate: f64,
+    step_mode: bool,
+    cutoff_hz: Option<u32>,
+) -> f64 {
+    let mut fc = if step_mode || r > 1.0 { 0.5 / r } else { 0.5 };
+    if let Some(hz) = cutoff_hz {
+        fc = fc.min(f64::from(hz) * inv_sample_rate / r);
+    }
+    fc
+}
 
 /// Stack-buffer length covering the widest possible gather window (one full tap window at
 /// [`MAX_HALF_TAPS`]). Sized so every staged-window gather reads a plain slice.

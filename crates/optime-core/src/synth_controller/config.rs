@@ -52,24 +52,6 @@ impl HighShelf {
     }
 }
 
-/// How the intermediate mixer's stereo bus is brought up from the mixer rate to the output rate
-/// (see [`SynthConfig::use_mixer`]). Mirrors the per-voice resampling choices, restricted to the
-/// two that make sense for a finished stereo bus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MixerResampleMode {
-    /// Zero-order hold — keep the mixer-rate stairstep (the lo-fi hardware-mixer colour).
-    Nearest,
-    /// Windowed-sinc reconstruction, band-limited to the mixer Nyquist. `half_taps` is the
-    /// kernel's source-sample half-width (shared with the voice resampler's tables).
-    Sinc { half_taps: usize },
-}
-
-impl Default for MixerResampleMode {
-    fn default() -> Self {
-        MixerResampleMode::Sinc { half_taps: 16 }
-    }
-}
-
 /// Runtime-tunable synthesis options (replaces the original engine's global flags).
 #[derive(Debug, Clone)]
 pub struct SynthConfig {
@@ -103,8 +85,9 @@ pub struct SynthConfig {
     pub use_mixer: bool,
     /// Sample rate (Hz) of the intermediate mixer bus, when [`Self::use_mixer`] is set.
     pub mixer_sample_rate: f64,
-    /// How the intermediate mixer bus is brought up to the output rate.
-    pub mixer_resample: MixerResampleMode,
+    /// How the intermediate mixer bus is brought up to the output rate (the same algorithm set as
+    /// the per-voice [`Self::resample`], resolved against the bus as a non-PSG signal).
+    pub mixer_resample: InstrumentResampleMode,
 }
 
 impl Default for SynthConfig {
@@ -122,7 +105,8 @@ impl Default for SynthConfig {
             high_shelf: HighShelf::default(),
             use_mixer: false,
             mixer_sample_rate: 48_000.0,
-            mixer_resample: MixerResampleMode::default(),
+            // Clean reconstruction is the sane default for upsampling a finished bus.
+            mixer_resample: InstrumentResampleMode::SincSampleNyquist { half_taps: 16 },
         }
     }
 }

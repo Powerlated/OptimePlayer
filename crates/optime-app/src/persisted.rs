@@ -159,28 +159,18 @@ impl Default for InstrumentResampleSettings {
     }
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-pub enum MixerResampleChoice {
-    Nearest,
-    Sinc,
-}
-
-impl MixerResampleChoice {
-    pub fn text(&self) -> &'static str {
-        match self {
-            MixerResampleChoice::Nearest => "Nearest",
-            MixerResampleChoice::Sinc => "Sinc",
-        }
-    }
-}
-
+/// Mixer-to-output resampling settings. Reuses the same algorithm choice as the per-instrument
+/// stage ([`InstrumentResampleChoice`]); the bus is a finished mix (no PSG/sampled split), so the
+/// crunch mode carries a single `cutoff_hz` rather than the per-kind PSG/sampler cutoffs.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct MixerResampleSettings {
-    /// Resampling choice enum
-    pub choice: MixerResampleChoice,
+    /// Resampling choice enum (shared with the instrument stage).
+    pub choice: InstrumentResampleChoice,
     /// Total source-tap count for the sinc/reconstruction kernel.
     pub sinc_taps: usize,
+    /// Crunchy-mode low-pass cutoff (Hz) for the bus.
+    pub cutoff_hz: u32,
 }
 
 impl Default for MixerResampleSettings {
@@ -189,6 +179,7 @@ impl Default for MixerResampleSettings {
         Self {
             choice: d::MIXER_RESAMPLE_CHOICE,
             sinc_taps: d::MIXER_RESAMPLE_SINC_TAPS,
+            cutoff_hz: d::MIXER_CUTOFF_HZ,
         }
     }
 }

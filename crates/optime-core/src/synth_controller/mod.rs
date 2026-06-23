@@ -23,7 +23,7 @@ mod config;
 pub mod messages;
 mod vis;
 
-pub use config::{DelaySmoothing, HighShelf, MixerResampleMode, SynthConfig};
+pub use config::{DelaySmoothing, HighShelf, SynthConfig};
 pub use vis::{FsVisController, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
@@ -139,11 +139,8 @@ impl Bank {
             self.rate = config.mixer_sample_rate;
             self.rate
         });
-        let half_taps = match config.mixer_resample {
-            MixerResampleMode::Nearest => None,
-            MixerResampleMode::Sinc { half_taps } => Some(half_taps),
-        };
-        self.resampler.set(self.rate, out_rate, half_taps);
+        self.resampler
+            .set(self.rate, out_rate, config.mixer_resample);
         rate_change
     }
 

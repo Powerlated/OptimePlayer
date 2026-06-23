@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use optime_core::{
-    DelaySmoothing, FsVisController, HighShelf, InstrumentResampleMode, MixerResampleMode,
-    SoundData, SynthConfig, SynthController, TuningSystem,
+    DelaySmoothing, FsVisController, HighShelf, InstrumentResampleMode, SoundData, SynthConfig,
+    SynthController, TuningSystem,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -12,12 +12,66 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
-use crate::persisted::{
-    InstrumentResampleChoice, MixerResampleChoice, Persisted, RepeatMode, SortMode, TrackRef,
-};
+use crate::persisted::{InstrumentResampleChoice, Persisted, RepeatMode, SortMode, TrackRef};
 use crate::piano_roll::PianoRoll;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
+
+/// Resolves a UI resampling choice + slider values into the engine's [`InstrumentResampleMode`].
+/// Shared by the per-instrument and mixer-to-output stages (the mixer passes its single bus cutoff
+/// as both the PSG and sampler cutoff — the bus is non-PSG, so only the sampler cutoff bites).
+fn resample_mode(
+    choice: &InstrumentResampleChoice,
+    sinc_taps: usize,
+    psg_cutoff_hz: u32,
+    sampler_cutoff_hz: u32,
+) -> InstrumentResampleMode {
+    let half_taps = (sinc_taps / 2).max(1);
+    match choice {
+        InstrumentResampleChoice::Nearest => InstrumentResampleMode::NearestNeighbor,
+        InstrumentResampleChoice::Linear => InstrumentResampleMode::Linear,
+        InstrumentResampleChoice::SincSampleNyquist => {
+            InstrumentResampleMode::SincSampleNyquist { half_taps }
+        }
+        InstrumentResampleChoice::SincOutputNyquist => InstrumentResampleMode::SincOutputNyquist {
+            half_taps,
+            psg_cutoff_hz,
+            sampler_cutoff_hz,
+        },
+    }
+}
+
+/// The four-option resampling-algorithm combo box, shared by the resampling settings sections.
+fn resample_combo(ui: &mut egui::Ui, id_salt: &str, choice: &mut InstrumentResampleChoice) {
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(choice.text())
+            .show_ui(ui, |ui| {
+                for option in [
+                    InstrumentResampleChoice::Nearest,
+                    InstrumentResampleChoice::Linear,
+                    InstrumentResampleChoice::SincOutputNyquist,
+                    InstrumentResampleChoice::SincSampleNyquist,
+                ] {
+                    let text = option.text();
+                    ui.selectable_value(choice, option, text);
+                }
+            });
+    });
+}
+
+/// The "Sinc taps" slider, shared by the resampling settings sections (shown for the sinc modes).
+fn sinc_taps_slider(ui: &mut egui::Ui, sinc_taps: &mut usize) {
+    ui.add(
+        egui::Slider::new(sinc_taps, 4..=128)
+            .step_by(2.0)
+            .text("Sinc taps"),
+    )
+    .on_hover_text(
+        "Number of source samples the kernel spans — fixed regardless of pitch, so CPU cost is \
+         constant. More taps → sharper cutoff and better stopband rejection, at higher CPU cost.",
+    );
+}
 
 /// One entry in the flattened song list.
 struct Song {
@@ -366,24 +420,18 @@ impl OptimeApp {
             }
         };
         let rs = self.p.instrument_resample.clone();
-        let half_taps = (rs.sinc_taps / 2).max(1);
-        let resample = match rs.choice {
-            InstrumentResampleChoice::Linear => InstrumentResampleMode::Linear,
-            InstrumentResampleChoice::SincOutputNyquist => {
-                InstrumentResampleMode::SincOutputNyquist {
-                    half_taps,
-                    psg_cutoff_hz: rs.psg_cutoff_hz,
-                    sampler_cutoff_hz: rs.sampler_cutoff_hz,
-                }
-            }
-            InstrumentResampleChoice::SincSampleNyquist => {
-                InstrumentResampleMode::SincSampleNyquist { half_taps }
-            }
-            _ => InstrumentResampleMode::NearestNeighbor,
-        };
+        let resample = resample_mode(
+            &rs.choice,
+            rs.sinc_taps,
+            rs.psg_cutoff_hz,
+            rs.sampler_cutoff_hz,
+        );
         // Pop smoothing is a crunchy-mode option; the other modes keep the hardware edges.
         let smooth_psg_pops =
             rs.smooth_psg_pops && rs.choice == InstrumentResampleChoice::SincOutputNyquist;
+        // The mixer bus is a finished (non-PSG) mix, so its single cutoff feeds both cutoff slots.
+        let ms = &self.p.mixer_resample;
+        let mixer_resample = resample_mode(&ms.choice, ms.sinc_taps, ms.cutoff_hz, ms.cutoff_hz);
         let sh = self.p.shelf.clone();
         let high_shelf = HighShelf {
             enabled: sh.enabled,
@@ -408,12 +456,7 @@ impl OptimeApp {
             high_shelf,
             use_mixer: self.p.use_mixer,
             mixer_sample_rate: f64::from(self.p.mixer_sample_rate),
-            mixer_resample: match self.p.mixer_resample.choice {
-                MixerResampleChoice::Nearest => MixerResampleMode::Nearest,
-                MixerResampleChoice::Sinc => MixerResampleMode::Sinc {
-                    half_taps: (self.p.mixer_resample.sinc_taps / 2).max(1),
-                },
-            },
+            mixer_resample,
         }
     }
 
@@ -1346,49 +1389,18 @@ impl OptimeApp {
         });
         ui.separator();
         ui.label("Instrument-to-mixer resampling");
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("instrument-to-mixer-resampling")
-                .selected_text(self.p.instrument_resample.choice.text())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.p.instrument_resample.choice,
-                        InstrumentResampleChoice::Nearest,
-                        InstrumentResampleChoice::Nearest.text(),
-                    );
-                    ui.selectable_value(
-                        &mut self.p.instrument_resample.choice,
-                        InstrumentResampleChoice::Linear,
-                        InstrumentResampleChoice::Linear.text(),
-                    );
-                    ui.selectable_value(
-                        &mut self.p.instrument_resample.choice,
-                        InstrumentResampleChoice::SincOutputNyquist,
-                        InstrumentResampleChoice::SincOutputNyquist.text(),
-                    );
-                    ui.selectable_value(
-                        &mut self.p.instrument_resample.choice,
-                        InstrumentResampleChoice::SincSampleNyquist,
-                        InstrumentResampleChoice::SincSampleNyquist.text(),
-                    );
-                });
-        });
+        resample_combo(
+            ui,
+            "instrument-to-mixer-resampling",
+            &mut self.p.instrument_resample.choice,
+        );
         // Only the options of the selected mode are shown.
         if matches!(
             self.p.instrument_resample.choice,
             InstrumentResampleChoice::SincOutputNyquist
                 | InstrumentResampleChoice::SincSampleNyquist
         ) {
-            ui.add(
-                egui::Slider::new(&mut self.p.instrument_resample.sinc_taps, 4..=128)
-                    .step_by(2.0)
-                    .text("Sinc taps")
-                    .logarithmic(false),
-            )
-            .on_hover_text(
-                "Number of source samples the kernel spans — fixed regardless of pitch, \
-                     so CPU cost is constant per voice. More taps → sharper cutoff and better \
-                     stopband rejection, at higher CPU cost.",
-            );
+            sinc_taps_slider(ui, &mut self.p.instrument_resample.sinc_taps);
         }
         if self.p.instrument_resample.choice == InstrumentResampleChoice::SincOutputNyquist {
             ui.add(
@@ -1423,17 +1435,20 @@ impl OptimeApp {
         ui.separator();
         ui.label("Mixer settings");
         {
-            ui.checkbox(&mut self.p.use_mixer, "Use intermediate mixer")
-                .on_hover_text(
-                    "Route the sampled (non-PSG) instruments through an intermediate mixer \
+            ui.checkbox(
+                &mut self.p.use_mixer,
+                "Use intermediate mixer for sampled instruments",
+            )
+            .on_hover_text(
+                "Route the sampled (non-PSG) instruments through an intermediate mixer \
                      running at the mixer rate below, then resample that bus up to the output \
                      rate. PSG (square/wave/noise) voices bypass it and play at the output rate. \
                      Emulates hardware that mixes its sampled channels at a low rate.",
-                );
+            );
             ui.add_enabled(
                 self.p.use_mixer,
                 egui::Slider::new(&mut self.p.mixer_sample_rate, 10000..=48000)
-                    .step_by(10.0)
+                    .step_by(1.0)
                     .text("Mixer rate")
                     .suffix(" Hz")
                     .logarithmic(false),
@@ -1442,23 +1457,30 @@ impl OptimeApp {
         ui.separator();
 
         ui.label("Mixer-to-output resampling");
+        let ms = &mut self.p.mixer_resample;
         ui.add_enabled_ui(self.p.use_mixer, |ui| {
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("mixer-to-output-resampling")
-                    .selected_text(self.p.mixer_resample.choice.text())
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.p.mixer_resample.choice,
-                            MixerResampleChoice::Nearest,
-                            MixerResampleChoice::Nearest.text(),
-                        );
-                        ui.selectable_value(
-                            &mut self.p.mixer_resample.choice,
-                            MixerResampleChoice::Sinc,
-                            MixerResampleChoice::Sinc.text(),
-                        );
-                    });
-            });
+            resample_combo(ui, "mixer-to-output-resampling", &mut ms.choice);
+            // Same per-selected-mode controls as the instrument stage, minus the PSG-specific ones
+            // (the bus is a finished mix): the sinc modes show taps, crunch shows a single cutoff.
+            if matches!(
+                ms.choice,
+                InstrumentResampleChoice::SincOutputNyquist
+                    | InstrumentResampleChoice::SincSampleNyquist
+            ) {
+                sinc_taps_slider(ui, &mut ms.sinc_taps);
+            }
+            if ms.choice == InstrumentResampleChoice::SincOutputNyquist {
+                ui.add(
+                    egui::Slider::new(
+                        &mut ms.cutoff_hz,
+                        1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
+                    )
+                    .text("Cutoff")
+                    .suffix(" Hz")
+                    .logarithmic(true),
+                )
+                .on_hover_text("Low-pass cutoff for the mixer bus in crunch mode.");
+            }
         });
         ui.separator();
 

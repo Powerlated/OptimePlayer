@@ -8,8 +8,8 @@ use super::instrument::SampleInstrument;
 use super::{CROSSOVER_Q, MAX_BLOCK};
 use crate::devices::VoicePitch;
 use crate::dsp::biquad_filter::BiquadFilter;
-use crate::dsp::resample::ResampleTables;
-use crate::sample::{InstrumentResampleMode, Sample};
+use crate::dsp::resample::{mode_half_taps, ResampleTables};
+use crate::sample::Sample;
 use crate::synth_controller::{DelaySmoothing, SynthConfig};
 use crate::tuning::TuningSystem;
 
@@ -188,11 +188,7 @@ impl SampleSynthesizer {
 
     /// Rebuilds the sinc tables if the mode switched to a sinc variant or the tap count changed.
     fn ensure_tables(&mut self, config: &SynthConfig) {
-        let needed_taps = match config.resample {
-            InstrumentResampleMode::SincSampleNyquist { half_taps }
-            | InstrumentResampleMode::SincOutputNyquist { half_taps, .. } => Some(half_taps),
-            _ => None,
-        };
+        let needed_taps = mode_half_taps(config.resample);
         if let Some(ht) = needed_taps {
             if self.resample_tables.is_none() || self.resample_half_taps != ht {
                 self.resample_tables = Some(ResampleTables::new(ht));

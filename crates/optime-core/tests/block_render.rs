@@ -5,9 +5,7 @@
 
 use std::path::PathBuf;
 
-use optime_core::{
-    InstrumentResampleMode, MixerResampleMode, SoundData, SynthConfig, SynthController,
-};
+use optime_core::{InstrumentResampleMode, SoundData, SynthConfig, SynthController};
 
 fn load_demo() -> SoundData {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../demos/super-mario-64-ds.sdat");
@@ -115,10 +113,14 @@ fn fill_matches_next_sample_intermediate_mixer_sinc() {
         bass_mono: true,
         use_mixer: true,
         mixer_sample_rate: 18_000.0,
-        mixer_resample: MixerResampleMode::Sinc { half_taps: 8 },
+        mixer_resample: InstrumentResampleMode::SincOutputNyquist {
+            half_taps: 8,
+            psg_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+            sampler_cutoff_hz: 12_000,
+        },
         ..SynthConfig::default()
     };
-    assert_fill_matches_next_sample(&config, "intermediate mixer (sinc)");
+    assert_fill_matches_next_sample(&config, "intermediate mixer (sinc crunch)");
 }
 
 #[test]
@@ -128,8 +130,21 @@ fn fill_matches_next_sample_intermediate_mixer_nearest() {
         stereo_separation: true,
         use_mixer: true,
         mixer_sample_rate: 13_379.0,
-        mixer_resample: MixerResampleMode::Nearest,
+        mixer_resample: InstrumentResampleMode::NearestNeighbor,
         ..SynthConfig::default()
     };
     assert_fill_matches_next_sample(&config, "intermediate mixer (nearest/ZOH)");
+}
+
+#[test]
+fn fill_matches_next_sample_intermediate_mixer_linear() {
+    let config = SynthConfig {
+        resample: InstrumentResampleMode::SincSampleNyquist { half_taps: 4 },
+        stereo_separation: true,
+        use_mixer: true,
+        mixer_sample_rate: 24_000.0,
+        mixer_resample: InstrumentResampleMode::Linear,
+        ..SynthConfig::default()
+    };
+    assert_fill_matches_next_sample(&config, "intermediate mixer (linear)");
 }

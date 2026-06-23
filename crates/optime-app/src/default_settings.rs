@@ -9,7 +9,7 @@
 //! [`ResampleMode::CUTOFF_OFF_HZ`](optime_core::InstrumentResampleMode::CUTOFF_OFF_HZ) is the transparent
 //! "no extra filtering" position (and the slider's maximum). They are not the same number.
 
-use crate::persisted::{InstrumentResampleChoice, MixerResampleChoice, RepeatMode, SortMode};
+use crate::persisted::{InstrumentResampleChoice, RepeatMode, SortMode};
 
 // ── Playback ────────────────────────────────────────────────────────────────
 /// Start with shuffle off.
@@ -54,8 +54,12 @@ pub const PSG_CUTOFF_HZ: u32 = 15_000;
 /// Listenable default low-pass cutoff (Hz) for sampled (DirectSound/SWAR) voices.
 pub const SAMPLER_CUTOFF_HZ: u32 = 15_000;
 
-pub const MIXER_RESAMPLE_CHOICE: MixerResampleChoice = MixerResampleChoice::Sinc;
+/// Mixer-to-output resampling: clean reconstruction is the sane default for upsampling a bus.
+pub const MIXER_RESAMPLE_CHOICE: InstrumentResampleChoice =
+    InstrumentResampleChoice::SincSampleNyquist;
 pub const MIXER_RESAMPLE_SINC_TAPS: usize = 32;
+/// Default crunch-mode low-pass cutoff (Hz) for the mixer bus.
+pub const MIXER_CUTOFF_HZ: u32 = 15_000;
 
 /// Preserve the hardware's hard PSG on/off edges by default (don't slew the pops).
 pub const SMOOTH_PSG_POPS: bool = false;
