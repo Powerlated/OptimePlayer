@@ -2347,6 +2347,9 @@ dependencies = [
 [[package]]
 name = "optime-core"
 version = "1.0.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "orbclient"

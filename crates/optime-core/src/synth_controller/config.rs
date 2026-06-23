@@ -19,7 +19,7 @@ pub enum DelaySmoothing {
 /// A master high-shelf EQ applied to the final mixed output (one per device, chosen by the
 /// caller). All four RBJ parameters are user-adjustable; `enabled` off (or a 0 dB gain) is a
 /// transparent bypass.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HighShelf {
     /// Whether the shelf is applied at all.
     pub enabled: bool,

@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use optime_core::{
-    DelaySmoothing, FsVisController, HighShelf, InstrumentResampleMode, PopSmoothing, SoundData,
+    DelaySmoothing, FsVisController, InstrumentResampleMode, PopSmoothing, SoundData,
     SynthConfig, SynthController, TuningSystem,
 };
 
@@ -13,7 +13,9 @@ use crate::web::get_track_ref_from_query_string;
 use crate::web::update_query_string;
 
 use crate::media_controls::{self, MediaAction};
-use crate::persisted::{InstrumentResampleChoice, Persisted, RepeatMode, SortMode, TrackRef};
+use crate::persisted::{
+    InstrumentResampleChoice, PerDeviceSettings, Persisted, RepeatMode, SortMode, TrackRef,
+};
 use crate::piano_roll::PianoRoll;
 use crate::song_names;
 use crate::visualizer::{self, VisSnapshot};
@@ -335,6 +337,41 @@ impl OptimeApp {
         self.current_song.and_then(|i| self.track_ref(i))
     }
 
+    /// Whether the current song plays on the GBA (vs the DS). Defaults to the DS when nothing is
+    /// loaded, so the settings panel has a sensible target before a song is picked.
+    fn current_is_gba(&self) -> bool {
+        self.current_song
+            .and_then(|i| self.songs.get(i))
+            .is_some_and(|s| matches!(self.archives[s.archive_index], SoundData::Gba(_)))
+    }
+
+    /// Human-readable name of the current song's console.
+    fn current_device_name(&self) -> &'static str {
+        if self.current_is_gba() {
+            "Game Boy Advance"
+        } else {
+            "Nintendo DS"
+        }
+    }
+
+    /// The persisted synth/audio settings for the current song's console.
+    fn device_settings(&self) -> &PerDeviceSettings {
+        if self.current_is_gba() {
+            &self.p.gba
+        } else {
+            &self.p.nds
+        }
+    }
+
+    /// Mutable access to the current console's synth/audio settings (for the settings UI).
+    fn device_settings_mut(&mut self) -> &mut PerDeviceSettings {
+        if self.current_is_gba() {
+            &mut self.p.gba
+        } else {
+            &mut self.p.nds
+        }
+    }
+
     /// Lazily starts the audio engine. On the web the `AudioContext` may only begin after a user
     /// gesture, so creation is deferred until the first interaction; once started, any
     /// already-selected song is (re)loaded into the new engine.
@@ -432,14 +469,15 @@ impl OptimeApp {
 
     /// The active synth config built from the UI mirrors.
     fn config(&self) -> SynthConfig {
-        let tuning = if self.p.tuning_choice == 0 {
+        let d = self.device_settings();
+        let tuning = if d.tuning_choice == 0 {
             TuningSystem::Equal
         } else {
             TuningSystem::Pure {
-                tonic: self.p.pure_tonic,
+                tonic: d.pure_tonic,
             }
         };
-        let rs = self.p.instrument_resample.clone();
+        let rs = d.instrument_resample.clone();
         let resample = resample_mode(
             &rs.choice,
             rs.sinc_taps,
@@ -453,34 +491,27 @@ impl OptimeApp {
             sample: rs.smooth_sample_pops,
         };
         // The mixer bus is a finished (non-PSG) mix, so its single cutoff feeds both cutoff slots.
-        let ms = &self.p.mixer_resample;
+        let ms = &d.mixer_resample;
         let mixer_resample = resample_mode(&ms.choice, ms.sinc_taps, ms.cutoff_hz, ms.cutoff_hz);
-        let sh = self.p.shelf.clone();
-        let high_shelf = HighShelf {
-            enabled: sh.enabled,
-            order: sh.order,
-            q: sh.q as f64,
-            cutoff_hz: sh.cutoff_hz as f64,
-            gain_db: sh.gain_db as f64,
-        };
+        let high_shelf = d.shelf;
         SynthConfig {
-            stereo_separation: self.p.stereo_separation,
-            force_stereo_separation: self.p.force_stereo_separation,
-            bass_mono: self.p.bass_mono,
-            bass_mono_freq: self.p.bass_mono_freq as f64,
+            stereo_separation: d.stereo_separation,
+            force_stereo_separation: d.force_stereo_separation,
+            bass_mono: d.bass_mono,
+            bass_mono_freq: d.bass_mono_freq as f64,
             tuning,
             track_enables: self.track_enables,
             resample,
             pop_smoothing,
-            delay_smoothing: match self.p.delay_smoothing_choice {
+            delay_smoothing: match d.delay_smoothing_choice {
                 1 => DelaySmoothing::HoldDuringNotes,
                 _ => DelaySmoothing::None,
             },
             high_shelf,
-            use_mixer: self.p.use_mixer,
-            mixer_sample_rate: f64::from(self.p.mixer_sample_rate),
+            use_mixer: d.use_mixer,
+            mixer_sample_rate: f64::from(d.mixer_sample_rate),
             mixer_resample,
-            psg_crunch_compensation: self.p.psg_crunch_compensation,
+            psg_crunch_compensation: d.psg_crunch_compensation,
         }
     }
 
@@ -1487,28 +1518,33 @@ impl OptimeApp {
 
     /// The synthesis settings (shared between the desktop side panel and the mobile tab).
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        // The settings panel edits whichever console the current song plays on; the DS and GBA
+        // keep independent copies.
+        let device_name = self.current_device_name();
+        let d = self.device_settings_mut();
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.heading("Settings");
+            ui.label(format!("Settings are stored independently for each supported emulated device. You are currently editing the settings for: {device_name}"));
             ui.checkbox(
-                &mut self.p.stereo_separation,
+                &mut d.stereo_separation,
                 "Stereo separation: Apply a stereo widener to panned instruments",
             );
-            ui.add_enabled_ui(self.p.stereo_separation, |ui| {
+            ui.add_enabled_ui(d.stereo_separation, |ui| {
                 ui.checkbox(
-                    &mut self.p.force_stereo_separation,
+                    &mut d.force_stereo_separation,
                     "Force stereo separation: Apply a contrived stereo widener to instruments that are center-panned",
                 );
                 ui.label("Stereo widener smoothing (anti-pop & clicks)");
                 egui::ComboBox::from_id_salt("delay_smoothing")
-                    .selected_text(match self.p.delay_smoothing_choice {
+                    .selected_text(match d.delay_smoothing_choice {
                         1 => "No delay change during notes",
                         _ => "No smoothing",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.p.delay_smoothing_choice, 0, "No smoothing")
+                        ui.selectable_value(&mut d.delay_smoothing_choice, 0, "No smoothing")
                             .on_hover_text("Pan changes move the widening delays immediately.");
                         ui.selectable_value(
-                            &mut self.p.delay_smoothing_choice,
+                            &mut d.delay_smoothing_choice,
                             1,
                             "No delay change during notes",
                         )
@@ -1517,11 +1553,11 @@ impl OptimeApp {
                             never pop in the middle of a playing note.",
                             );
                     });
-                ui.checkbox(&mut self.p.bass_mono, "Keep bass centered");
+                ui.checkbox(&mut d.bass_mono, "Keep bass centered");
                 ui.horizontal(|ui| {
                     ui.add_enabled(
-                        self.p.bass_mono,
-                        egui::Slider::new(&mut self.p.bass_mono_freq, 40.0..=800.0)
+                        d.bass_mono,
+                        egui::Slider::new(&mut d.bass_mono_freq, 40.0..=800.0)
                             .text("Bass crossover")
                             .suffix(" Hz")
                             .logarithmic(true),
@@ -1537,20 +1573,20 @@ impl OptimeApp {
             resample_combo(
                 ui,
                 "instrument-to-mixer-resampling",
-                &mut self.p.instrument_resample.choice,
+                &mut d.instrument_resample.choice,
             );
             // Only the options of the selected mode are shown.
             if matches!(
-                self.p.instrument_resample.choice,
+                d.instrument_resample.choice,
                 InstrumentResampleChoice::SincOutputNyquist
                     | InstrumentResampleChoice::SincSampleNyquist
             ) {
-                sinc_taps_slider(ui, &mut self.p.instrument_resample.sinc_taps);
+                sinc_taps_slider(ui, &mut d.instrument_resample.sinc_taps);
             }
-            if self.p.instrument_resample.choice == InstrumentResampleChoice::SincOutputNyquist {
+            if d.instrument_resample.choice == InstrumentResampleChoice::SincOutputNyquist {
                 ui.add(
                     egui::Slider::new(
-                        &mut self.p.instrument_resample.psg_cutoff_hz,
+                        &mut d.instrument_resample.psg_cutoff_hz,
                         1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
                     )
                     .text("PSG cutoff")
@@ -1560,7 +1596,7 @@ impl OptimeApp {
                 .on_hover_text("Low-pass cutoff for the PSG (square/wave/noise) channels.");
                 ui.add(
                     egui::Slider::new(
-                        &mut self.p.instrument_resample.sampler_cutoff_hz,
+                        &mut d.instrument_resample.sampler_cutoff_hz,
                         1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
                     )
                     .text("Sampler cutoff")
@@ -1571,7 +1607,7 @@ impl OptimeApp {
             }
             // Pop smoothing is independent of the resampling mode, so it's always available.
             ui.checkbox(
-                &mut self.p.instrument_resample.smooth_psg_pops,
+                &mut d.instrument_resample.smooth_psg_pops,
                 "Smooth PSG pops",
             )
             .on_hover_text(
@@ -1579,7 +1615,7 @@ impl OptimeApp {
                 click. Unchecked preserves the hardware's hard edges.",
             );
             ui.checkbox(
-                &mut self.p.instrument_resample.smooth_sample_pops,
+                &mut d.instrument_resample.smooth_sample_pops,
                 "Smooth sample pops",
             )
             .on_hover_text(
@@ -1590,7 +1626,7 @@ impl OptimeApp {
             ui.label("Mixer settings");
             {
                 ui.checkbox(
-                    &mut self.p.use_mixer,
+                    &mut d.use_mixer,
                     "Use intermediate mixer for sampled instruments",
                 )
                 .on_hover_text(
@@ -1600,8 +1636,8 @@ impl OptimeApp {
                         Emulates hardware that mixes its sampled channels at a low rate.",
                 );
                 ui.add_enabled(
-                    self.p.use_mixer,
-                    egui::Slider::new(&mut self.p.mixer_sample_rate, 10000..=48000)
+                    d.use_mixer,
+                    egui::Slider::new(&mut d.mixer_sample_rate, 10000..=48000)
                         .step_by(1.0)
                         .text("Mixer rate")
                         .suffix(" Hz")
@@ -1611,8 +1647,10 @@ impl OptimeApp {
             ui.separator();
 
             ui.label("Mixer-to-output resampling");
-            let ms = &mut self.p.mixer_resample;
-            ui.add_enabled_ui(self.p.use_mixer, |ui| {
+            let use_mixer = d.use_mixer;
+            let ms = &mut d.mixer_resample;
+            let psg_crunch_compensation = &mut d.psg_crunch_compensation;
+            ui.add_enabled_ui(use_mixer, |ui| {
                 resample_combo(ui, "mixer-to-output-resampling", &mut ms.choice);
                 // Same per-selected-mode controls as the instrument stage, minus the PSG-specific ones
                 // (the bus is a finished mix): the sinc modes show taps, crunch shows a single cutoff.
@@ -1636,7 +1674,7 @@ impl OptimeApp {
                     .on_hover_text("Low-pass cutoff for the mixer bus in crunch mode.");
 
                     ui.checkbox(
-                        &mut self.p.psg_crunch_compensation,
+                        psg_crunch_compensation,
                         "Compensate PSG level for crunch high-end loss",
                     )
                     .on_hover_text(
@@ -1651,26 +1689,26 @@ impl OptimeApp {
             // Master high-shelf EQ — per device, like the resampling settings above.
             ui.label("Master high-shelf EQ");
             {
-                ui.checkbox(&mut self.p.shelf.enabled, "Enable high-shelf")
+                ui.checkbox(&mut d.shelf.enabled, "Enable high-shelf")
                     .on_hover_text(
                         "A master high-shelf EQ on the final mix. Negative gain tames harsh highs / \
                     click brightness; positive adds air.",
                     );
-                ui.add_enabled_ui(self.p.shelf.enabled, |ui| {
+                ui.add_enabled_ui(d.shelf.enabled, |ui| {
                     ui.add(
-                        egui::Slider::new(&mut self.p.shelf.gain_db, -24.0..=24.0)
+                        egui::Slider::new(&mut d.shelf.gain_db, -24.0..=24.0)
                             .text("Gain")
                             .suffix(" dB"),
                     );
                     ui.add(
-                        egui::Slider::new(&mut self.p.shelf.cutoff_hz, 500.0..=16000.0)
+                        egui::Slider::new(&mut d.shelf.cutoff_hz, 500.0..=16000.0)
                             .text("Cutoff")
                             .suffix(" Hz")
                             .logarithmic(true),
                     );
-                    ui.add(egui::Slider::new(&mut self.p.shelf.q, 0.1..=2.0).text("Q"));
+                    ui.add(egui::Slider::new(&mut d.shelf.q, 0.1..=2.0).text("Q"));
                     ui.add(
-                        egui::Slider::new(&mut self.p.shelf.order, 2..=16)
+                        egui::Slider::new(&mut d.shelf.order, 2..=16)
                             .step_by(2.0)
                             .text("Order"),
                     )
@@ -1682,18 +1720,18 @@ impl OptimeApp {
             ui.separator();
             ui.label("Tuning system");
             egui::ComboBox::from_id_salt("tuning")
-                .selected_text(if self.p.tuning_choice == 0 {
+                .selected_text(if d.tuning_choice == 0 {
                     "Equal temperament"
                 } else {
                     "Pure (Pythagorean)"
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.p.tuning_choice, 0, "Equal temperament");
-                    ui.selectable_value(&mut self.p.tuning_choice, 1, "Pure (Pythagorean)");
+                    ui.selectable_value(&mut d.tuning_choice, 0, "Equal temperament");
+                    ui.selectable_value(&mut d.tuning_choice, 1, "Pure (Pythagorean)");
                 });
-            if self.p.tuning_choice == 1 {
+            if d.tuning_choice == 1 {
                 ui.add(
-                    egui::Slider::new(&mut self.p.pure_tonic, 0..=11).text("Tonic (semitones from A)"),
+                    egui::Slider::new(&mut d.pure_tonic, 0..=11).text("Tonic (semitones from A)"),
                 );
             }
         });

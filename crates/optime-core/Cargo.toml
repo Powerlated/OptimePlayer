@@ -17,5 +17,6 @@ default = ["simd"]
 simd = []
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
