@@ -248,6 +248,8 @@ pub struct Persisted {
     pub mixer_sample_rate: u32,
     /// Route sampled (non-PSG) voices through the intermediate mixer (then upsample to output).
     pub use_mixer: bool,
+
+    pub psg_crunch_compensation: bool,
 }
 
 impl Default for Persisted {
@@ -273,6 +275,7 @@ impl Default for Persisted {
             sort_descending: d::SORT_DESCENDING,
             mixer_sample_rate: d::MIXER_SAMPLE_RATE,
             use_mixer: d::USE_MIXER,
+            psg_crunch_compensation: d::PSG_CRUNCH_COMPENSATION,
         }
     }
 }

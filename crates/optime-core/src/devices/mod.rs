@@ -58,11 +58,22 @@ impl SoundData {
         }
     }
 
-    /// Display name for song `id`, if the archive carries one.
+    /// Display name for song `id`, if the archive carries one. GBA ROMs have no embedded song
+    /// names (the table is numbered); the app supplies curated titles keyed by
+    /// [`Self::gba_game_code`].
     pub fn song_name(&self, id: u32) -> Option<String> {
         match self {
             SoundData::NintendoDs(sdat) => sdat.sseq_id_to_name.get(&id).cloned(),
             SoundData::Gba(_) => None,
+        }
+    }
+
+    /// The GBA ROM's 4-character game code (header offset 0xAC), e.g. `"BPEE"` for Pokémon Emerald.
+    /// `None` for DS archives. The app uses it to pick curated song-name tables.
+    pub fn gba_game_code(&self) -> Option<String> {
+        match self {
+            SoundData::Gba(rom) => rom.game_code(),
+            SoundData::NintendoDs(_) => None,
         }
     }
 

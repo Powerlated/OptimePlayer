@@ -31,7 +31,7 @@ pub use devices::nintendo_ds::{
 };
 pub use devices::{DevicePlayer, SoundData, SynthEvent, VoiceId, VoicePitch};
 pub use dsp::biquad_filter;
-pub use dsp::resample::ResampleTables;
+pub use dsp::resample::{ResampleTables, StreamResampler};
 pub use sample::{
     decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, InstrumentResampleMode, Sample,
 };

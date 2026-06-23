@@ -29,8 +29,39 @@ pub use vis::{FsVisController, VisNote};
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::resample::StreamResampler;
+use crate::sample::InstrumentResampleMode;
 use crate::synth::MAX_BLOCK;
 use crate::{SampleSynthesizer, TRACK_COUNT};
+
+/// PSG crunch-compensation low-pass — a cascade of identical RBJ low-pass biquad sections fit
+/// (MATLAB, `scripts/fit_compensation.m`, fed by `examples/mixer_resample_response.rs`) to the
+/// measured nearest→crunch spectral power loss the mixer-to-output crunch imposes on real Emerald
+/// DirectSound. It is specified as a **cutoff (Hz) + Q + cascade order** rather than baked
+/// z-coefficients so it is rebuilt at whatever output rate the device runs at — the knee stays at a
+/// fixed absolute frequency instead of drifting with the sample rate. Measured content-weighted
+/// loss ≈ −0.05 dB; the audible effect is a high-frequency rolloff (≈ −3 dB at the cutoff). Order 6
+/// is the diminishing-returns sweet spot: knee-region fit error falls 3.6→3.0→2.7 dB from order
+/// 2→4→6, with order 8 buying only a further ~0.2 dB.
+const PSG_COMP_ORDER: usize = 6;
+const PSG_COMP_CUTOFF_HZ: f64 = 14_534.8;
+const PSG_COMP_Q: f64 = 0.707;
+
+/// Builds the PSG crunch-compensation low-pass for `sample_rate` (rebuilt on any rate change so the
+/// knee tracks a fixed frequency in Hz).
+fn psg_comp_filter(sample_rate: f64) -> BiquadFilter {
+    BiquadFilter::low_pass(PSG_COMP_ORDER, sample_rate, PSG_COMP_CUTOFF_HZ, PSG_COMP_Q)
+}
+
+/// Whether the PSG crunch-compensation filter should run: the option is on, the mixer is engaged,
+/// and the mixer-to-output stage is the (DirectSound-darkening) output-Nyquist crunch.
+fn psg_comp_active(config: &SynthConfig) -> bool {
+    config.psg_crunch_compensation
+        && config.use_mixer
+        && matches!(
+            config.mixer_resample,
+            InstrumentResampleMode::SincOutputNyquist { .. }
+        )
+}
 
 /// Which device voice currently owns a pool slot.
 #[derive(Debug, Clone, Copy)]
@@ -178,6 +209,11 @@ pub struct SynthController {
     shelf_l: BiquadFilter,
     shelf_r: BiquadFilter,
     shelf_params: Option<HighShelf>,
+    /// PSG crunch-compensation biquads (left/right), and whether they ran on the previous sample
+    /// (so the state is cleared on a fresh enable to avoid a transient).
+    psg_comp_l: BiquadFilter,
+    psg_comp_r: BiquadFilter,
+    psg_comp_was_active: bool,
 }
 
 impl SynthController {
@@ -206,6 +242,9 @@ impl SynthController {
             shelf_l: BiquadFilter::high_shelf(2, sample_rate, 4000.0, 0.707, 0.0),
             shelf_r: BiquadFilter::high_shelf(2, sample_rate, 4000.0, 0.707, 0.0),
             shelf_params: None,
+            psg_comp_l: psg_comp_filter(sample_rate),
+            psg_comp_r: psg_comp_filter(sample_rate),
+            psg_comp_was_active: false,
         })
     }
 
@@ -245,6 +284,24 @@ impl SynthController {
         (self.shelf_l.transform(l), self.shelf_r.transform(r))
     }
 
+    /// Colours one PSG-bus (output-set) stereo sample with the crunch-compensation low-pass when
+    /// active, matching the high-frequency darkening the mixer-to-output crunch gives DirectSound.
+    /// A transparent pass otherwise; the biquad state is cleared on the inactive→active edge so a
+    /// fresh enable starts clean.
+    #[inline]
+    fn psg_compensate(&mut self, l: f64, r: f64, config: &SynthConfig) -> (f64, f64) {
+        if !psg_comp_active(config) {
+            self.psg_comp_was_active = false;
+            return (l, r);
+        }
+        if !self.psg_comp_was_active {
+            self.psg_comp_l.reset_state();
+            self.psg_comp_r.reset_state();
+            self.psg_comp_was_active = true;
+        }
+        (self.psg_comp_l.transform(l), self.psg_comp_r.transform(r))
+    }
+
     /// The audio sample rate this controller renders at.
     #[inline]
     pub fn sample_rate(&self) -> f64 {
@@ -276,6 +333,10 @@ impl SynthController {
             synth.set_sample_rate(sample_rate);
         }
         self.shelf_params = None;
+        // Rebuild the PSG compensation low-pass so its knee stays at a fixed frequency in Hz.
+        self.psg_comp_l = psg_comp_filter(sample_rate);
+        self.psg_comp_r = psg_comp_filter(sample_rate);
+        self.psg_comp_was_active = false;
     }
 
     /// Sequencer steps executed (the visualizer timeline position).
@@ -325,7 +386,9 @@ impl SynthController {
             self.tick(config);
         }
 
-        let (mut val_l, mut val_r) = render_set(&mut self.synths, &config.track_enables, config);
+        let (val_l, val_r) = render_set(&mut self.synths, &config.track_enables, config);
+        // The output set is PSG-only when the mixer is engaged; darken it to match DirectSound.
+        let (mut val_l, mut val_r) = self.psg_compensate(val_l, val_r, config);
         if config.use_mixer {
             let (ml, mr) = self.route_mixer(config);
             val_l += ml;
@@ -375,7 +438,8 @@ impl SynthController {
             }
             let block_out = &mut out[2 * frame..2 * (frame + n)];
             for (i, frame_out) in block_out.chunks_exact_mut(2).enumerate() {
-                let (mut l, mut r) = (acc_l[i], acc_r[i]);
+                // The block-rendered output set is the PSG bus when the mixer is engaged.
+                let (mut l, mut r) = self.psg_compensate(acc_l[i], acc_r[i], config);
                 if config.use_mixer {
                     let (ml, mr) = self.route_mixer(config);
                     l += ml;
@@ -392,6 +456,39 @@ impl SynthController {
         if out.len() % 2 == 1 {
             let (l, _) = self.next_sample(config);
             out[out.len() - 1] = l;
+        }
+    }
+
+    /// Renders the isolated sampled (DirectSound/SWAR) mixer bus at
+    /// [`SynthConfig::mixer_sample_rate`] into interleaved stereo `out`, with **no** mixer→output
+    /// resampling and **no** PSG voices.
+    ///
+    /// This is an offline-analysis hook: it exposes the exact stereo signal the
+    /// [`StreamResampler`] consumes in the mixer-to-output stage, so the resampler's transfer
+    /// function (e.g. nearest vs output-Nyquist crunch) can be measured on real DirectSound content
+    /// in isolation from the PSG path. Requires [`SynthConfig::use_mixer`]; the device clock is run
+    /// at the mixer rate so the captured bus is at `mixer_sample_rate`.
+    pub fn fill_mixer_bus(&mut self, out: &mut [f32], config: &SynthConfig) {
+        assert!(config.use_mixer, "fill_mixer_bus requires config.use_mixer");
+        // Retargets the mixer set to `mixer_sample_rate` (the bank's resampler config it also sets
+        // is unused here — we read the mixer bus directly).
+        self.prepare_mixer(config);
+        let rate = config.mixer_sample_rate;
+        let threshold = self.player.cycles_per_tick() * rate;
+        let clock = self.player.clock_rate();
+        let frames = out.len() / 2;
+        for frame in 0..frames {
+            self.timer += clock;
+            while self.timer >= threshold {
+                self.timer -= threshold;
+                self.tick(config);
+            }
+            let (l, r) = render_set(&mut self.mixer_synths, &config.track_enables, config);
+            // Advance the output (PSG) set too so one-shot endings / voice-steal feedback stay
+            // consistent with a normal render; its audio is discarded.
+            let _ = render_set(&mut self.synths, &config.track_enables, config);
+            out[2 * frame] = l as f32;
+            out[2 * frame + 1] = r as f32;
         }
     }
 

@@ -12,8 +12,10 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
+use crate::media_controls::{self, MediaAction};
 use crate::persisted::{InstrumentResampleChoice, Persisted, RepeatMode, SortMode, TrackRef};
 use crate::piano_roll::PianoRoll;
+use crate::song_names;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
 
@@ -81,9 +83,13 @@ struct Song {
     name: String,
     /// The display label (`name (#id)`).
     label: String,
-    /// The archive's native listing position, used as the "Default" sort order and as a stable
-    /// tie-breaker for the other sorts.
+    /// The archive's native listing position, used as a stable tie-breaker for the other sorts and
+    /// as the "Default" order for songs with no OST track number.
     order: usize,
+    /// The song's position in the game's curated listing order (OST tracks first in album order,
+    /// then the rest), when the game has a curated table. In "Default" sort these songs are listed
+    /// first, in this order; songs without one follow, in native order.
+    ost_order: Option<usize>,
     /// Playback length in seconds, once computed (lazily, in the background).
     length: Option<f64>,
     /// Whether the length has been computed yet (a computed-but-failed length stays `None`).
@@ -169,6 +175,12 @@ pub struct OptimeApp {
 
     paused: bool,
     status: String,
+
+    /// OS media-transport controls (Bluetooth/keyboard media keys); lazily created once the window
+    /// handle is available, `None` if unsupported (e.g. web, or no handle yet).
+    media: Option<media_controls::MediaControls>,
+    /// Whether media-control creation has been attempted (so it's tried only once).
+    media_tried: bool,
 
     // UI mirrors of [`SynthConfig`].
     track_enables: [bool; TRACK_COUNT],
@@ -259,6 +271,8 @@ impl OptimeApp {
             p,
             track_enables: [true; TRACK_COUNT],
             paused: false,
+            media: None,
+            media_tried: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
             loop_count: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
@@ -460,6 +474,7 @@ impl OptimeApp {
             use_mixer: self.p.use_mixer,
             mixer_sample_rate: f64::from(self.p.mixer_sample_rate),
             mixer_resample,
+            psg_crunch_compensation: self.p.psg_crunch_compensation,
         }
     }
 
@@ -475,8 +490,17 @@ impl OptimeApp {
         self.archives = archives;
         self.songs.clear();
         for (i, data) in self.archives.iter().enumerate() {
+            // GBA ROMs carry no song names; supply curated titles + OST order by game code.
+            let game_code = data.gba_game_code();
             for id in data.song_ids() {
-                let name = data.song_name(id).unwrap_or_else(|| format!("Song {id}"));
+                let meta = game_code
+                    .as_deref()
+                    .and_then(|gc| song_names::lookup(gc, id));
+                let name = data
+                    .song_name(id)
+                    .or_else(|| meta.as_ref().map(|m| m.title.to_owned()))
+                    .unwrap_or_else(|| format!("Song {id}"));
+                let ost_order = meta.map(|m| m.order);
                 let label = format!("{name} (#{id})");
                 // Reuse any previously computed length for this exact song.
                 let (length, length_computed) = match self.length_cache.get(&(key.to_owned(), id)) {
@@ -489,6 +513,7 @@ impl OptimeApp {
                     name,
                     label,
                     order: self.songs.len(),
+                    ost_order,
                     length,
                     length_computed,
                 });
@@ -573,7 +598,13 @@ impl OptimeApp {
         // The ascending key comparison for the active mode (Default keeps native order).
         let key_cmp = |a: &Song, b: &Song| -> Ordering {
             match mode {
-                SortMode::Default => Ordering::Equal,
+                // OST tracks first, in album order; everything else after, in native order.
+                SortMode::Default => match (a.ost_order, b.ost_order) {
+                    (Some(x), Some(y)) => x.cmp(&y),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => a.order.cmp(&b.order),
+                },
                 SortMode::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
                 SortMode::Length => a
                     .length
@@ -660,6 +691,36 @@ impl OptimeApp {
             if n == 1 || Some(r) != current {
                 return r;
             }
+        }
+    }
+
+    /// Drives the OS media-transport controls: lazily creates them once the window handle is
+    /// available, applies any transport commands the user triggered (media keys / AirPods taps),
+    /// then pushes the current track + playback state to the system "now playing" display.
+    fn handle_media_controls(&mut self, frame: &eframe::Frame) {
+        if !self.media_tried {
+            self.media_tried = true;
+            self.media = media_controls::MediaControls::new(frame);
+        }
+        let Some(actions) = self.media.as_mut().map(|m| m.poll()) else {
+            return;
+        };
+        for action in actions {
+            match action {
+                MediaAction::Next => self.step_song(1),
+                MediaAction::Prev => self.step_song(-1),
+                MediaAction::PlayPause => self.paused = !self.paused,
+                MediaAction::Play => self.paused = false,
+                MediaAction::Pause | MediaAction::Stop => self.paused = true,
+            }
+        }
+        let title = self
+            .current_song
+            .and_then(|i| self.songs.get(i))
+            .map(|s| s.name.clone());
+        let playing = !self.paused && self.current_song.is_some();
+        if let (Some(title), Some(media)) = (title, self.media.as_mut()) {
+            media.set_now_playing(&title, "Optime Player", playing);
         }
     }
 
@@ -1346,204 +1407,216 @@ impl OptimeApp {
 
     /// The synthesis settings (shared between the desktop side panel and the mobile tab).
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
-        ui.checkbox(
-            &mut self.p.stereo_separation,
-            "Stereo separation: Apply a stereo widener to panned instruments",
-        );
-        ui.add_enabled_ui(self.p.stereo_separation, |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Settings");
             ui.checkbox(
-                &mut self.p.force_stereo_separation,
-                "Force stereo separation: Apply a contrived stereo widener to instruments that are center-panned",
+                &mut self.p.stereo_separation,
+                "Stereo separation: Apply a stereo widener to panned instruments",
             );
-            ui.label("Stereo widener smoothing (anti-pop & clicks)");
-            egui::ComboBox::from_id_salt("delay_smoothing")
-                .selected_text(match self.p.delay_smoothing_choice {
-                    1 => "No delay change during notes",
-                    _ => "No smoothing",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.p.delay_smoothing_choice, 0, "No smoothing")
-                        .on_hover_text("Pan changes move the widening delays immediately.");
-                    ui.selectable_value(
-                        &mut self.p.delay_smoothing_choice,
-                        1,
-                        "No delay change during notes",
+            ui.add_enabled_ui(self.p.stereo_separation, |ui| {
+                ui.checkbox(
+                    &mut self.p.force_stereo_separation,
+                    "Force stereo separation: Apply a contrived stereo widener to instruments that are center-panned",
+                );
+                ui.label("Stereo widener smoothing (anti-pop & clicks)");
+                egui::ComboBox::from_id_salt("delay_smoothing")
+                    .selected_text(match self.p.delay_smoothing_choice {
+                        1 => "No delay change during notes",
+                        _ => "No smoothing",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.p.delay_smoothing_choice, 0, "No smoothing")
+                            .on_hover_text("Pan changes move the widening delays immediately.");
+                        ui.selectable_value(
+                            &mut self.p.delay_smoothing_choice,
+                            1,
+                            "No delay change during notes",
+                        )
+                            .on_hover_text(
+                                "Defer widening-delay changes until the track is silent, so they \
+                            never pop in the middle of a playing note.",
+                            );
+                    });
+                ui.checkbox(&mut self.p.bass_mono, "Keep bass centered");
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        self.p.bass_mono,
+                        egui::Slider::new(&mut self.p.bass_mono_freq, 40.0..=800.0)
+                            .text("Bass crossover")
+                            .suffix(" Hz")
+                            .logarithmic(true),
                     )
                         .on_hover_text(
-                            "Defer widening-delay changes until the track is silent, so they \
-                         never pop in the middle of a playing note.",
+                            "Frequencies below this stay glued to the center; \
+                        mids and treble are widened.",
                         );
                 });
-            ui.checkbox(&mut self.p.bass_mono, "Keep bass centered");
-            ui.horizontal(|ui| {
-                ui.add_enabled(
-                    self.p.bass_mono,
-                    egui::Slider::new(&mut self.p.bass_mono_freq, 40.0..=800.0)
-                        .text("Bass crossover")
-                        .suffix(" Hz")
-                        .logarithmic(true),
-                )
-                    .on_hover_text(
-                        "Frequencies below this stay glued to the center; \
-                     mids and treble are widened.",
-                    );
             });
-        });
-        ui.separator();
-        ui.label("Instrument-to-mixer resampling");
-        resample_combo(
-            ui,
-            "instrument-to-mixer-resampling",
-            &mut self.p.instrument_resample.choice,
-        );
-        // Only the options of the selected mode are shown.
-        if matches!(
-            self.p.instrument_resample.choice,
-            InstrumentResampleChoice::SincOutputNyquist
-                | InstrumentResampleChoice::SincSampleNyquist
-        ) {
-            sinc_taps_slider(ui, &mut self.p.instrument_resample.sinc_taps);
-        }
-        if self.p.instrument_resample.choice == InstrumentResampleChoice::SincOutputNyquist {
-            ui.add(
-                egui::Slider::new(
-                    &mut self.p.instrument_resample.psg_cutoff_hz,
-                    1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
-                )
-                .text("PSG cutoff")
-                .suffix(" Hz")
-                .logarithmic(true),
-            )
-            .on_hover_text("Low-pass cutoff for the PSG (square/wave/noise) channels.");
-            ui.add(
-                egui::Slider::new(
-                    &mut self.p.instrument_resample.sampler_cutoff_hz,
-                    1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
-                )
-                .text("Sampler cutoff")
-                .suffix(" Hz")
-                .logarithmic(true),
-            )
-            .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
-        }
-        // Pop smoothing is independent of the resampling mode, so it's always available.
-        ui.checkbox(
-            &mut self.p.instrument_resample.smooth_psg_pops,
-            "Smooth PSG pops",
-        )
-        .on_hover_text(
-            "Slew PSG channel gains over ~2 ms so notes turning abruptly on and off don't \
-             click. Unchecked preserves the hardware's hard edges.",
-        );
-        ui.checkbox(
-            &mut self.p.instrument_resample.smooth_sample_pops,
-            "Smooth sample pops",
-        )
-        .on_hover_text(
-            "Slew sampled (DirectSound / SWAR) voice gains over ~2 ms so notes starting or cut \
-             mid-waveform don't click. Unchecked preserves the original edges.",
-        );
-        ui.separator();
-        ui.label("Mixer settings");
-        {
-            ui.checkbox(
-                &mut self.p.use_mixer,
-                "Use intermediate mixer for sampled instruments",
-            )
-            .on_hover_text(
-                "Route the sampled (non-PSG) instruments through an intermediate mixer \
-                     running at the mixer rate below, then resample that bus up to the output \
-                     rate. PSG (square/wave/noise) voices bypass it and play at the output rate. \
-                     Emulates hardware that mixes its sampled channels at a low rate.",
+            ui.separator();
+            ui.label("Instrument-to-mixer resampling");
+            resample_combo(
+                ui,
+                "instrument-to-mixer-resampling",
+                &mut self.p.instrument_resample.choice,
             );
-            ui.add_enabled(
-                self.p.use_mixer,
-                egui::Slider::new(&mut self.p.mixer_sample_rate, 10000..=48000)
-                    .step_by(1.0)
-                    .text("Mixer rate")
-                    .suffix(" Hz")
-                    .logarithmic(false),
-            );
-        }
-        ui.separator();
-
-        ui.label("Mixer-to-output resampling");
-        let ms = &mut self.p.mixer_resample;
-        ui.add_enabled_ui(self.p.use_mixer, |ui| {
-            resample_combo(ui, "mixer-to-output-resampling", &mut ms.choice);
-            // Same per-selected-mode controls as the instrument stage, minus the PSG-specific ones
-            // (the bus is a finished mix): the sinc modes show taps, crunch shows a single cutoff.
+            // Only the options of the selected mode are shown.
             if matches!(
-                ms.choice,
+                self.p.instrument_resample.choice,
                 InstrumentResampleChoice::SincOutputNyquist
                     | InstrumentResampleChoice::SincSampleNyquist
             ) {
-                sinc_taps_slider(ui, &mut ms.sinc_taps);
+                sinc_taps_slider(ui, &mut self.p.instrument_resample.sinc_taps);
             }
-            if ms.choice == InstrumentResampleChoice::SincOutputNyquist {
+            if self.p.instrument_resample.choice == InstrumentResampleChoice::SincOutputNyquist {
                 ui.add(
                     egui::Slider::new(
-                        &mut ms.cutoff_hz,
+                        &mut self.p.instrument_resample.psg_cutoff_hz,
                         1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
                     )
-                    .text("Cutoff")
+                    .text("PSG cutoff")
                     .suffix(" Hz")
                     .logarithmic(true),
                 )
-                .on_hover_text("Low-pass cutoff for the mixer bus in crunch mode.");
+                .on_hover_text("Low-pass cutoff for the PSG (square/wave/noise) channels.");
+                ui.add(
+                    egui::Slider::new(
+                        &mut self.p.instrument_resample.sampler_cutoff_hz,
+                        1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
+                    )
+                    .text("Sampler cutoff")
+                    .suffix(" Hz")
+                    .logarithmic(true),
+                )
+                .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
             }
-        });
-        ui.separator();
-
-        // Master high-shelf EQ — per device, like the resampling settings above.
-        ui.label("Master high-shelf EQ");
-        {
-            ui.checkbox(&mut self.p.shelf.enabled, "Enable high-shelf")
+            // Pop smoothing is independent of the resampling mode, so it's always available.
+            ui.checkbox(
+                &mut self.p.instrument_resample.smooth_psg_pops,
+                "Smooth PSG pops",
+            )
+            .on_hover_text(
+                "Slew PSG channel gains over ~2 ms so notes turning abruptly on and off don't \
+                click. Unchecked preserves the hardware's hard edges.",
+            );
+            ui.checkbox(
+                &mut self.p.instrument_resample.smooth_sample_pops,
+                "Smooth sample pops",
+            )
+            .on_hover_text(
+                "Slew sampled (DirectSound / SWAR) voice gains over ~2 ms so notes starting or cut \
+                mid-waveform don't click. Unchecked preserves the original edges.",
+            );
+            ui.separator();
+            ui.label("Mixer settings");
+            {
+                ui.checkbox(
+                    &mut self.p.use_mixer,
+                    "Use intermediate mixer for sampled instruments",
+                )
                 .on_hover_text(
-                    "A master high-shelf EQ on the final mix. Negative gain tames harsh highs / \
-                 click brightness; positive adds air.",
+                    "Route the sampled (non-PSG) instruments through an intermediate mixer \
+                        running at the mixer rate below, then resample that bus up to the output \
+                        rate. PSG (square/wave/noise) voices bypass it and play at the output rate. \
+                        Emulates hardware that mixes its sampled channels at a low rate.",
                 );
-            ui.add_enabled_ui(self.p.shelf.enabled, |ui| {
-                ui.add(
-                    egui::Slider::new(&mut self.p.shelf.gain_db, -24.0..=24.0)
-                        .text("Gain")
-                        .suffix(" dB"),
+                ui.add_enabled(
+                    self.p.use_mixer,
+                    egui::Slider::new(&mut self.p.mixer_sample_rate, 10000..=48000)
+                        .step_by(1.0)
+                        .text("Mixer rate")
+                        .suffix(" Hz")
+                        .logarithmic(false),
                 );
-                ui.add(
-                    egui::Slider::new(&mut self.p.shelf.cutoff_hz, 500.0..=16000.0)
+            }
+            ui.separator();
+
+            ui.label("Mixer-to-output resampling");
+            let ms = &mut self.p.mixer_resample;
+            ui.add_enabled_ui(self.p.use_mixer, |ui| {
+                resample_combo(ui, "mixer-to-output-resampling", &mut ms.choice);
+                // Same per-selected-mode controls as the instrument stage, minus the PSG-specific ones
+                // (the bus is a finished mix): the sinc modes show taps, crunch shows a single cutoff.
+                if matches!(
+                    ms.choice,
+                    InstrumentResampleChoice::SincOutputNyquist
+                        | InstrumentResampleChoice::SincSampleNyquist
+                ) {
+                    sinc_taps_slider(ui, &mut ms.sinc_taps);
+                }
+                if ms.choice == InstrumentResampleChoice::SincOutputNyquist {
+                    ui.add(
+                        egui::Slider::new(
+                            &mut ms.cutoff_hz,
+                            1000..=InstrumentResampleMode::CUTOFF_OFF_HZ,
+                        )
                         .text("Cutoff")
                         .suffix(" Hz")
                         .logarithmic(true),
-                );
-                ui.add(egui::Slider::new(&mut self.p.shelf.q, 0.1..=2.0).text("Q"));
+                    )
+                    .on_hover_text("Low-pass cutoff for the mixer bus in crunch mode.");
+
+                    ui.checkbox(
+                        &mut self.p.psg_crunch_compensation,
+                        "Compensate PSG level for crunch high-end loss",
+                    )
+                    .on_hover_text(
+                        "Crunch resampling darkens the DirectSound bus' high end (less aliasing \
+                        energy), leaving the PSG voices sitting too loud. This colours the PSG bus \
+                        with the same measured high-frequency rolloff so the two stay balanced.",
+                    );
+                }
+            });
+            ui.separator();
+
+            // Master high-shelf EQ — per device, like the resampling settings above.
+            ui.label("Master high-shelf EQ");
+            {
+                ui.checkbox(&mut self.p.shelf.enabled, "Enable high-shelf")
+                    .on_hover_text(
+                        "A master high-shelf EQ on the final mix. Negative gain tames harsh highs / \
+                    click brightness; positive adds air.",
+                    );
+                ui.add_enabled_ui(self.p.shelf.enabled, |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut self.p.shelf.gain_db, -24.0..=24.0)
+                            .text("Gain")
+                            .suffix(" dB"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.p.shelf.cutoff_hz, 500.0..=16000.0)
+                            .text("Cutoff")
+                            .suffix(" Hz")
+                            .logarithmic(true),
+                    );
+                    ui.add(egui::Slider::new(&mut self.p.shelf.q, 0.1..=2.0).text("Q"));
+                    ui.add(
+                        egui::Slider::new(&mut self.p.shelf.order, 2..=16)
+                            .step_by(2.0)
+                            .text("Order"),
+                    )
+                    .on_hover_text(
+                        "Higher order steepens the shelf transition (more biquad sections).",
+                    );
+                });
+            }
+            ui.separator();
+            ui.label("Tuning system");
+            egui::ComboBox::from_id_salt("tuning")
+                .selected_text(if self.p.tuning_choice == 0 {
+                    "Equal temperament"
+                } else {
+                    "Pure (Pythagorean)"
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.p.tuning_choice, 0, "Equal temperament");
+                    ui.selectable_value(&mut self.p.tuning_choice, 1, "Pure (Pythagorean)");
+                });
+            if self.p.tuning_choice == 1 {
                 ui.add(
-                    egui::Slider::new(&mut self.p.shelf.order, 2..=16)
-                        .step_by(2.0)
-                        .text("Order"),
-                )
-                .on_hover_text(
-                    "Higher order steepens the shelf transition (more biquad sections).",
+                    egui::Slider::new(&mut self.p.pure_tonic, 0..=11).text("Tonic (semitones from A)"),
                 );
-            });
-        }
-        ui.separator();
-        ui.label("Tuning system");
-        egui::ComboBox::from_id_salt("tuning")
-            .selected_text(if self.p.tuning_choice == 0 {
-                "Equal temperament"
-            } else {
-                "Pure (Pythagorean)"
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.p.tuning_choice, 0, "Equal temperament");
-                ui.selectable_value(&mut self.p.tuning_choice, 1, "Pure (Pythagorean)");
-            });
-        if self.p.tuning_choice == 1 {
-            ui.add(
-                egui::Slider::new(&mut self.p.pure_tonic, 0..=11).text("Tonic (semitones from A)"),
-            );
-        }
+            }
+        });
     }
 
     /// The compact phone layout: a bottom navigation bar (Now Playing / Library / Playlists /
@@ -1999,7 +2072,7 @@ impl eframe::App for OptimeApp {
         eframe::set_value(storage, eframe::APP_KEY, &self.p);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.ensure_audio(ctx);
         #[cfg(target_arch = "wasm32")]
         self.keep_audio_alive(ctx);
@@ -2019,6 +2092,8 @@ impl eframe::App for OptimeApp {
         if right {
             self.step_song(1);
         }
+
+        self.handle_media_controls(frame);
 
         let (snap, advance) = self.sync_audio();
         let snap = if advance {

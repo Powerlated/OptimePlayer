@@ -29,6 +29,10 @@ serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.11"
+# OS media-transport controls (Windows SMTC / macOS Now Playing / Linux MPRIS) for hardware and
+# Bluetooth media keys, e.g. AirPods double-tap to skip.
+souvlaki = "0.8"
+raw-window-handle = "0.6"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
