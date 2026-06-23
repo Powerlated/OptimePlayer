@@ -76,6 +76,18 @@ impl GbaRom {
         self.song_count
     }
 
+    /// The 4-character ASCII game code from the ROM header (offset 0xAC) — e.g. `"BPEE"` for
+    /// Pokémon Emerald (USA/Europe). Used to select curated song-name tables. Returns `None` if the
+    /// bytes there aren't printable ASCII (e.g. a hand-built test ROM). The header survives the
+    /// audio-only [`extract_audio`](Self::extract_audio) image, so it works on exported audio too.
+    pub fn game_code(&self) -> Option<String> {
+        let raw = self.data.get(0xAC..0xB0)?;
+        if !raw.iter().all(|&b| b.is_ascii_graphic()) {
+            return None;
+        }
+        Some(raw.iter().map(|&b| b as char).collect())
+    }
+
     /// Builds an audio-only image of this ROM: everything the MP2K engine cannot reach from
     /// the song table is zeroed, so the result carries no game code or art but plays
     /// identically. See [`extract_audio`](super::extract_audio).
