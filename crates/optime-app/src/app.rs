@@ -3,8 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use optime_core::{
-    DelaySmoothing, FsVisController, HighShelf, InstrumentResampleMode, SoundData, SynthConfig,
-    SynthController, TuningSystem,
+    DelaySmoothing, FsVisController, HighShelf, InstrumentResampleMode, PopSmoothing, SoundData,
+    SynthConfig, SynthController, TuningSystem,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -426,9 +426,12 @@ impl OptimeApp {
             rs.psg_cutoff_hz,
             rs.sampler_cutoff_hz,
         );
-        // Pop smoothing is a crunchy-mode option; the other modes keep the hardware edges.
-        let smooth_psg_pops =
-            rs.smooth_psg_pops && rs.choice == InstrumentResampleChoice::SincOutputNyquist;
+        // Pop smoothing is orthogonal to the resampling mode — a gain slew on note edges — so it
+        // applies in every mode, not just crunch.
+        let pop_smoothing = PopSmoothing {
+            psg: rs.smooth_psg_pops,
+            sample: rs.smooth_sample_pops,
+        };
         // The mixer bus is a finished (non-PSG) mix, so its single cutoff feeds both cutoff slots.
         let ms = &self.p.mixer_resample;
         let mixer_resample = resample_mode(&ms.choice, ms.sinc_taps, ms.cutoff_hz, ms.cutoff_hz);
@@ -448,7 +451,7 @@ impl OptimeApp {
             tuning,
             track_enables: self.track_enables,
             resample,
-            smooth_psg_pops,
+            pop_smoothing,
             delay_smoothing: match self.p.delay_smoothing_choice {
                 1 => DelaySmoothing::HoldDuringNotes,
                 _ => DelaySmoothing::None,
@@ -1423,15 +1426,24 @@ impl OptimeApp {
                 .logarithmic(true),
             )
             .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
-            ui.checkbox(
-                &mut self.p.instrument_resample.smooth_psg_pops,
-                "Smooth PSG pops",
-            )
-            .on_hover_text(
-                "Slew PSG channel gains over ~2 ms so notes turning abruptly on and \
-                         off don't click. Unchecked preserves the hardware's hard edges.",
-            );
         }
+        // Pop smoothing is independent of the resampling mode, so it's always available.
+        ui.checkbox(
+            &mut self.p.instrument_resample.smooth_psg_pops,
+            "Smooth PSG pops",
+        )
+        .on_hover_text(
+            "Slew PSG channel gains over ~2 ms so notes turning abruptly on and off don't \
+             click. Unchecked preserves the hardware's hard edges.",
+        );
+        ui.checkbox(
+            &mut self.p.instrument_resample.smooth_sample_pops,
+            "Smooth sample pops",
+        )
+        .on_hover_text(
+            "Slew sampled (DirectSound / SWAR) voice gains over ~2 ms so notes starting or cut \
+             mid-waveform don't click. Unchecked preserves the original edges.",
+        );
         ui.separator();
         ui.label("Mixer settings");
         {

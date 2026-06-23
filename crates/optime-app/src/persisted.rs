@@ -142,8 +142,11 @@ pub struct InstrumentResampleSettings {
     pub psg_cutoff_hz: u32,
     /// Crunchy-mode low-pass cutoff (Hz) for DirectSound/sampled voices.
     pub sampler_cutoff_hz: u32,
-    /// Crunchy-mode option: smooth out PSG on/off pops instead of preserving the clicks.
+    /// Smooth out PSG on/off pops (a gain slew) instead of preserving the clicks. Applies in
+    /// every resampling mode.
     pub smooth_psg_pops: bool,
+    /// Smooth out sampled (DirectSound/SWAR) voice pops/clicks. Applies in every resampling mode.
+    pub smooth_sample_pops: bool,
 }
 
 impl Default for InstrumentResampleSettings {
@@ -155,6 +158,7 @@ impl Default for InstrumentResampleSettings {
             psg_cutoff_hz: d::PSG_CUTOFF_HZ,
             sampler_cutoff_hz: d::SAMPLER_CUTOFF_HZ,
             smooth_psg_pops: d::SMOOTH_PSG_POPS,
+            smooth_sample_pops: d::SMOOTH_SAMPLE_POPS,
         }
     }
 }

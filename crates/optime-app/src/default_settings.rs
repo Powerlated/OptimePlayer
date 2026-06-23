@@ -63,6 +63,8 @@ pub const MIXER_CUTOFF_HZ: u32 = 15_000;
 
 /// Preserve the hardware's hard PSG on/off edges by default (don't slew the pops).
 pub const SMOOTH_PSG_POPS: bool = false;
+/// Don't slew sampled-voice pops by default (preserve the original attack/decay edges).
+pub const SMOOTH_SAMPLE_POPS: bool = false;
 
 // ── Master high-shelf EQ (per device) ────────────────────────────────────────
 /// Off by default — a transparent pass until the user dials in a shelf.

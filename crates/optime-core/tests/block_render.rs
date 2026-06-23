@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use optime_core::{InstrumentResampleMode, SoundData, SynthConfig, SynthController};
+use optime_core::{InstrumentResampleMode, PopSmoothing, SoundData, SynthConfig, SynthController};
 
 fn load_demo() -> SoundData {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../demos/super-mario-64-ds.sdat");
@@ -76,17 +76,22 @@ fn fill_matches_next_sample_clean_plain() {
 }
 
 #[test]
-fn fill_matches_next_sample_smoothed_psg_pops() {
+fn fill_matches_next_sample_smoothed_pops() {
+    // Both pop-smoothing kinds (PSG + sampled) slew gains sample-by-sample, so the block path
+    // must reproduce the per-sample path exactly.
     let config = SynthConfig {
         resample: InstrumentResampleMode::SincOutputNyquist {
             half_taps: 4,
             psg_cutoff_hz: 8_000,
             sampler_cutoff_hz: 12_000,
         },
-        smooth_psg_pops: true,
+        pop_smoothing: PopSmoothing {
+            psg: true,
+            sample: true,
+        },
         ..SynthConfig::default()
     };
-    assert_fill_matches_next_sample(&config, "crunch + smoothed PSG pops");
+    assert_fill_matches_next_sample(&config, "crunch + smoothed PSG & sample pops");
 }
 
 #[test]

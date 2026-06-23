@@ -52,6 +52,30 @@ impl HighShelf {
     }
 }
 
+/// Per-voice-kind de-click gain slew: slew a voice's gain over ~2 ms on note start/stop instead of
+/// stepping it, turning abrupt on/off transitions into click-free ramps. Selected per kind so PSG
+/// (square/wave/noise) and sampled (DirectSound/SWAR) voices can be smoothed independently — the
+/// hard PSG edges are part of the chiptune character, while sampled de-clicking is usually wanted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PopSmoothing {
+    /// Slew PSG (square/wave/noise) voices.
+    pub psg: bool,
+    /// Slew sampled (DirectSound/SWAR) voices.
+    pub sample: bool,
+}
+
+impl PopSmoothing {
+    /// Whether a voice of the given kind should slew its gain.
+    #[inline]
+    pub fn enabled_for(self, is_psg: bool) -> bool {
+        if is_psg {
+            self.psg
+        } else {
+            self.sample
+        }
+    }
+}
+
 /// Runtime-tunable synthesis options (replaces the original engine's global flags).
 #[derive(Debug, Clone)]
 pub struct SynthConfig {
@@ -71,9 +95,9 @@ pub struct SynthConfig {
     pub track_enables: [bool; TRACK_COUNT],
     /// Sample interpolation / anti-aliasing mode.
     pub resample: InstrumentResampleMode,
-    /// Smooth out the pops and clicks of PSG channels turning abruptly on and off (a ~2 ms
-    /// gain slew). Off preserves the hard-edged hardware behaviour.
-    pub smooth_psg_pops: bool,
+    /// Per-voice-kind de-click: slew a voice's gain over ~2 ms on note start/stop instead of
+    /// stepping it. Off preserves the hard-edged hardware behaviour.
+    pub pop_smoothing: PopSmoothing,
     /// How the stereo expander handles delay-line length changes.
     pub delay_smoothing: DelaySmoothing,
     /// Master high-shelf EQ on the final mixed output (per-device; chosen by the caller).
@@ -100,7 +124,7 @@ impl Default for SynthConfig {
             tuning: TuningSystem::Equal,
             track_enables: [true; TRACK_COUNT],
             resample: InstrumentResampleMode::NearestNeighbor,
-            smooth_psg_pops: false,
+            pop_smoothing: PopSmoothing::default(),
             delay_smoothing: DelaySmoothing::None,
             high_shelf: HighShelf::default(),
             use_mixer: false,

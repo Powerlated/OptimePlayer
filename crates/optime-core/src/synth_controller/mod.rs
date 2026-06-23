@@ -23,7 +23,7 @@ mod config;
 pub mod messages;
 mod vis;
 
-pub use config::{DelaySmoothing, HighShelf, SynthConfig};
+pub use config::{DelaySmoothing, HighShelf, PopSmoothing, SynthConfig};
 pub use vis::{FsVisController, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
@@ -499,7 +499,7 @@ impl SynthController {
                 if let Some((mixer, slot)) = self.locate(track, voice) {
                     let (synths, slot_owner) = self.set_mut(mixer);
                     let owner = slot_owner[track][slot].take();
-                    synths[track].stop_instrument(slot, config.smooth_psg_pops);
+                    synths[track].stop_instrument(slot, config.pop_smoothing);
                     if let Some(owner) = owner {
                         self.notes_on[track][owner.key as usize] = 0;
                     }

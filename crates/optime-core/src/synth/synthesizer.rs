@@ -10,7 +10,7 @@ use crate::devices::VoicePitch;
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::resample::{mode_half_taps, ResampleTables};
 use crate::sample::Sample;
-use crate::synth_controller::{DelaySmoothing, SynthConfig};
+use crate::synth_controller::{DelaySmoothing, PopSmoothing, SynthConfig};
 use crate::tuning::TuningSystem;
 
 /// A polyphonic synthesizer for one sequence track. Holds a fixed pool of voices and mixes the
@@ -150,7 +150,7 @@ impl SampleSynthesizer {
             instr.set_finetune_lfo(0.0, tuning);
             instr.set_finetune(self.finetune, tuning);
             instr.set_pitch(pitch, tuning);
-            instr.begin_note(volume, config.smooth_psg_pops);
+            instr.begin_note(volume, config.pop_smoothing);
             instr.sample_t = 0.0;
             instr.wrapped = false;
             instr.playing = true;
@@ -161,11 +161,11 @@ impl SampleSynthesizer {
         index
     }
 
-    /// Stops the voice at `index` if it is active: immediately, or — for a pop-smoothed PSG
-    /// voice (`fade`) — via a short fade-out after which the voice stops itself.
-    pub fn stop_instrument(&mut self, index: usize, fade: bool) {
+    /// Stops the voice at `index` if it is active: immediately, or — when `pops` enables smoothing
+    /// for this voice's kind — via a short fade-out after which the voice stops itself.
+    pub fn stop_instrument(&mut self, index: usize, pops: PopSmoothing) {
         let instr = &mut self.instrs[index];
-        if fade && instr.playing && instr.sample.is_psg_square {
+        if instr.playing && pops.enabled_for(instr.sample.is_psg_square) {
             instr.begin_fade_out();
         } else {
             self.cut_instrument(index);
@@ -204,7 +204,7 @@ impl SampleSynthesizer {
 
         let mut mono = 0.0;
         for &i in &self.active_instrs {
-            self.instrs[i].advance(config.resample, tables, config.smooth_psg_pops);
+            self.instrs[i].advance(config.resample, tables, config.pop_smoothing);
             mono += self.instrs[i].output;
         }
         self.prune_stopped();
@@ -239,7 +239,7 @@ impl SampleSynthesizer {
             self.instrs[i].advance_block(
                 config.resample,
                 tables,
-                config.smooth_psg_pops,
+                config.pop_smoothing,
                 &mut mono[..n],
             );
         }
