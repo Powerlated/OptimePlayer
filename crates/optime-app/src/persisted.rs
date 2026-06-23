@@ -132,7 +132,6 @@ impl InstrumentResampleChoice {
 /// Per-device resampling settings — each console keeps its own, so e.g. the DS can play
 /// Crunchy sinc while the GBA plays Clean sinc.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
 pub struct InstrumentResampleSettings {
     /// Resampling choice enum
     pub choice: InstrumentResampleChoice,
@@ -149,25 +148,10 @@ pub struct InstrumentResampleSettings {
     pub smooth_sample_pops: bool,
 }
 
-impl Default for InstrumentResampleSettings {
-    fn default() -> Self {
-        use crate::default_settings as d;
-        Self {
-            choice: d::INSTRUMENT_RESAMPLE_CHOICE,
-            sinc_taps: d::INSTRUMENT_RESAMPLE_SINC_TAPS,
-            psg_cutoff_hz: d::PSG_CUTOFF_HZ,
-            sampler_cutoff_hz: d::SAMPLER_CUTOFF_HZ,
-            smooth_psg_pops: d::SMOOTH_PSG_POPS,
-            smooth_sample_pops: d::SMOOTH_SAMPLE_POPS,
-        }
-    }
-}
-
 /// Mixer-to-output resampling settings. Reuses the same algorithm choice as the per-instrument
 /// stage ([`InstrumentResampleChoice`]); the bus is a finished mix (no PSG/sampled split), so the
 /// crunch mode carries a single `cutoff_hz` rather than the per-kind PSG/sampler cutoffs.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
 pub struct MixerResampleSettings {
     /// Resampling choice enum (shared with the instrument stage).
     pub choice: InstrumentResampleChoice,
@@ -177,20 +161,8 @@ pub struct MixerResampleSettings {
     pub cutoff_hz: u32,
 }
 
-impl Default for MixerResampleSettings {
-    fn default() -> Self {
-        use crate::default_settings as d;
-        Self {
-            choice: d::MIXER_RESAMPLE_CHOICE,
-            sinc_taps: d::MIXER_RESAMPLE_SINC_TAPS,
-            cutoff_hz: d::MIXER_CUTOFF_HZ,
-        }
-    }
-}
-
 /// Per-device master high-shelf EQ settings (one for the DS, one for the GBA), persisted.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
 pub struct ShelfSettings {
     /// Whether the shelf is applied.
     pub enabled: bool,
@@ -202,19 +174,6 @@ pub struct ShelfSettings {
     pub cutoff_hz: f32,
     /// Shelf gain (dB); negative cuts the highs, positive boosts them.
     pub gain_db: f32,
-}
-
-impl Default for ShelfSettings {
-    fn default() -> Self {
-        use crate::default_settings as d;
-        Self {
-            enabled: d::SHELF_ENABLED,
-            order: d::SHELF_ORDER,
-            q: d::SHELF_Q,
-            cutoff_hz: d::SHELF_CUTOFF_HZ,
-            gain_db: d::SHELF_GAIN_DB,
-        }
-    }
 }
 
 /// The full app state saved to (and restored from) eframe storage.
@@ -254,28 +213,58 @@ pub struct Persisted {
 
 impl Default for Persisted {
     fn default() -> Self {
-        use crate::default_settings as d;
         Self {
             library: Library::default(),
-            shuffle: d::SHUFFLE,
-            repeat: d::REPEAT,
-            volume: d::VOLUME,
+            // Start with shuffle off; loop the queue forever.
+            shuffle: false,
+            repeat: RepeatMode::All,
+            volume: 1.0,
             last_track: None,
-            stereo_separation: d::STEREO_SEPARATION,
-            force_stereo_separation: d::FORCE_STEREO_SEPARATION,
-            bass_mono: d::BASS_MONO,
-            bass_mono_freq: d::BASS_MONO_FREQ_HZ,
-            tuning_choice: d::TUNING_CHOICE,
-            pure_tonic: d::PURE_TONIC,
-            instrument_resample: InstrumentResampleSettings::default(),
-            mixer_resample: MixerResampleSettings::default(),
-            shelf: ShelfSettings::default(),
-            delay_smoothing_choice: d::DELAY_SMOOTHING_CHOICE,
-            sort_mode: d::SORT_MODE,
-            sort_descending: d::SORT_DESCENDING,
-            mixer_sample_rate: d::MIXER_SAMPLE_RATE,
-            use_mixer: d::USE_MIXER,
-            psg_crunch_compensation: d::PSG_CRUNCH_COMPENSATION,
+            stereo_separation: true,
+            force_stereo_separation: false,
+            bass_mono: true,
+            // Crossover below which the stereo expander keeps the signal centered.
+            bass_mono_freq: 200.0,
+            // 0 = equal temperament, 1 = pure (Pythagorean); tonic in semitones from A.
+            tuning_choice: 0,
+            pure_tonic: 0,
+            instrument_resample: InstrumentResampleSettings {
+                choice: InstrumentResampleChoice::SincOutputNyquist,
+                // Total source-tap count for the sinc/reconstruction kernel.
+                sinc_taps: 32,
+                // Listenable default low-pass cutoffs (Hz). The slider can still be opened all the
+                // way to `ResampleMode::CUTOFF_OFF_HZ` (no extra filtering).
+                psg_cutoff_hz: 15_000,
+                sampler_cutoff_hz: 15_000,
+                // Preserve the hardware's hard on/off edges by default (don't slew the pops).
+                smooth_psg_pops: false,
+                smooth_sample_pops: false,
+            },
+            mixer_resample: MixerResampleSettings {
+                // Mixer-to-output resampling: clean reconstruction is the sane default for
+                // upsampling a bus.
+                choice: InstrumentResampleChoice::SincSampleNyquist,
+                sinc_taps: 32,
+                cutoff_hz: 15_000,
+            },
+            shelf: ShelfSettings {
+                // Off by default — a transparent pass until the user dials in a shelf.
+                enabled: false,
+                // Filter order (even); the cascade has `order / 2` biquad sections.
+                order: 2,
+                q: 0.707,
+                cutoff_hz: 4000.0,
+                gain_db: 0.0,
+            },
+            // Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
+            delay_smoothing_choice: 0,
+            // Native song-list order, ascending, until the user sorts.
+            sort_mode: SortMode::Default,
+            sort_descending: false,
+            // Sample rate for the intermediate mixing step; off by default.
+            mixer_sample_rate: 48000,
+            use_mixer: false,
+            psg_crunch_compensation: false,
         }
     }
 }

@@ -38,7 +38,7 @@ impl InstrumentResampleMode {
     /// A cutoff high enough to never bite below any practical output Nyquist — the "no extra
     /// filtering" slider position (and the slider's maximum). This is a *transparent* sentinel,
     /// not a default: the out-of-the-box cutoff the user actually starts on is a lower,
-    /// listenable value defined in the app's `default_settings`.
+    /// listenable value defined in the app's `Persisted::default`.
     pub const CUTOFF_OFF_HZ: u32 = 24_000;
 }
 
