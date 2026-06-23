@@ -9,3 +9,6 @@ dist/
 **/*.rs.bk
 
 *.gba
+
+# Fan-translation toolset (used only to source Mother 3 song titles, not redistributed).
+translation-tools/

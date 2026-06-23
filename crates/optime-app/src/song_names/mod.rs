@@ -8,6 +8,7 @@
 //! (`SoundData::gba_game_code`). A song's index in that table is its "Default" sort position, so
 //! the OST plays back in album order with everything else following.
 
+mod mother_3;
 mod pokemon_emerald;
 
 /// Curated metadata for one song.
@@ -24,6 +25,8 @@ fn table_for(game_code: &str) -> Option<&'static [(u32, &'static str)]> {
     match game_code {
         // Pokémon Emerald (USA/Europe).
         "BPEE" => Some(pokemon_emerald::SONGS),
+        // Mother 3 (Japan / MOTHER 3 fan translation).
+        "A3UJ" => Some(mother_3::SONGS),
         _ => None,
     }
 }
@@ -65,5 +68,23 @@ mod tests {
         // Unknown game / id.
         assert!(lookup("XXXX", 413).is_none());
         assert!(lookup("BPEE", 99999).is_none());
+    }
+
+    #[test]
+    fn mother3_sound_player_titles_resolve() {
+        // Real MP2K song ids (via the in-ROM Sound Player slot->song-id table), in player order.
+        assert_eq!(lookup("A3UJ", 32).unwrap().title, "MOTHER 3 Love Theme");
+        assert_eq!(lookup("A3UJ", 410).unwrap().title, "Unfounded Revenge");
+        assert_eq!(lookup("A3UJ", 1518).unwrap().title, "Curtain Call");
+        assert_eq!(
+            lookup("A3UJ", 1938).unwrap().title,
+            "Battle Against the Masked Man"
+        );
+        // "Let's Begin!" (Sound Player slot 1) lists before "Memory of Life" (the last slot).
+        assert!(lookup("A3UJ", 58).unwrap().order < lookup("A3UJ", 51).unwrap().order);
+        // Song ids are unique across the table.
+        let ids: std::collections::HashSet<u32> =
+            mother_3::SONGS.iter().map(|&(id, _)| id).collect();
+        assert_eq!(ids.len(), mother_3::SONGS.len());
     }
 }

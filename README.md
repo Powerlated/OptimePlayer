@@ -11,3 +11,10 @@ Originally, the codebase was ~5000 lines of HTML+CSS+JS. It has since been trans
 The eventual goal is for this project to feature a MIDI exporter, combined with a VST that leverages the Optime Player synthesizer core, that allows any artist in any DAW to create songs (namely High Quality Video Game Rips) that sound faithful to original console hardware. 
 
 Thanks a lot to the https://github.com/pret/pokediamond and https://github.com/pret/pokeemerald projects for providing reverse engineered source code of the software side of the DS and GBA sound systems, respectively.
+
+## Credits
+
+Song-title data for the in-app library:
+
+ * **Pokémon Emerald** — track titles follow the official *Pokémon Ruby, Pokémon Sapphire & Pokémon Emerald: Super Music Collection*, mapped to song ids via [pret/pokeemerald](https://github.com/pret/pokeemerald).
+ * **Mother 3** — English Sound Player track names are from the [MOTHER 3 Fan Translation](https://mother3.fobby.net/) by the MOTHER 3 Fan Translation Team (Tomato/Jeffman et al.), paired with each track's in-game song id from the Sound Player's slot table in the ROM.
