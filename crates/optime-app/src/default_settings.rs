@@ -77,3 +77,5 @@ pub const SHELF_Q: f32 = 0.707;
 pub const SHELF_CUTOFF_HZ: f32 = 4000.0;
 /// Shelf gain (dB); 0 = flat.
 pub const SHELF_GAIN_DB: f32 = 0.0;
+
+pub const PSG_CRUNCH_COMPENSATION: bool = false;

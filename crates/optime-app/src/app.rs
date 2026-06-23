@@ -460,6 +460,7 @@ impl OptimeApp {
             use_mixer: self.p.use_mixer,
             mixer_sample_rate: f64::from(self.p.mixer_sample_rate),
             mixer_resample,
+            psg_crunch_compensation: self.p.psg_crunch_compensation,
         }
     }
 
@@ -1492,6 +1493,16 @@ impl OptimeApp {
                     .logarithmic(true),
                 )
                 .on_hover_text("Low-pass cutoff for the mixer bus in crunch mode.");
+
+                ui.checkbox(
+                    &mut self.p.psg_crunch_compensation,
+                    "Compensate PSG level for crunch high-end loss",
+                )
+                .on_hover_text(
+                    "Crunch resampling darkens the DirectSound bus' high end (less aliasing \
+                     energy), leaving the PSG voices sitting too loud. This colours the PSG bus \
+                     with the same measured high-frequency rolloff so the two stay balanced.",
+                );
             }
         });
         ui.separator();

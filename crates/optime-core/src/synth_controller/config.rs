@@ -112,6 +112,13 @@ pub struct SynthConfig {
     /// How the intermediate mixer bus is brought up to the output rate (the same algorithm set as
     /// the per-voice [`Self::resample`], resolved against the bus as a non-PSG signal).
     pub mixer_resample: InstrumentResampleMode,
+    /// Colour the PSG (output-set) bus with the same high-frequency rolloff the mixer-to-output
+    /// crunch resampler imposes on the sampled (DirectSound) bus, so the PSG voices don't sit too
+    /// loud relative to the (now slightly darker) DirectSound. Only takes effect when
+    /// [`Self::use_mixer`] is set and [`Self::mixer_resample`] is the output-Nyquist crunch (the
+    /// only case that darkens DirectSound). The filter is a fixed biquad fit (at 48 kHz) to the
+    /// measured nearest→crunch spectral power loss on real DirectSound content.
+    pub psg_crunch_compensation: bool,
 }
 
 impl Default for SynthConfig {
@@ -131,6 +138,7 @@ impl Default for SynthConfig {
             mixer_sample_rate: 48_000.0,
             // Clean reconstruction is the sane default for upsampling a finished bus.
             mixer_resample: InstrumentResampleMode::SincSampleNyquist { half_taps: 16 },
+            psg_crunch_compensation: false,
         }
     }
 }
