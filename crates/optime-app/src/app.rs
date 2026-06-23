@@ -12,6 +12,7 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
+use crate::media_controls::{self, MediaAction};
 use crate::persisted::{InstrumentResampleChoice, Persisted, RepeatMode, SortMode, TrackRef};
 use crate::piano_roll::PianoRoll;
 use crate::song_names;
@@ -175,6 +176,12 @@ pub struct OptimeApp {
     paused: bool,
     status: String,
 
+    /// OS media-transport controls (Bluetooth/keyboard media keys); lazily created once the window
+    /// handle is available, `None` if unsupported (e.g. web, or no handle yet).
+    media: Option<media_controls::MediaControls>,
+    /// Whether media-control creation has been attempted (so it's tried only once).
+    media_tried: bool,
+
     // UI mirrors of [`SynthConfig`].
     track_enables: [bool; TRACK_COUNT],
 
@@ -264,6 +271,8 @@ impl OptimeApp {
             p,
             track_enables: [true; TRACK_COUNT],
             paused: false,
+            media: None,
+            media_tried: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
             loop_count: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
@@ -682,6 +691,36 @@ impl OptimeApp {
             if n == 1 || Some(r) != current {
                 return r;
             }
+        }
+    }
+
+    /// Drives the OS media-transport controls: lazily creates them once the window handle is
+    /// available, applies any transport commands the user triggered (media keys / AirPods taps),
+    /// then pushes the current track + playback state to the system "now playing" display.
+    fn handle_media_controls(&mut self, frame: &eframe::Frame) {
+        if !self.media_tried {
+            self.media_tried = true;
+            self.media = media_controls::MediaControls::new(frame);
+        }
+        let Some(actions) = self.media.as_mut().map(|m| m.poll()) else {
+            return;
+        };
+        for action in actions {
+            match action {
+                MediaAction::Next => self.step_song(1),
+                MediaAction::Prev => self.step_song(-1),
+                MediaAction::PlayPause => self.paused = !self.paused,
+                MediaAction::Play => self.paused = false,
+                MediaAction::Pause | MediaAction::Stop => self.paused = true,
+            }
+        }
+        let title = self
+            .current_song
+            .and_then(|i| self.songs.get(i))
+            .map(|s| s.name.clone());
+        let playing = !self.paused && self.current_song.is_some();
+        if let (Some(title), Some(media)) = (title, self.media.as_mut()) {
+            media.set_now_playing(&title, "Optime Player", playing);
         }
     }
 
@@ -2033,7 +2072,7 @@ impl eframe::App for OptimeApp {
         eframe::set_value(storage, eframe::APP_KEY, &self.p);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.ensure_audio(ctx);
         #[cfg(target_arch = "wasm32")]
         self.keep_audio_alive(ctx);
@@ -2053,6 +2092,8 @@ impl eframe::App for OptimeApp {
         if right {
             self.step_song(1);
         }
+
+        self.handle_media_controls(frame);
 
         let (snap, advance) = self.sync_audio();
         let snap = if advance {

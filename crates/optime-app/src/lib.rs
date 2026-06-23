@@ -4,6 +4,7 @@
 mod app;
 mod audio;
 mod default_settings;
+mod media_controls;
 mod persisted;
 mod piano_roll;
 mod player;
