@@ -18,11 +18,13 @@
 //! Every offset/table here is transcribed from the `pret/pmd-sky` decompilation (the `lib/DSE`
 //! engine sources and the real `files/SOUND/BGM` banks) — see the per-module docs.
 
+pub mod envelope;
 pub mod events;
 pub mod sequencer;
 pub mod smdl;
 pub mod swdl;
 
+pub use envelope::{EnvelopeParams, SoundEnvelope};
 pub use events::{control_info, decode_track, DseEvent, PAUSE_TICKS};
 pub use sequencer::{DseSequencer, SeqOp};
 pub use smdl::{Smdl, Track};
