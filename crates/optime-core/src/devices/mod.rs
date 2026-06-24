@@ -10,10 +10,13 @@
 //!
 //! - [`nintendo_ds`] — SDAT archives, the SSEQ sequencer, and the DS ADSR/LFO hardware model.
 //! - [`gba`] — GBA ROMs running the MP2K ("Sappy") engine from `pret/pokeemerald`.
+//! - [`dse`] — Procyon Studios' DSE engine (SMDL/SWDL), used by PMD: Explorers of Sky; from
+//!   `pret/pmd-sky`. Currently parsing + sample decoding only (not yet a [`SoundData`] variant).
 //!
 //! The standardized messages are defined in [`messages`]; the controller never reaches into a
 //! device, and a device never touches voices directly.
 
+pub mod dse;
 pub mod gba;
 pub mod nintendo_ds;
 
