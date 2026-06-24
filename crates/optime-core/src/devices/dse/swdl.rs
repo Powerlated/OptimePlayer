@@ -67,6 +67,47 @@ pub struct SampleInfo {
     pub envelope: [u8; 16],
 }
 
+/// One PRGI **split**: a key range mapping to a sample, with its own tuning + envelope. A
+/// program is a list of splits (like a sampler keygroup). Offsets within the 0x30-byte on-disk
+/// entry match `dse.h`'s `dse_instrument_split`.
+#[derive(Debug, Clone)]
+pub struct Split {
+    pub min_note: u8,
+    pub max_note: u8,
+    /// Index into this bank's WAVI table of the sample to play (+0x12).
+    pub wave_index: i16,
+    /// Root key the sample is tuned to for this split (+0x14).
+    pub key_base: i16,
+    /// Per-split key transpose in semitones (+0x17).
+    pub note_delta: i8,
+    pub volume: u8,
+    pub pan: u8,
+    pub keygroup: u8,
+    /// 16-byte `sound_envelope_parameters` block (+0x20). Bytes 0x8..0xF are
+    /// `[atkvol, attack, decay, sustain, hold, decay2, release, unk]`.
+    pub envelope: [u8; 16],
+}
+
+/// One PRGI **program** (an "instrument"): a volume/pan and a set of [`Split`]s.
+#[derive(Debug, Clone)]
+pub struct Program {
+    pub id: u16,
+    pub volume: u8,
+    pub pan: u8,
+    pub splits: Vec<Split>,
+}
+
+impl Program {
+    /// Resolves which split plays `key`, or the first split as a fallback. Mirrors the driver's
+    /// `DseSwd_GetNextSplitInRange` (first split whose `[min_note, max_note]` contains `key`).
+    pub fn resolve_split(&self, key: u8) -> Option<&Split> {
+        self.splits
+            .iter()
+            .find(|s| key >= s.min_note && key <= s.max_note)
+            .or_else(|| self.splits.first())
+    }
+}
+
 /// A parsed SWDL bank.
 #[derive(Debug, Clone)]
 pub struct Swdl {
@@ -75,10 +116,13 @@ pub struct Swdl {
     pub version: u16,
     /// WAVI sample-info entries that have a non-empty pointer-table slot.
     pub samples: Vec<SampleInfo>,
+    /// WAVI entries indexed by their original pointer-table slot (`wave_index` in a [`Split`]
+    /// refers to this), or `None` for an empty slot.
+    pub wavi_by_slot: Vec<Option<SampleInfo>>,
     /// The `pcmd` payload (sample data), if this bank carries one (main bank only).
     pub pcmd: Vec<u8>,
-    /// Whether a `prgi` program chunk is present (per-song banks only).
-    pub has_programs: bool,
+    /// PRGI programs (per-song banks only), in file order.
+    pub programs: Vec<Program>,
 }
 
 /// A 16-byte chunk header: returns `(label, payload_start, payload_len)`.
@@ -92,7 +136,9 @@ fn chunk_header(data: &[u8], pos: usize) -> Option<([u8; 4], usize, usize)> {
 fn walk_chunks(data: &[u8], start: usize, mut f: impl FnMut(&[u8; 4], &[u8])) {
     let mut pos = start;
     while pos + CHUNK_HEADER_LEN <= data.len() {
-        let Some((label, payload_start, len)) = chunk_header(data, pos) else { break };
+        let Some((label, payload_start, len)) = chunk_header(data, pos) else {
+            break;
+        };
         if &label == b"eod\0" {
             break;
         }
@@ -114,30 +160,53 @@ impl Swdl {
         // `nbwavislots` at +0x46: the WAVI pointer table has this many u16 entries.
         let nb_wavi_slots = read_u16(data, 0x46) as usize;
 
-        let mut samples = Vec::new();
+        // `nbprgislots` at +0x48: the PRGI pointer table length.
+        let nb_prgi_slots = read_u16(data, 0x48) as usize;
+
+        let mut wavi_by_slot = Vec::new();
         let mut pcmd = Vec::new();
-        let mut has_programs = false;
+        let mut programs = Vec::new();
 
         walk_chunks(data, HEADER_LEN, |label, payload| match label {
-            b"wavi" => samples = parse_wavi(payload, nb_wavi_slots),
+            b"wavi" => wavi_by_slot = parse_wavi(payload, nb_wavi_slots),
             b"pcmd" => pcmd = payload.to_vec(),
-            b"prgi" => has_programs = true,
+            b"prgi" => programs = parse_prgi(payload, nb_prgi_slots),
             _ => {}
         });
+
+        let samples = wavi_by_slot.iter().flatten().cloned().collect();
 
         Some(Swdl {
             name,
             version,
             samples,
+            wavi_by_slot,
             pcmd,
-            has_programs,
+            programs,
         })
+    }
+
+    /// Looks up a PRGI program by its id (what a track's `SetInstrument` selects).
+    pub fn program(&self, id: u16) -> Option<&Program> {
+        self.programs.iter().find(|p| p.id == id)
+    }
+
+    /// The WAVI sample-info for a [`Split`]'s `wave_index`, if that slot is populated.
+    pub fn sample_for_wave(&self, wave_index: i16) -> Option<&SampleInfo> {
+        usize::try_from(wave_index)
+            .ok()
+            .and_then(|i| self.wavi_by_slot.get(i))
+            .and_then(|s| s.as_ref())
     }
 
     /// Decodes one sample to a playable [`Sample`], reading PCM from this bank's `pcmd` (for the
     /// main bank) or from `main_pcmd` (for a per-song bank referencing the main bank).
     pub fn decode_sample(&self, info: &SampleInfo, main_pcmd: &[u8]) -> Option<Sample> {
-        let pcmd = if self.pcmd.is_empty() { main_pcmd } else { &self.pcmd };
+        let pcmd = if self.pcmd.is_empty() {
+            main_pcmd
+        } else {
+            &self.pcmd
+        };
         let start = info.pcm_offset as usize;
         let byte_len = (info.loop_start_words as usize + info.loop_length_words as usize) * 4;
         let raw = pcmd.get(start..(start + byte_len).min(pcmd.len()))?;
@@ -154,8 +223,8 @@ impl Swdl {
 
         // Loop point in samples: words → samples depends on the format's bytes-per-sample.
         let samples_per_word = match info.format {
-            SampleFormat::Pcm16 => 2,  // 4 bytes / 2 bytes-per-sample
-            SampleFormat::Pcm8 => 4,   // 4 bytes / 1
+            SampleFormat::Pcm16 => 2,    // 4 bytes / 2 bytes-per-sample
+            SampleFormat::Pcm8 => 4,     // 4 bytes / 1
             SampleFormat::ImaAdpcm => 8, // 4 bytes / 0.5 (2 nibble-samples per byte)
             _ => 1,
         };
@@ -174,15 +243,63 @@ impl Swdl {
 }
 
 /// Parses the WAVI chunk: a `nb_slots`-entry u16 pointer table (offsets relative to the chunk
-/// payload start) followed by 64-byte [`SampleInfo`] entries. Zero pointers are empty slots.
-fn parse_wavi(payload: &[u8], nb_slots: usize) -> Vec<SampleInfo> {
-    let mut out = Vec::new();
+/// payload start) followed by 64-byte [`SampleInfo`] entries. Returns one slot-indexed entry per
+/// pointer (`None` for a zero/empty slot) so a [`Split`]'s `wave_index` can index it directly.
+fn parse_wavi(payload: &[u8], nb_slots: usize) -> Vec<Option<SampleInfo>> {
+    let mut out = Vec::with_capacity(nb_slots);
     for slot in 0..nb_slots {
         let ptr = read_u16(payload, slot * 2) as usize;
         if ptr == 0 || ptr + SAMPLE_INFO_LEN > payload.len() {
+            out.push(None);
+        } else {
+            out.push(Some(parse_sample_info(
+                &payload[ptr..ptr + SAMPLE_INFO_LEN],
+            )));
+        }
+    }
+    out
+}
+
+/// Parses the PRGI chunk: a `nb_slots`-entry u16 pointer table followed by program entries. Each
+/// program is a header (`id`@0, `nsplits`@2, `vol`@4, `pan`@5, four 16-byte LFO entries @0x10)
+/// then `nsplits` 0x30-byte [`Split`]s starting at +0x60.
+fn parse_prgi(payload: &[u8], nb_slots: usize) -> Vec<Program> {
+    const SPLIT_BASE: usize = 0x60;
+    const SPLIT_LEN: usize = 0x30;
+    let mut out = Vec::new();
+    for slot in 0..nb_slots {
+        let ptr = read_u16(payload, slot * 2) as usize;
+        if ptr == 0 || ptr + SPLIT_BASE > payload.len() {
             continue;
         }
-        out.push(parse_sample_info(&payload[ptr..ptr + SAMPLE_INFO_LEN]));
+        let p = &payload[ptr..];
+        let nsplits = read_u16(p, 0x02) as usize;
+        let mut splits = Vec::with_capacity(nsplits);
+        for s in 0..nsplits {
+            let so = SPLIT_BASE + s * SPLIT_LEN;
+            let Some(e) = p.get(so..so + SPLIT_LEN) else {
+                break;
+            };
+            let mut envelope = [0u8; 16];
+            envelope.copy_from_slice(&e[0x20..0x30]);
+            splits.push(Split {
+                min_note: e[0x04],
+                max_note: e[0x05],
+                wave_index: read_u16(e, 0x12) as i16,
+                key_base: read_u16(e, 0x14) as i16,
+                note_delta: e[0x17] as i8,
+                volume: e[0x18],
+                pan: e[0x19],
+                keygroup: e[0x1A],
+                envelope,
+            });
+        }
+        out.push(Program {
+            id: read_u16(p, 0x00),
+            volume: p[0x04],
+            pan: p[0x05],
+            splits,
+        });
     }
     out
 }

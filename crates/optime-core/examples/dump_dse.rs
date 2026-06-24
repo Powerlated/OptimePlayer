@@ -27,11 +27,10 @@ fn main() {
 
     let main_bank = std::fs::read(&args[0]).expect("read main bank .swd");
     let smd = std::fs::read(&args[1]).expect("read song .smd");
-    let song_bank = args.get(2).map(|p| std::fs::read(p).expect("read song .swd"));
-    let out_dir = args
-        .get(3)
-        .cloned()
-        .unwrap_or_else(|| ".".to_string());
+    let song_bank = args
+        .get(2)
+        .map(|p| std::fs::read(p).expect("read song .swd"));
+    let out_dir = args.get(3).cloned().unwrap_or_else(|| ".".to_string());
 
     // --- Main bank ---
     let main = Swdl::parse(&main_bank).expect("parse main bank");
@@ -49,11 +48,20 @@ fn main() {
     if let Some(bytes) = &song_bank {
         if let Some(bank) = Swdl::parse(bytes) {
             println!(
-                "== SONG BANK  '{}'  ({} wavi refs, has_programs={}) ==\n",
+                "== SONG BANK  '{}'  ({} wavi refs, {} programs) ==",
                 bank.name,
                 bank.samples.len(),
-                bank.has_programs
+                bank.programs.len()
             );
+            for prog in bank.programs.iter().take(4) {
+                println!(
+                    "   program {:>3}: {} split(s), vol {}",
+                    prog.id,
+                    prog.splits.len(),
+                    prog.volume
+                );
+            }
+            println!();
         }
     }
 
@@ -86,6 +94,41 @@ fn main() {
         println!();
     }
 
+    // --- Run the sequencer over the song to prove the interpreter ---
+    {
+        use optime_core::devices::dse::{DseSequencer, SeqOp};
+        let mut seq = DseSequencer::new(&song);
+        let mut ops = Vec::new();
+        let mut all = Vec::new();
+        // ~20s of sequencer ticks at this song's tempo (TPQN * a few hundred beats).
+        for _ in 0..8000 {
+            ops.clear();
+            seq.seq_tick(&mut ops);
+            all.append(&mut ops);
+            if seq.ended {
+                break;
+            }
+        }
+        let mut notes_per_track = [0u32; 16];
+        let mut tempos = Vec::new();
+        let mut programs = 0;
+        for op in &all {
+            match op {
+                SeqOp::NoteOn { track, .. } => notes_per_track[*track] += 1,
+                SeqOp::Tempo { bpm } => tempos.push(*bpm),
+                SeqOp::Program { .. } => programs += 1,
+                _ => {}
+            }
+        }
+        let total: u32 = notes_per_track.iter().sum();
+        println!(
+            "== SEQUENCER: {} ticks, {} notes total, {} program changes, tempos {:?} ==",
+            seq.ticks_elapsed, total, programs, tempos
+        );
+        println!("   notes/track: {notes_per_track:?}");
+        println!("   final bpm {}, ended={}\n", seq.bpm, seq.ended);
+    }
+
     // --- Decode a few samples to WAV to prove the sample path ---
     println!("== decoding samples to WAV in '{out_dir}' ==");
     let mut written = 0;
@@ -105,7 +148,10 @@ fn main() {
                 );
                 written += 1;
             }
-            None => println!("   sample {:>3}: {:?} (skipped/undecodable)", info.id, info.format),
+            None => println!(
+                "   sample {:>3}: {:?} (skipped/undecodable)",
+                info.id, info.format
+            ),
         }
     }
     println!("\nwrote {written} WAV file(s).");
@@ -120,7 +166,9 @@ fn print_event(ev: &DseEvent) {
             ..
         } => println!(
             "    Note   key={key:>3} vel={velocity:>3} dur={}",
-            duration.map(|d| d.to_string()).unwrap_or_else(|| "(prev)".into())
+            duration
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "(prev)".into())
         ),
         DseEvent::Pause { ticks } => println!("    Pause  {ticks} ticks"),
         DseEvent::Control {

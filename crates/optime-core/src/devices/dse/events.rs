@@ -16,9 +16,7 @@
 ///
 /// Verbatim from the `_020B0B7C` rodata table in `asm/main_rodata_020A2808.s`; the driver
 /// indexes it as `pause_table[opcode - 0x80]`.
-pub const PAUSE_TICKS: [u16; 16] = [
-    96, 72, 64, 48, 36, 32, 24, 18, 16, 12, 9, 8, 6, 4, 3, 2,
-];
+pub const PAUSE_TICKS: [u16; 16] = [96, 72, 64, 48, 36, 32, 24, 18, 16, 12, 9, 8, 6, 4, 3, 2];
 
 /// A decoded track event. `Note` and `Pause` are the common cases; everything else is a
 /// control opcode carrying its raw operand bytes (named by its decomp handler).
@@ -190,7 +188,9 @@ pub fn decode_track(bytes: &[u8], start_octave: i32) -> Vec<DseEvent> {
 
         if opcode < 0x80 {
             // PlayNote: opcode is velocity; the next byte packs param count, octave mod, note.
-            let Some(&notedata) = bytes.get(pos) else { break };
+            let Some(&notedata) = bytes.get(pos) else {
+                break;
+            };
             pos += 1;
             let nb_params = (notedata >> 6) & 0x3;
             let octave_delta = (((notedata >> 4) & 0x3) as i8) - 2;
@@ -231,12 +231,20 @@ pub fn decode_track(bytes: &[u8], start_octave: i32) -> Vec<DseEvent> {
                         0xA0 => octave = operands.first().copied().unwrap_or(0) as i32, // SetOctave
                         0xA1 => octave += operands.first().copied().unwrap_or(0) as i8 as i32, // OctaveDelta
                         0x98 => {
-                            events.push(DseEvent::Control { opcode, name, operands });
+                            events.push(DseEvent::Control {
+                                opcode,
+                                name,
+                                operands,
+                            });
                             break;
                         }
                         _ => {}
                     }
-                    events.push(DseEvent::Control { opcode, name, operands });
+                    events.push(DseEvent::Control {
+                        opcode,
+                        name,
+                        operands,
+                    });
                 }
                 None => events.push(DseEvent::Invalid { opcode }),
             }

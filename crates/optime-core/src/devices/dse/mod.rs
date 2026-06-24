@@ -19,12 +19,14 @@
 //! engine sources and the real `files/SOUND/BGM` banks) — see the per-module docs.
 
 pub mod events;
+pub mod sequencer;
 pub mod smdl;
 pub mod swdl;
 
 pub use events::{control_info, decode_track, DseEvent, PAUSE_TICKS};
+pub use sequencer::{DseSequencer, SeqOp};
 pub use smdl::{Smdl, Track};
-pub use swdl::{SampleFormat, SampleInfo, Swdl};
+pub use swdl::{Program, SampleFormat, SampleInfo, Split, Swdl};
 
 use crate::util::search_for_sequence;
 
