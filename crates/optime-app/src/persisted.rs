@@ -154,6 +154,7 @@ impl Default for Persisted {
             nds: PerDeviceSettings {
                 stereo_separation: true,
                 force_stereo_separation: false,
+                smooth_pan: true,
                 delay_smoothing_choice: 1,
                 bass_mono: true,
                 bass_mono_freq: 200.0,
@@ -189,6 +190,7 @@ impl Default for Persisted {
             gba: PerDeviceSettings {
                 stereo_separation: true,
                 force_stereo_separation: false,
+                smooth_pan: true,
                 delay_smoothing_choice: 1,
                 bass_mono: true,
                 bass_mono_freq: 200.0,

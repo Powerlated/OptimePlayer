@@ -9,10 +9,15 @@ use super::{CROSSOVER_Q, MAX_BLOCK};
 use crate::devices::VoicePitch;
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::resample::{mode_half_taps, ResampleTables};
+use crate::dsp::slewer::Slewer;
 use crate::sample::Sample;
 use crate::synth_controller::{DelaySmoothing, PopSmoothing};
 use crate::tuning::TuningSystem;
 use crate::PerDeviceSettings;
+
+/// Seconds the panning slew takes to cross the full 0..1 pan range when pan smoothing is on. Short
+/// enough to track quick auto-pans, long enough to turn a hard pan jump into a click-free ramp.
+const PAN_SLEW_SECONDS: f64 = 0.01;
 
 /// A polyphonic synthesizer for one sequence track. Holds a fixed pool of voices and mixes the
 /// active ones into a stereo sample, optionally widened by per-channel delay lines.
@@ -27,7 +32,12 @@ pub struct SampleSynthesizer {
     pub val_r: f64,
     /// Track volume (0..1).
     pub volume: f64,
-    pan: f64,
+    /// The pan target most recently requested (0 = left, 1 = right). The applied pan in
+    /// [`Self::apply_stereo`] either jumps to this or slews toward it (see [`PerDeviceSettings::smooth_pan`]).
+    pan_target: f64,
+    /// The pan gain-split value actually applied last sample. Slews toward `pan_target` when pan
+    /// smoothing is on; otherwise tracks it exactly.
+    pan: Slewer,
     delay_line_l: DelayLine,
     delay_line_r: DelayLine,
     /// Delay lengths waiting for a note-free moment ([`DelaySmoothing::HoldDuringNotes`]).
@@ -61,7 +71,8 @@ impl SampleSynthesizer {
             val_l: 0.0,
             val_r: 0.0,
             volume: 1.0,
-            pan: 0.5,
+            pan_target: 0.5,
+            pan: Slewer::from_time(0.5, PAN_SLEW_SECONDS, sample_rate),
             delay_line_l: DelayLine::new(delay_len),
             delay_line_r: DelayLine::new(delay_len),
             pending_delays: None,
@@ -85,6 +96,8 @@ impl SampleSynthesizer {
         for instr in &mut self.instrs {
             instr.set_sample_rate(sample_rate);
         }
+        // Keep the pan slew the same wall-clock duration at the new rate.
+        self.pan.set_step(1.0 / (PAN_SLEW_SECONDS * sample_rate));
 
         // Resize the Haas delay lines to the new 100 ms capacity, rescaling the current (and any
         // pending) delay *length* by the rate ratio so the physical widening time is preserved.
@@ -258,9 +271,18 @@ impl SampleSynthesizer {
     /// The per-sample stereo stage: pan, optional Haas widening, and the bass-mono crossover.
     /// Consumes the voice-mixed `mono` sample and sets `val_l`/`val_r`.
     fn apply_stereo(&mut self, mono: f64, config: &PerDeviceSettings) {
+        // Resolve this sample's pan gain split: slew toward the target when smoothing is on,
+        // otherwise jump straight to it (keeping the slewer in sync for a later toggle).
+        let pan = if config.smooth_pan {
+            self.pan.advance(self.pan_target)
+        } else {
+            self.pan.set(self.pan_target);
+            self.pan_target
+        };
+
         if !config.stereo_separation {
-            self.val_l = mono * (1.0 - self.pan) * self.volume;
-            self.val_r = mono * self.pan * self.volume;
+            self.val_l = mono * (1.0 - pan) * self.volume;
+            self.val_r = mono * pan * self.volume;
             return;
         }
 
@@ -270,13 +292,13 @@ impl SampleSynthesizer {
             let lo = self.crossover_lp.transform(mono);
             let hi = self.crossover_hp.transform(mono);
             let center = lo * 0.5;
-            let hi_l = self.delay_line_l.process(hi * (1.0 - self.pan));
-            let hi_r = self.delay_line_r.process(hi * self.pan);
+            let hi_l = self.delay_line_l.process(hi * (1.0 - pan));
+            let hi_r = self.delay_line_r.process(hi * pan);
             self.val_l = (hi_l + center) * self.volume;
             self.val_r = (hi_r + center) * self.volume;
         } else {
-            self.val_l = self.delay_line_l.process(mono * (1.0 - self.pan)) * self.volume;
-            self.val_r = self.delay_line_r.process(mono * self.pan) * self.volume;
+            self.val_l = self.delay_line_l.process(mono * (1.0 - pan)) * self.volume;
+            self.val_r = self.delay_line_r.process(mono * pan) * self.volume;
         }
     }
 
@@ -301,9 +323,11 @@ impl SampleSynthesizer {
 
     /// Sets the stereo pan (0 = left, 1 = right), recomputing the Haas delay lines.
     ///
-    /// The pan gains always apply immediately; under
-    /// [`DelaySmoothing::HoldDuringNotes`] a delay-*length* change (which would click in the
-    /// middle of flowing audio) is deferred until the track has no notes playing.
+    /// The pan gains apply immediately unless [`PerDeviceSettings::smooth_pan`] is set, in which
+    /// case [`Self::apply_stereo`] slews them toward the new target over [`PAN_SLEW_SECONDS`].
+    /// Independently, under [`DelaySmoothing::HoldDuringNotes`] a delay-*length* change (which
+    /// would click in the middle of flowing audio) is deferred until the track has no notes
+    /// playing.
     pub fn set_pan(&mut self, pan: f64, config: &PerDeviceSettings) {
         const SPEED_OF_SOUND: f64 = 343.0;
         let r = 3.0;
@@ -332,7 +356,7 @@ impl SampleSynthesizer {
             }
         }
         self.delay_line_r.gain = gain_r;
-        self.pan = pan;
+        self.pan_target = pan;
     }
 
     /// Applies a deferred delay-length change once the track is note-free.
@@ -430,6 +454,61 @@ mod tests {
             "right should now carry centered bass, got {r}"
         );
         assert!((l - r).abs() < 1e-6, "bass should be centered: {l} vs {r}");
+    }
+
+    #[test]
+    fn smooth_pan_slews_the_gain_split() {
+        // With pan smoothing on, a hard pan change must ramp the L/R gain split over a few
+        // milliseconds instead of stepping it; with it off the same change applies instantly.
+        // Stereo separation is off so the split is read straight off `val_l`/`val_r` (no Haas
+        // delay/crossover in the way), and the source is DC so `mono` is a constant 1.0.
+        let sample_rate = 48_000.0;
+        let base = PerDeviceSettings {
+            stereo_separation: false,
+            ..PerDeviceSettings::neutral()
+        };
+        let smooth = PerDeviceSettings {
+            smooth_pan: true,
+            ..base.clone()
+        };
+        let sample = Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
+        let pitch = VoicePitch::Midi {
+            note: 69.0,
+            sample_pitch_hz: 440.0,
+        };
+
+        let mut synth = SampleSynthesizer::new(sample_rate, 4);
+        synth.play(sample.clone(), pitch, 1.0, &smooth);
+        synth.next_sample(&smooth);
+        // Centered: equal L/R.
+        assert!((synth.val_l - synth.val_r).abs() < 1e-9);
+
+        // Pan hard right: the right channel must climb gradually, not jump.
+        synth.set_pan(1.0, &smooth);
+        synth.next_sample(&smooth);
+        assert!(
+            synth.val_r < 0.9,
+            "pan must ramp, not jump (got {})",
+            synth.val_r
+        );
+        // After enough samples it lands fully right, silencing the left.
+        for _ in 0..2000 {
+            synth.next_sample(&smooth);
+        }
+        assert!((synth.val_r - 1.0).abs() < 1e-9, "should settle hard right");
+        assert!(synth.val_l.abs() < 1e-9, "left should be silent once settled");
+
+        // Smoothing off: the pan change is applied on the very next sample.
+        let mut synth2 = SampleSynthesizer::new(sample_rate, 4);
+        synth2.play(sample, pitch, 1.0, &base);
+        synth2.next_sample(&base);
+        synth2.set_pan(1.0, &base);
+        synth2.next_sample(&base);
+        assert!(
+            (synth2.val_r - 1.0).abs() < 1e-9,
+            "no smoothing should step straight to hard right, got {}",
+            synth2.val_r
+        );
     }
 
     #[test]

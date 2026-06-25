@@ -7,6 +7,7 @@ use crate::devices::VoicePitch;
 use crate::dsp::resample::{
     effective_gather, gather_sinc, sinc_fc, EffectiveGather, GatherSource, ResampleTables,
 };
+use crate::dsp::slewer::Slewer;
 use crate::sample::{InstrumentResampleMode, Sample};
 use crate::synth_controller::PopSmoothing;
 use crate::tuning::{midi_note_to_hz, TuningSystem};
@@ -29,8 +30,9 @@ pub struct SampleInstrument {
     /// Whether this voice is sounding.
     pub playing: bool,
     /// The gain actually applied last sample. Tracks [`Self::volume`] exactly, except for
-    /// pop-smoothed voices, where it slews toward it (see [`Self::advance`]'s `pops`).
-    gain: f64,
+    /// pop-smoothed voices, where it slews toward it (see [`Self::advance`]'s `pops`). The slew
+    /// step is kept at `inv_sample_rate / POP_SLEW_SECONDS` (synced on every rate change).
+    gain: Slewer,
     /// Set by [`Self::begin_fade_out`]: the voice slews to silence and then stops itself.
     fading_out: bool,
     /// Fractional sample position.
@@ -60,7 +62,7 @@ impl SampleInstrument {
             pitch,
             volume: 1.0,
             playing: false,
-            gain: 1.0,
+            gain: Slewer::from_time(1.0, POP_SLEW_SECONDS, sample_rate),
             fading_out: false,
             sample_t: 0.0,
             wrapped: false,
@@ -75,11 +77,11 @@ impl SampleInstrument {
     /// starts from silence and slews up; everything else starts at `volume` exactly.
     pub fn begin_note(&mut self, volume: f64, pops: PopSmoothing) {
         self.volume = volume;
-        self.gain = if pops.enabled_for(self.sample.is_psg_square) {
+        self.gain.set(if pops.enabled_for(self.sample.is_psg_square) {
             0.0
         } else {
             volume
-        };
+        });
         self.fading_out = false;
     }
 
@@ -93,6 +95,8 @@ impl SampleInstrument {
     /// [`Self::advance`], so nothing else needs to change.
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         self.inv_sample_rate = 1.0 / sample_rate;
+        // Keep the pop-smoothing slew the same wall-clock duration at the new rate.
+        self.gain.set_step(self.inv_sample_rate / POP_SLEW_SECONDS);
     }
 
     /// Advances playback by one output sample, updating [`Self::output`].
@@ -135,18 +139,19 @@ impl SampleInstrument {
         // Resolve this sample's applied gain: pop-smoothed voices slew toward the target,
         // everything else applies the envelope volume exactly.
         let target = if self.fading_out { 0.0 } else { self.volume };
-        self.gain = if pops.enabled_for(self.sample.is_psg_square) {
-            slew_toward(self.gain, target, self.inv_sample_rate / POP_SLEW_SECONDS)
+        let gain = if pops.enabled_for(self.sample.is_psg_square) {
+            self.gain.advance(target)
         } else {
+            self.gain.set(target);
             target
         };
-        if self.fading_out && self.gain == 0.0 {
+        if self.fading_out && gain == 0.0 {
             self.playing = false;
         }
 
         // A fully attenuated voice (release floor / silent track) contributes exactly 0 — skip
         // the gather. The position keeps advancing so re-opening the envelope stays seamless.
-        if self.gain == 0.0 {
+        if gain == 0.0 {
             self.output = 0.0;
             return;
         }
@@ -198,7 +203,7 @@ impl SampleInstrument {
             }
         };
 
-        self.output = result * self.gain;
+        self.output = result * gain;
     }
 
     /// Advances playback by `out.len()` output samples, adding each `volume`-scaled sample into
@@ -246,11 +251,10 @@ impl SampleInstrument {
         // The same per-sample gain resolution as `advance` (kept bit-identical): the target is
         // constant within a block, but a pop-smoothed gain still slews sample by sample.
         let smooth = pops.enabled_for(self.sample.is_psg_square);
-        let slew = self.inv_sample_rate / POP_SLEW_SECONDS;
         let target = if self.fading_out { 0.0 } else { self.volume };
         let mut gain = self.gain;
 
-        if target == 0.0 && (gain == 0.0 || !smooth) {
+        if target == 0.0 && (gain.value() == 0.0 || !smooth) {
             // Fully attenuated for the whole block: advance the position (with identical
             // per-sample folding) only.
             for _ in 0..out.len() {
@@ -264,7 +268,7 @@ impl SampleInstrument {
             }
             self.sample_t = pos;
             self.wrapped = wrapped;
-            self.gain = 0.0;
+            self.gain.set(0.0);
             self.output = 0.0;
             return;
         }
@@ -278,15 +282,16 @@ impl SampleInstrument {
             let (p, w) = fold_pos(pos, fold, data_len_f, lp_f, loop_len_f);
             pos = p;
             wrapped |= w;
-            gain = if smooth {
-                slew_toward(gain, target, slew)
+            let g = if smooth {
+                gain.advance(target)
             } else {
+                gain.set(target);
                 target
             };
-            if self.fading_out && gain == 0.0 {
+            if self.fading_out && g == 0.0 {
                 self.playing = false;
             }
-            if gain == 0.0 {
+            if g == 0.0 {
                 last = 0.0;
                 continue;
             }
@@ -298,7 +303,7 @@ impl SampleInstrument {
                 wrapped,
             };
             let result = gather_sinc(&src, tbl, pos, fc, step_mode);
-            last = result * gain;
+            last = result * g;
             *slot += last;
         }
         self.sample_t = pos;
@@ -351,16 +356,6 @@ fn fold_pos(pos: f64, fold: bool, data_len: f64, loop_point: f64, loop_len: f64)
         ((pos - loop_point) % loop_len + loop_point, true)
     } else {
         (pos, false)
-    }
-}
-
-/// Moves `gain` toward `target` by at most `max_step`, landing exactly on the target.
-fn slew_toward(gain: f64, target: f64, max_step: f64) -> f64 {
-    let d = target - gain;
-    if d.abs() <= max_step {
-        target
-    } else {
-        gain + max_step.copysign(d)
     }
 }
 

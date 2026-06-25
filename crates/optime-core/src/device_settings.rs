@@ -122,6 +122,11 @@ fn all_tracks_enabled() -> [bool; TRACK_COUNT] {
 pub struct PerDeviceSettings {
     pub stereo_separation: bool,
     pub force_stereo_separation: bool,
+    /// Slew the left/right pan gains over a few milliseconds on a pan change instead of stepping
+    /// them, so an abrupt pan jump doesn't click. `#[serde(default)]` so old saved settings (which
+    /// predate the field) load as `false`.
+    #[serde(default)]
+    pub smooth_pan: bool,
     pub bass_mono: bool,
     pub bass_mono_freq: f32,
     pub tuning_choice: usize,
@@ -192,6 +197,7 @@ impl PerDeviceSettings {
         Self {
             stereo_separation: false,
             force_stereo_separation: false,
+            smooth_pan: false,
             bass_mono: false,
             bass_mono_freq: 200.0,
             tuning_choice: 0,

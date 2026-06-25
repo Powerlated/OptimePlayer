@@ -1499,6 +1499,14 @@ impl OptimeApp {
                         );
                 });
             });
+        ui.checkbox(
+            &mut d.smooth_pan,
+            "Smooth panning changes (slew the pan to avoid clicks)",
+        )
+        .on_hover_text(
+            "Ramp the left/right pan gains over a few milliseconds on a pan change instead of \
+             stepping them, removing the click an abrupt pan jump would otherwise make.",
+        );
         ui.separator();
         ui.label("Instrument-to-mixer resampling");
         resample_combo(
