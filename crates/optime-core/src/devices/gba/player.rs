@@ -531,7 +531,12 @@ impl GbaPlayer {
         }
         let sample = WaveData::read(&self.rom, wav_addr).map(|wav| {
             let raw = &self.rom[wav.data_offset..wav.data_offset + wav.size as usize];
-            let data = crate::sample::decode_pcm8(raw);
+            let mut data = crate::sample::decode_pcm8(raw);
+            // Real DirectSound output is AC-coupled, so a sample's DC offset is filtered away on
+            // hardware; remove it here too, otherwise the voice thumps by its offset each time the
+            // envelope opens or closes (a pop the hardware never makes). The "Stats for Nerds"
+            // view reports how far each sample was shifted (see `extract::sample_dc_stats`).
+            dc_center(&mut data);
             let mut sample = Sample::new(
                 data,
                 440.0,
@@ -826,10 +831,10 @@ fn cgb_mod_vol(c: &mut CgbChannel) {
 }
 
 /// Removes a waveform's DC offset. Real GB/GBA audio is AC-coupled (a DC-blocking high-pass on
-/// the output), so a duty wave's mean is filtered away on hardware; keeping it here would make the
+/// the output), so a sample's mean is filtered away on hardware; keeping it here would make the
 /// channel *thump* by its DC level every time the envelope opens or closes (a pop hardware never
-/// produces). Centering the looping PSG waveforms reproduces the AC-coupled output and removes
-/// those on/off clicks without otherwise changing the tone.
+/// produces). Centering both the looping PSG waveforms and the DirectSound PCM samples reproduces
+/// the AC-coupled output and removes those on/off clicks without otherwise changing the tone.
 fn dc_center(data: &mut [f32]) {
     if data.is_empty() {
         return;

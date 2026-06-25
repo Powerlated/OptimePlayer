@@ -17,6 +17,7 @@ use std::collections::HashSet;
 
 use super::rom::{ptr_to_offset, GbaRom};
 use super::voice::{ToneData, WaveData};
+use crate::devices::SampleDcStat;
 use crate::util::{read_u32, read_u8};
 
 /// `TONEDATA_TYPE_*` bits (mirrors `voice.rs`).
@@ -310,5 +311,74 @@ fn follow_target(rom: &[u8], marks: &mut Marks, work: &mut Vec<(usize, u8)>, sta
     marks.mark(p, p + 4);
     if let Some(target) = ptr_to_offset(read_u32(rom, p), rom.len()) {
         work.push((target, status));
+    }
+}
+
+/// DC-offset stats for every DirectSound sample reachable from song `song_id`'s voicegroup,
+/// deduped by wave address and sorted by DC shift (most shifted first). Mirrors playback: each
+/// sample is decoded the same way [`super::player`] does, and the DC shift recorded is exactly
+/// what the player subtracts.
+pub fn sample_dc_stats(rom: &GbaRom, song_id: u32) -> Vec<SampleDcStat> {
+    let data: &[u8] = &rom.data;
+    let Some(header) = rom.song_header(song_id) else {
+        return Vec::new();
+    };
+    let mut addrs = Vec::new();
+    let mut visited = HashSet::new();
+    collect_directsound_waves(data, header.voicegroup, 0, &mut visited, &mut addrs);
+
+    let mut seen = HashSet::new();
+    let mut stats = Vec::new();
+    for wav_addr in addrs {
+        if !seen.insert(wav_addr) {
+            continue; // a wave referenced by several voices is one sample
+        }
+        let Some(wav) = WaveData::read(data, wav_addr) else {
+            continue;
+        };
+        let raw = &data[wav.data_offset..wav.data_offset + wav.size as usize];
+        let pcm = crate::sample::decode_pcm8(raw);
+        if pcm.is_empty() {
+            continue;
+        }
+        let mean = pcm.iter().map(|&v| f64::from(v)).sum::<f64>() / pcm.len() as f64;
+        stats.push(SampleDcStat {
+            label: format!("0x{wav_addr:08X}"),
+            dc_shift: mean.abs() as f32,
+            length: pcm.len(),
+            sample_rate: f64::from(wav.freq) / 1024.0,
+        });
+    }
+    stats.sort_by(|a, b| b.dc_shift.total_cmp(&a.dc_shift));
+    stats
+}
+
+/// Collects the ROM addresses of every uncompressed DirectSound wave reachable from voicegroup
+/// `group` (following key-split / rhythm sub-voicegroups), the same traversal [`GroupWalker`]
+/// uses for the audio-only image.
+fn collect_directsound_waves(
+    rom: &[u8],
+    group: usize,
+    depth: usize,
+    visited: &mut HashSet<usize>,
+    out: &mut Vec<u32>,
+) {
+    if depth > MAX_GROUP_DEPTH || !visited.insert(group) {
+        return;
+    }
+    for i in 0..VOICEGROUP_ENTRIES {
+        let off = group + i * 12;
+        if off + 12 > rom.len() {
+            break;
+        }
+        let tone = ToneData::read(rom, off);
+        if tone.kind & (TYPE_RHY | TYPE_SPL) != 0 {
+            if let Some(sub) = ptr_to_offset(tone.wav, rom.len()) {
+                collect_directsound_waves(rom, sub, depth + 1, visited, out);
+            }
+        } else if tone.kind & TYPE_CGB == 0 && tone.kind & TYPE_CMP_REV == 0 {
+            // An uncompressed DirectSound PCM voice (same constraint as playback).
+            out.push(tone.wav);
+        }
     }
 }

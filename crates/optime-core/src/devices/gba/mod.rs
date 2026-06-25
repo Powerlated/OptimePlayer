@@ -19,6 +19,7 @@ pub mod tables;
 mod voice;
 
 pub use extract::extract_audio;
+pub use extract::sample_dc_stats;
 pub use player::GbaPlayer;
 pub use rom::GbaRom;
 

@@ -25,6 +25,23 @@ pub use crate::synth_controller::messages::{SynthEvent, TickFeedback, VoiceId, V
 
 use crate::PerDeviceSettings;
 
+/// DC-offset statistic for one decoded PCM sample, for the app's "Stats for Nerds" view.
+///
+/// Real GB/GBA output is AC-coupled (a DC-blocking high-pass on the way out), so a sample's
+/// constant offset is filtered away on hardware. The engine removes it at decode time; this
+/// records how much had to be shifted.
+#[derive(Debug, Clone)]
+pub struct SampleDcStat {
+    /// Human label for the sample (GBA: the wave's ROM address).
+    pub label: String,
+    /// The DC offset that was removed, as a fraction of full scale (`|mean|`, 0.0..=1.0).
+    pub dc_shift: f32,
+    /// Number of PCM samples.
+    pub length: usize,
+    /// Playback sample rate in Hz.
+    pub sample_rate: f64,
+}
+
 /// A loaded, parsed sound archive for some device — everything needed to list and start songs.
 pub enum SoundData {
     /// A Nintendo DS SDAT sound archive.
@@ -131,6 +148,16 @@ impl SoundData {
             }
         }
         Some(end_ticks.unwrap_or(ticks) as f64 / tick_rate)
+    }
+
+    /// DC-offset stats for every PCM sample reachable from song `id`, sorted by the amount of DC
+    /// shift (most shifted first). Currently only GBA DirectSound samples are analyzed; other
+    /// archives return an empty list.
+    pub fn sample_dc_stats(&self, id: u32) -> Vec<SampleDcStat> {
+        match self {
+            SoundData::Gba(rom) => gba::sample_dc_stats(rom, id),
+            SoundData::NintendoDs(_) | SoundData::Dse(_) => Vec::new(),
+        }
     }
 
     /// Creates a player for song `id`.

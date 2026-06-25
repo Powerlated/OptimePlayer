@@ -209,6 +209,11 @@ pub struct OptimeApp {
     overview: Option<optime_core::SongOverview>,
     /// GPU texture of [`Self::overview`], (re)built lazily from the active [`egui::Context`].
     overview_tex: Option<egui::TextureHandle>,
+    /// Whether the "Stats for Nerds" sample-DC-offset window is open.
+    stats_open: bool,
+    /// Cached per-sample DC-offset stats for the current song, recomputed when the window opens
+    /// or the song changes. The key is the `(archive_index, song_id)` they were computed for.
+    stats_cache: Option<((usize, u32), Vec<optime_core::SampleDcStat>)>,
 }
 
 impl OptimeApp {
@@ -268,6 +273,8 @@ impl OptimeApp {
             look_ahead: None,
             overview: None,
             overview_tex: None,
+            stats_open: false,
+            stats_cache: None,
         };
 
         // Resume where the last session left off (paused), if the last track was from a demo
@@ -421,7 +428,7 @@ impl OptimeApp {
             self.status = format!("Loading {label}…");
             let inbox = self.pending_file.clone();
             let key = stem.to_owned();
-            let url = format!("{stem}");
+            let url = stem.to_string();
             wasm_bindgen_futures::spawn_local(async move {
                 if let Some(bytes) = crate::web::fetch_bytes(&url).await {
                     if let Ok(mut slot) = inbox.lock() {
@@ -1713,6 +1720,85 @@ impl OptimeApp {
         if d.tuning_choice == 1 {
             ui.add(egui::Slider::new(&mut d.pure_tonic, 0..=11).text("Tonic (semitones from A)"));
         }
+        // `d` (the device-settings borrow) is no longer used past here, so we can touch `self`.
+        ui.separator();
+        if ui
+            .button("📊 Stats for Nerds")
+            .on_hover_text("Per-sample DC-offset analysis for the current song.")
+            .clicked()
+        {
+            self.stats_open = true;
+            self.stats_cache = None; // recompute for whatever is playing now
+        }
+    }
+
+    /// The DC-offset stats for the current song, computed (and cached) on demand. `None` when no
+    /// song is loaded.
+    fn current_sample_stats(&mut self) -> Option<&[optime_core::SampleDcStat]> {
+        let key = self
+            .current_song
+            .and_then(|i| self.songs.get(i))
+            .map(|s| (s.archive_index, s.song_id))?;
+        if self.stats_cache.as_ref().map(|(k, _)| *k) != Some(key) {
+            let stats = self.archives[key.0].sample_dc_stats(key.1);
+            self.stats_cache = Some((key, stats));
+        }
+        self.stats_cache.as_ref().map(|(_, v)| v.as_slice())
+    }
+
+    /// The "Stats for Nerds" window: every decoded sample for the current song with how far it was
+    /// shifted to remove its DC offset, most-shifted first.
+    fn stats_ui(&mut self, ctx: &egui::Context) {
+        if !self.stats_open {
+            return;
+        }
+        let mut open = true;
+        let stats: Vec<optime_core::SampleDcStat> = self
+            .current_sample_stats()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+        egui::Window::new("📊 Stats for Nerds")
+            .open(&mut open)
+            .default_width(480.0)
+            .default_height(420.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.label(
+                    "DirectSound samples decoded for the current song. \"DC shift\" is how far \
+                     each sample's mean was offset from zero (as a percentage of full scale), \
+                     removed on decode to match the GBA's AC-coupled output. Most-shifted first.",
+                );
+                ui.separator();
+                if stats.is_empty() {
+                    ui.label(
+                        "No analyzable samples — load a GBA song (the DS and DSE engines aren't \
+                         analyzed here).",
+                    );
+                    return;
+                }
+                ui.label(format!("{} samples", stats.len()));
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    egui::Grid::new("dc_stats_grid")
+                        .num_columns(4)
+                        .striped(true)
+                        .spacing([16.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.strong("Sample");
+                            ui.strong("DC shift");
+                            ui.strong("Length");
+                            ui.strong("Rate");
+                            ui.end_row();
+                            for s in &stats {
+                                ui.monospace(&s.label);
+                                ui.label(format!("{:.3}%", s.dc_shift * 100.0));
+                                ui.label(format!("{}", s.length));
+                                ui.label(format!("{:.0} Hz", s.sample_rate));
+                                ui.end_row();
+                            }
+                        });
+                });
+            });
+        self.stats_open = open;
     }
 
     /// The compact phone layout: a bottom navigation bar (Now Playing / Library / Playlists /
@@ -2222,6 +2308,9 @@ impl eframe::App for OptimeApp {
             }
             self.piano_roll.ingest(look);
         }
+
+        // The "Stats for Nerds" window floats over either layout.
+        self.stats_ui(ctx);
 
         // Narrow screens (phones) get the Spotify-style mobile layout.
         if ctx.screen_rect().width() < 600.0 {

@@ -141,6 +141,42 @@ fn lookahead_sees_the_note() {
 }
 
 #[test]
+fn sample_dc_stats_report_the_offset_removed() {
+    // Give the wave a known DC bias: every sample is +50 (s8), so its mean is 50/128 of full
+    // scale — exactly what the decoder removes and the stat must report.
+    let mut rom = build_rom();
+    for i in 0..64 {
+        rom[WAVE + 16 + i] = 50;
+    }
+    let data = SoundData::load_all(&rom).remove(0);
+    let stats = data.sample_dc_stats(0);
+
+    assert_eq!(
+        stats.len(),
+        1,
+        "the song reaches exactly one DirectSound wave"
+    );
+    let s = &stats[0];
+    assert_eq!(s.label, format!("0x{:08X}", ptr(WAVE)));
+    assert_eq!(s.length, 64);
+    assert!((s.sample_rate - 13379.0).abs() < 1.0);
+    assert!(
+        (s.dc_shift - 50.0 / 128.0).abs() < 1e-4,
+        "dc_shift should be the sample mean as a fraction of full scale, got {}",
+        s.dc_shift
+    );
+
+    // The symmetric ±100 square in the default ROM is already centered: ~zero shift.
+    let centered = SoundData::load_all(&build_rom())
+        .remove(0)
+        .sample_dc_stats(0);
+    assert!(
+        centered[0].dc_shift < 1e-6,
+        "a symmetric wave has no DC offset"
+    );
+}
+
+#[test]
 fn audio_extraction_strips_non_audio_and_plays_identically() {
     let mut rom = build_rom();
     // Plant non-audio "game data" the extractor must not ship.
