@@ -40,10 +40,33 @@ pub enum SeqOp {
     Expression { track: usize, value: u8 },
     /// Track pan (0=left, 64=center, 127=right).
     Pan { track: usize, pan: u8 },
+    /// A musical control opcode the player models with running state (tuning/bend, fades, LFOs):
+    /// surfaced raw so the player owns the per-track state. `operands` are the opcode's bytes.
+    Control {
+        track: usize,
+        opcode: u8,
+        operands: Vec<u8>,
+    },
     /// The track jumped back to its main loop point.
     Looped,
     /// A track reached `EndTrack` with no loop point.
     TrackEnded { track: usize },
+}
+
+/// Control opcodes the player handles as musical state via [`SeqOp::Control`] (tuning/bend, the
+/// volume/pan/tuning fades and deltas, and the LFO setup/use family). Everything else is consumed.
+fn is_player_control(op: u8) -> bool {
+    matches!(op,
+        0xAF                                   // SongVolumeFade
+        | 0xBE                                 // ForceLfoEnvelopeLevel
+        | 0xD0..=0xD4                          // SetTuning / TuningDelta{Coarse,Fine,Full} / TuningFade
+        | 0xDC | 0xDD | 0xDF                   // key-bend LFO setup/envelope/use
+        | 0xE1 | 0xE2                          // VolumeDelta / VolumeFade
+        | 0xE4 | 0xE5 | 0xE7                   // volume LFO setup/envelope/use
+        | 0xE9 | 0xEA                          // PanDelta / PanFade
+        | 0xEC | 0xED | 0xEF                   // pan LFO setup/envelope/use
+        | 0xF0..=0xF3                          // generic LFO setup/envelope/param/use
+    )
 }
 
 /// A sub-loop stack frame (`0x9C`/`0x9D`/`0x9E`). `count` is iterations remaining; `octave` is
@@ -357,9 +380,19 @@ impl DseSequencer {
                 ops.push(SeqOp::Pan { track, pan });
             }
             _ => {
-                // Any other control opcode: consume its operand bytes and ignore it.
+                // Read the operand bytes, then either surface the event to the player (musical
+                // control: tuning/fades/LFOs) or just consume it.
                 let n = control_info(op).map(|(_, n)| n as usize).unwrap_or(0);
-                tr.pos += n;
+                let end = (tr.pos + n).min(tr.events.len());
+                if is_player_control(op) {
+                    let operands = tr.events[tr.pos..end].to_vec();
+                    ops.push(SeqOp::Control {
+                        track,
+                        opcode: op,
+                        operands,
+                    });
+                }
+                tr.pos = end;
             }
         }
         false

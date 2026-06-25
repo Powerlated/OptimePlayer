@@ -12,13 +12,26 @@
 
 use optime_core::devices::dse::{decode_track, DseEvent, Smdl, Swdl};
 use optime_core::sample::Sample;
+use optime_core::synth_controller::messages::TickFeedback;
+use optime_core::{FsVisController, PerDeviceSettings, SoundData, SynthController, SynthEvent};
 use std::path::Path;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // ROM mode: exercise the real SoundData/DevicePlayer pipeline the app uses.
+    if let Some(first) = args.first() {
+        if first.to_ascii_lowercase().ends_with(".nds") {
+            rom_mode(
+                first,
+                args.get(1).map(|s| s.parse().unwrap_or(0)).unwrap_or(0),
+            );
+            return;
+        }
+    }
     if args.len() < 2 {
         eprintln!(
             "usage: dump_dse <bgm.swd> <bgm####.smd> [bgm####.swd] [out_dir]\n\
+             or:    dump_dse <rom.nds> [song_id]   (full SoundData/DevicePlayer pipeline)\n\
              e.g.  dump_dse '/d/Git/pmd-sky/files/SOUND/BGM/bgm.swd' \\\n\
                           '/d/Git/pmd-sky/files/SOUND/BGM/bgm0001.smd'"
         );
@@ -60,6 +73,18 @@ fn main() {
                     prog.splits.len(),
                     prog.volume
                 );
+                // The faithful pitch model: a split's key_base (~ -1745 = the classic ctune -7 in
+                // 8.8 fixed point) plus note_delta give the absolute playback rate per key.
+                if let Some(split) = prog.splits.first() {
+                    let note_key = i32::from(split.key_base)
+                        + (i32::from(split.note_delta) << 8)
+                        + (60i32 << 8);
+                    let hz = optime_core::devices::dse::note_key_to_hz(note_key);
+                    println!(
+                        "      split0: key_base={} note_delta={} wave={} -> key 60 plays at {hz:.0} Hz",
+                        split.key_base, split.note_delta, split.wave_index
+                    );
+                }
             }
             println!();
         }
@@ -131,6 +156,7 @@ fn main() {
 
     // --- Decode a few samples to WAV to prove the sample path ---
     println!("== decoding samples to WAV in '{out_dir}' ==");
+    std::fs::create_dir_all(&out_dir).expect("create out_dir");
     let mut written = 0;
     for info in main.samples.iter().take(6) {
         match main.decode_sample(info, &main.pcmd) {
@@ -155,6 +181,111 @@ fn main() {
         }
     }
     println!("\nwrote {written} WAV file(s).");
+}
+
+/// Loads a PMD `.nds` ROM through the public `SoundData` API and ticks `DevicePlayer` for song
+/// `song_id`, reporting the standardized synth events the audio layer would consume.
+fn rom_mode(path: &str, song_id: u32) {
+    let bytes = std::fs::read(path).expect("read ROM");
+    let archives = SoundData::load_all(&bytes);
+    let Some(data) = archives.first() else {
+        eprintln!("No DSE/SDAT/GBA archive found in {path}");
+        std::process::exit(1);
+    };
+    let ids = data.song_ids();
+    println!("== SoundData: {} songs ==", ids.len());
+    for &id in ids.iter().take(8) {
+        println!(
+            "   song {id}: {}",
+            data.song_name(id).unwrap_or_else(|| "(unnamed)".into())
+        );
+    }
+    println!(
+        "   ... selecting song {song_id}: {}\n",
+        data.song_name(song_id)
+            .unwrap_or_else(|| "(unnamed)".into())
+    );
+
+    let Some(mut player) = data.make_player(song_id) else {
+        eprintln!("song {song_id} is out of range (only {} songs)", ids.len());
+        std::process::exit(1);
+    };
+    let config = PerDeviceSettings::neutral();
+    let mut feedback = TickFeedback::default();
+    let mut events = Vec::new();
+
+    let (mut started, mut stopped, mut released) = (0u32, 0u32, 0u32);
+    let (mut min_vol, mut max_vol) = (f64::INFINITY, 0.0f64);
+    let mut keys: Vec<u8> = Vec::new();
+    // ~10 seconds at the ~100 Hz driver tick.
+    for _ in 0..1000 {
+        events.clear();
+        player.tick(&mut feedback, &config, &mut events);
+        for ev in &events {
+            match ev {
+                SynthEvent::NoteStarted { key, volume, .. } => {
+                    started += 1;
+                    keys.push(*key);
+                    min_vol = min_vol.min(*volume);
+                    max_vol = max_vol.max(*volume);
+                }
+                SynthEvent::VoiceStopped { .. } => stopped += 1,
+                SynthEvent::NoteReleased { .. } => released += 1,
+                _ => {}
+            }
+        }
+    }
+    let (klo, khi) = (
+        keys.iter().copied().min().unwrap_or(0),
+        keys.iter().copied().max().unwrap_or(0),
+    );
+    println!(
+        "== DevicePlayer over ~10s ({} ticks) ==",
+        player.steps_elapsed()
+    );
+    println!("   NoteStarted={started}, NoteReleased={released}, VoiceStopped={stopped}");
+    println!(
+        "   note key range {klo}..={khi}, NoteStarted volume range {min_vol:.3}..={max_vol:.3}"
+    );
+    println!(
+        "   step_rate {:.1} Hz (~{:.0} BPM)",
+        player.step_rate(),
+        player.step_rate() * 60.0 / 48.0
+    );
+
+    // The look-ahead visualizer path: render the whole-song overview the piano roll uses.
+    if let Some(overview) = FsVisController::overview(data, song_id) {
+        let dur: u32 = overview.notes.iter().map(|n| n.duration).sum();
+        println!("== look-ahead overview ==");
+        println!(
+            "   {} notes over {} steps, {} tempo change(s), avg note {} steps",
+            overview.notes.len(),
+            overview.total_steps,
+            overview.tempos.len(),
+            dur.checked_div(overview.notes.len() as u32).unwrap_or(0),
+        );
+    }
+
+    // Render ~10s of real mixed audio through the SynthController and report the output level,
+    // to check the per-voice volume calibration doesn't drive the mix into hard clipping.
+    if let Some(mut ctrl) = SynthController::new(32_768.0, data, song_id) {
+        let mut buf = vec![0f32; 32_768 * 2 * 10];
+        ctrl.fill(&mut buf, &config);
+        let peak = buf.iter().fold(0f32, |m, &s| m.max(s.abs()));
+        let clipped = buf.iter().filter(|&&s| s.abs() >= 1.0).count();
+        let rms = (buf
+            .iter()
+            .map(|&s| f64::from(s) * f64::from(s))
+            .sum::<f64>()
+            / buf.len() as f64)
+            .sqrt();
+        println!("== mixed output over ~10s ==");
+        println!(
+            "   peak {peak:.3}, rms {rms:.3}, {} clipped samples ({:.2}%)",
+            clipped,
+            100.0 * clipped as f64 / buf.len() as f64
+        );
+    }
 }
 
 fn print_event(ev: &DseEvent) {

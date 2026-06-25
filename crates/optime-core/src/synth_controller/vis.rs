@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use crate::devices::dse::{DseSequencer, SeqOp};
 use crate::devices::gba::sequencer::{Mp2kOp, Mp2kSequencer};
 use crate::devices::nintendo_ds::sequence::{MessageType, Sequence};
 use crate::devices::SoundData;
@@ -59,6 +60,11 @@ enum Lookahead {
         sequencer: Mp2kSequencer,
         ops: Vec<Mp2kOp>,
     },
+    /// DSE: the bare SMDL sequencer. Notes carry their own concrete length (no ties).
+    Dse {
+        sequencer: DseSequencer,
+        ops: Vec<SeqOp>,
+    },
 }
 
 /// A parallel sequencer runner used to drive look-ahead visualizers without producing audio.
@@ -97,18 +103,12 @@ impl FsVisController {
 
     /// Sequencer steps executed so far (matches the audio controller's `steps_elapsed`).
     pub fn steps_elapsed(&self) -> u32 {
-        match &self.inner {
-            Lookahead::NintendoDs { sequence, .. } => sequence.ticks_elapsed,
-            Lookahead::Gba { sequencer, .. } => sequencer.steps,
-        }
+        self.inner.steps_elapsed()
     }
 
     /// The current musical tempo in quarter-note BPM (DS: 48 steps/beat; GBA: 24).
     pub fn current_bpm(&self) -> f64 {
-        match &self.inner {
-            Lookahead::NintendoDs { sequence, .. } => f64::from(sequence.tracks[0].bpm),
-            Lookahead::Gba { sequencer, .. } => f64::from(sequencer.tempo_i()),
-        }
+        self.inner.current_bpm()
     }
 
     fn push_note(notes: &mut CircularBuffer<VisNote>, note: VisNote) -> u64 {
@@ -268,6 +268,7 @@ impl Lookahead {
         match self {
             Lookahead::NintendoDs { sequence, .. } => sequence.ticks_elapsed,
             Lookahead::Gba { sequencer, .. } => sequencer.steps,
+            Lookahead::Dse { sequencer, .. } => sequencer.ticks_elapsed,
         }
     }
 
@@ -275,6 +276,10 @@ impl Lookahead {
         match self {
             Lookahead::NintendoDs { sequence, .. } => f64::from(sequence.tracks[0].bpm),
             Lookahead::Gba { sequencer, .. } => f64::from(sequencer.tempo_i()),
+            // Quarter-note BPM: the SMDL tempo is already musical when TPQN is the 48-step beat.
+            Lookahead::Dse { sequencer, .. } => {
+                f64::from(sequencer.bpm) * f64::from(sequencer.tpqn) / 48.0
+            }
         }
     }
 
@@ -333,6 +338,34 @@ impl Lookahead {
                     }
                 }
             }
+            Lookahead::Dse { sequencer, ops } => {
+                ops.clear();
+                sequencer.seq_tick(ops);
+                let now = sequencer.ticks_elapsed;
+                for op in ops.drain(..) {
+                    match op {
+                        // DSE notes are fire-and-forget with a concrete length (never a tie), so
+                        // clamp to >=1 to keep them off the GBA tie path.
+                        SeqOp::NoteOn {
+                            track,
+                            key,
+                            velocity,
+                            duration,
+                        } => out.push(VisEvent::Note(VisNote {
+                            track,
+                            key,
+                            velocity: i32::from(velocity),
+                            duration: duration.max(1),
+                            timestamp: now,
+                        })),
+                        SeqOp::Looped => out.push(VisEvent::Looped),
+                        _ => {}
+                    }
+                }
+                if sequencer.ended {
+                    out.push(VisEvent::Ended);
+                }
+            }
         }
     }
 }
@@ -357,5 +390,9 @@ fn build_lookahead(data: &SoundData, song_id: u32) -> Option<Lookahead> {
                 ops: Vec::new(),
             })
         }
+        SoundData::Dse(dse) => Some(Lookahead::Dse {
+            sequencer: dse.make_sequencer(song_id)?,
+            ops: Vec::new(),
+        }),
     }
 }

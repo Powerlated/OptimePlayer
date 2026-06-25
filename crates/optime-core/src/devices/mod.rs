@@ -11,7 +11,8 @@
 //! - [`nintendo_ds`] — SDAT archives, the SSEQ sequencer, and the DS ADSR/LFO hardware model.
 //! - [`gba`] — GBA ROMs running the MP2K ("Sappy") engine from `pret/pokeemerald`.
 //! - [`dse`] — Procyon Studios' DSE engine (SMDL/SWDL), used by PMD: Explorers of Sky; from
-//!   `pret/pmd-sky`. Currently parsing + sample decoding only (not yet a [`SoundData`] variant).
+//!   `pret/pmd-sky`. A full [`SoundData`]/[`DevicePlayer`] backend: SMDL sequencer, the volume
+//!   envelope, and the ROM-exact note→frequency and square-law volume of the voice-update code.
 //!
 //! The standardized messages are defined in [`messages`]; the controller never reaches into a
 //! device, and a device never touches voices directly.
@@ -30,10 +31,14 @@ pub enum SoundData {
     NintendoDs(Box<nintendo_ds::Sdat>),
     /// A GBA ROM with a located MP2K song table.
     Gba(gba::GbaRom),
+    /// A DSE (Procyon Studios) archive — PMD: Explorers of Sky's SMDL/SWDL music.
+    Dse(Box<dse::DseSoundData>),
 }
 
 impl SoundData {
-    /// Parses every sound archive found in `bytes` (`.nds`/`.sdat` containers, or a GBA ROM).
+    /// Parses every sound archive found in `bytes` (`.nds`/`.sdat` containers, a DSE ROM, or a
+    /// GBA ROM). DSE is probed before GBA: a PMD `.nds` has no SDAT, so the SDAT scan comes up
+    /// empty and the `swdl`/`smdl` scan identifies it.
     pub fn load_all(bytes: &[u8]) -> Vec<SoundData> {
         let sdats = nintendo_ds::Sdat::load_all(bytes);
         if !sdats.is_empty() {
@@ -41,6 +46,9 @@ impl SoundData {
                 .into_iter()
                 .map(|sdat| SoundData::NintendoDs(Box::new(sdat)))
                 .collect();
+        }
+        if let Some(dse) = dse::DseSoundData::load_all(bytes) {
+            return vec![SoundData::Dse(Box::new(dse))];
         }
         match gba::GbaRom::parse(bytes) {
             Some(rom) => vec![SoundData::Gba(rom)],
@@ -58,6 +66,7 @@ impl SoundData {
             SoundData::Gba(rom) => (0..rom.song_count() as u32)
                 .filter(|&id| rom.song_header(id).is_some())
                 .collect(),
+            SoundData::Dse(dse) => dse.song_ids(),
         }
     }
 
@@ -68,6 +77,7 @@ impl SoundData {
         match self {
             SoundData::NintendoDs(sdat) => sdat.sseq_id_to_name.get(&id).cloned(),
             SoundData::Gba(_) => None,
+            SoundData::Dse(dse) => dse.song_name(id),
         }
     }
 
@@ -76,7 +86,7 @@ impl SoundData {
     pub fn gba_game_code(&self) -> Option<String> {
         match self {
             SoundData::Gba(rom) => rom.game_code(),
-            SoundData::NintendoDs(_) => None,
+            SoundData::NintendoDs(_) | SoundData::Dse(_) => None,
         }
     }
 
@@ -130,6 +140,7 @@ impl SoundData {
                 nintendo_ds::NdsPlayer::new(sdat, id)?,
             ))),
             SoundData::Gba(rom) => Some(DevicePlayer::Gba(Box::new(gba::GbaPlayer::new(rom, id)?))),
+            SoundData::Dse(dse) => Some(DevicePlayer::Dse(Box::new(dse.make_player(id)?))),
         }
     }
 }
@@ -139,13 +150,15 @@ impl SoundData {
 pub enum DevicePlayer {
     NintendoDs(Box<nintendo_ds::NdsPlayer>),
     Gba(Box<gba::GbaPlayer>),
+    Dse(Box<dse::DsePlayer>),
 }
 
 impl DevicePlayer {
     /// The device master-clock rate in Hz (cycles per second).
     pub fn clock_rate(&self) -> f64 {
         match self {
-            DevicePlayer::NintendoDs(_) => crate::DS_CLOCK_RATE as f64,
+            // The DSE driver runs off the same DS system clock as the SSEQ engine.
+            DevicePlayer::NintendoDs(_) | DevicePlayer::Dse(_) => crate::DS_CLOCK_RATE as f64,
             DevicePlayer::Gba(_) => gba::GBA_CLOCK_RATE as f64,
         }
     }
@@ -155,6 +168,7 @@ impl DevicePlayer {
         match self {
             DevicePlayer::NintendoDs(_) => crate::CYCLES_PER_TICK as f64,
             DevicePlayer::Gba(_) => gba::CYCLES_PER_FRAME as f64,
+            DevicePlayer::Dse(_) => dse::DSE_CYCLES_PER_TICK as f64,
         }
     }
 
@@ -169,6 +183,7 @@ impl DevicePlayer {
         match self {
             DevicePlayer::NintendoDs(p) => p.steps_elapsed(),
             DevicePlayer::Gba(p) => p.steps_elapsed(),
+            DevicePlayer::Dse(p) => p.steps_elapsed(),
         }
     }
 
@@ -178,6 +193,7 @@ impl DevicePlayer {
         match self {
             DevicePlayer::NintendoDs(p) => p.step_rate(),
             DevicePlayer::Gba(p) => p.step_rate(),
+            DevicePlayer::Dse(p) => p.step_rate(),
         }
     }
 
@@ -188,6 +204,8 @@ impl DevicePlayer {
         match self {
             DevicePlayer::NintendoDs(_) => 48.0,
             DevicePlayer::Gba(_) => 24.0,
+            // DSE TPQN is per-song (read from the SMDL); 48 is the universal Explorers value.
+            DevicePlayer::Dse(_) => 48.0,
         }
     }
 
@@ -201,6 +219,7 @@ impl DevicePlayer {
         match self {
             DevicePlayer::NintendoDs(p) => p.tick(feedback, config, events),
             DevicePlayer::Gba(p) => p.tick(feedback, config, events),
+            DevicePlayer::Dse(p) => p.tick(feedback, config, events),
         }
     }
 }
