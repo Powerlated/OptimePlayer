@@ -201,7 +201,7 @@ impl Default for Persisted {
                 tuning_choice: 0,
                 pure_tonic: 0,
                 instrument_resample: InstrumentResampleSettings {
-                    choice: InstrumentResampleChoice::SincOutputNyquist,
+                    choice: InstrumentResampleChoice::SincSampleNyquist,
                     sinc_taps: 32,
                     psg_cutoff_hz: 15_000,
                     sampler_cutoff_hz: 15_000,
