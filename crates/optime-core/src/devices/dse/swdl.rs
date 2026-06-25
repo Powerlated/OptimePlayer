@@ -81,6 +81,9 @@ pub struct SampleInfo {
 pub struct Split {
     pub min_note: u8,
     pub max_note: u8,
+    /// Default pitch-bend range in semitones (+0x02, `bend_sensitivity`). Used by `SetKeyBend`
+    /// when the channel's `SetKeyBendRange` is unset.
+    pub bend_sensitivity: u8,
     /// Index into this bank's WAVI table of the sample to play (+0x12).
     pub wave_index: i16,
     /// Root key the sample is tuned to for this split (+0x14).
@@ -295,6 +298,7 @@ fn parse_prgi(payload: &[u8], nb_slots: usize) -> Vec<Program> {
             splits.push(Split {
                 min_note: e[0x04],
                 max_note: e[0x05],
+                bend_sensitivity: e[0x02],
                 wave_index: read_u16(e, 0x12) as i16,
                 key_base: read_u16(e, 0x14) as i16,
                 note_delta: e[0x17] as i8,

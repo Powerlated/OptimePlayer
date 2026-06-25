@@ -154,6 +154,42 @@ fn main() {
         println!("   final bpm {}, ended={}\n", seq.bpm, seq.ended);
     }
 
+    // --- Tick a player to prove the LFO path (vibrato / tremolo / auto-pan) ---
+    if let Some(bytes) = &song_bank {
+        if let Some(bank) = Swdl::parse(bytes) {
+            use optime_core::devices::dse::DsePlayer;
+            use std::sync::Arc;
+            let mut player = DsePlayer::new(&song, Arc::new(bank), Arc::new(main.clone()));
+            let mut feedback = TickFeedback::default();
+            let cfg = PerDeviceSettings::neutral();
+            let mut events = Vec::new();
+            let (mut vib, mut bends, mut max_bend, mut pans, mut notes) =
+                (0u32, 0u32, 0.0f64, 0u32, 0u32);
+            for _ in 0..2000 {
+                events.clear();
+                player.tick(&mut feedback, &cfg, &mut events);
+                for ev in &events {
+                    match ev {
+                        SynthEvent::NoteStarted { .. } => notes += 1,
+                        SynthEvent::VoiceDetune { semitones, .. } if semitones.abs() > 1e-9 => {
+                            vib += 1;
+                        }
+                        SynthEvent::TrackDetune { semitones, .. } if semitones.abs() > 1e-9 => {
+                            bends += 1;
+                            max_bend = max_bend.max(semitones.abs());
+                        }
+                        SynthEvent::TrackPan { .. } => pans += 1,
+                        _ => {}
+                    }
+                }
+            }
+            println!(
+                "== effects over ~20s: {notes} notes, {vib} vibrato (VoiceDetune), {bends} pitch \
+                 bends (TrackDetune, max {max_bend:.2} st), {pans} pan updates ==\n"
+            );
+        }
+    }
+
     // --- Decode a few samples to WAV to prove the sample path ---
     println!("== decoding samples to WAV in '{out_dir}' ==");
     std::fs::create_dir_all(&out_dir).expect("create out_dir");

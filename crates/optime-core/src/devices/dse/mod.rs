@@ -22,6 +22,7 @@
 
 pub mod envelope;
 pub mod events;
+pub mod lfo;
 pub mod pitch;
 pub mod player;
 pub mod sequencer;
@@ -31,6 +32,7 @@ pub mod volume;
 
 pub use envelope::{EnvelopeParams, SoundEnvelope};
 pub use events::{control_info, decode_track, DseEvent, PAUSE_TICKS};
+pub use lfo::{Lfo, LfoConfig, LfoDest};
 pub use pitch::note_key_to_hz;
 pub use player::{DsePlayer, DSE_CYCLES_PER_TICK};
 pub use sequencer::{DseSequencer, SeqOp};

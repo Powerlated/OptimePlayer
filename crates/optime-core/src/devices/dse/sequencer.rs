@@ -60,6 +60,8 @@ fn is_player_control(op: u8) -> bool {
         0xAF                                   // SongVolumeFade
         | 0xBE                                 // ForceLfoEnvelopeLevel
         | 0xD0..=0xD4                          // SetTuning / TuningDelta{Coarse,Fine,Full} / TuningFade
+        | 0xD7                                 // SetKeyBend (pitch wheel)
+        | 0xDB                                 // SetKeyBendRange
         | 0xDC | 0xDD | 0xDF                   // key-bend LFO setup/envelope/use
         | 0xE1 | 0xE2                          // VolumeDelta / VolumeFade
         | 0xE4 | 0xE5 | 0xE7                   // volume LFO setup/envelope/use
