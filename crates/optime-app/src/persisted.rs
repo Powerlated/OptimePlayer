@@ -64,14 +64,18 @@ impl SortMode {
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TrackRef {
     pub source: String,
-    pub sseq_id: u32,
+    /// The song id within the source. Serialized as `sseq_id` (and used as the `?sseq_id=` share
+    /// URL param) for storage compatibility; despite the on-disk name it is the song id for any
+    /// device, not just DS SSEQ.
+    #[serde(rename = "sseq_id")]
+    pub song_id: u32,
     pub label: String,
 }
 
 impl TrackRef {
     /// Identity ignores the display label (which may change with SYMB availability).
     pub fn same_song(&self, other: &TrackRef) -> bool {
-        self.source == other.source && self.sseq_id == other.sseq_id
+        self.source == other.source && self.song_id == other.song_id
     }
 }
 

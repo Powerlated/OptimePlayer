@@ -76,7 +76,7 @@ pub fn get_track_ref_from_query_string() -> Option<TrackRef> {
     // 5. Extract the specific parameter value
     Some(TrackRef {
         source: url_params.get("source")?.clone(),
-        sseq_id: url_params.get("sseq_id")?.parse::<u32>().ok()?,
+        song_id: url_params.get("sseq_id")?.parse::<u32>().ok()?,
         label: url_params.get("label")?.clone(),
     })
 }
@@ -88,7 +88,7 @@ pub fn update_query_string(track_ref: TrackRef) -> Result<(), JsValue> {
     // Construct your new query string or parameters
     let new_query = format!(
         "?source={}&sseq_id={}&label={}",
-        track_ref.source, track_ref.sseq_id, track_ref.label
+        track_ref.source, track_ref.song_id, track_ref.label
     );
 
     // Build the updated URL pathname + search query

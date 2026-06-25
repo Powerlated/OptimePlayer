@@ -311,10 +311,26 @@ pub fn mask_rounded_corners(painter: &egui::Painter, rect: Rect, radius: f32, co
     // (square corner point, arc center, arc start angle) per corner. The quarter-circle arc
     // bulges toward the square corner; the fan from the corner across the arc fills the notch.
     let corners = [
-        (rect.left_top(), Pos2::new(rect.left() + r, rect.top() + r), std::f32::consts::PI),
-        (rect.right_top(), Pos2::new(rect.right() - r, rect.top() + r), -FRAC_PI_2),
-        (rect.right_bottom(), Pos2::new(rect.right() - r, rect.bottom() - r), 0.0),
-        (rect.left_bottom(), Pos2::new(rect.left() + r, rect.bottom() - r), FRAC_PI_2),
+        (
+            rect.left_top(),
+            Pos2::new(rect.left() + r, rect.top() + r),
+            std::f32::consts::PI,
+        ),
+        (
+            rect.right_top(),
+            Pos2::new(rect.right() - r, rect.top() + r),
+            -FRAC_PI_2,
+        ),
+        (
+            rect.right_bottom(),
+            Pos2::new(rect.right() - r, rect.bottom() - r),
+            0.0,
+        ),
+        (
+            rect.left_bottom(),
+            Pos2::new(rect.left() + r, rect.bottom() - r),
+            FRAC_PI_2,
+        ),
     ];
     const SEGS: u32 = 16;
     let mut mesh = egui::Mesh::default();
@@ -323,7 +339,10 @@ pub fn mask_rounded_corners(painter: &egui::Painter, rect: Rect, radius: f32, co
         mesh.colored_vertex(outer, color);
         for i in 0..=SEGS {
             let a = start + FRAC_PI_2 * (i as f32 / SEGS as f32);
-            mesh.colored_vertex(Pos2::new(center.x + r * a.cos(), center.y + r * a.sin()), color);
+            mesh.colored_vertex(
+                Pos2::new(center.x + r * a.cos(), center.y + r * a.sin()),
+                color,
+            );
         }
         for i in 0..SEGS {
             mesh.add_triangle(base, base + 1 + i, base + 2 + i);

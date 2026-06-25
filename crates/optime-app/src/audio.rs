@@ -2,8 +2,9 @@
 //! native (ALSA/CoreAudio/WASAPI) and web (WebAudio) targets.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use optime_core::SynthController;
 
-use crate::player::{new_shared, Shared};
+use crate::player::{new_shared, AudioState, AutoAdvance, PlaybackCommand, Shared};
 
 /// Owns the live audio output stream and exposes the shared state the UI mutates.
 pub struct AudioEngine {
@@ -135,6 +136,108 @@ fn update_meters(st: &mut crate::player::AudioState, t0: f64, frames: usize) {
     st.dsp_load = st.dsp_load * 0.85 + load.clamp(0.0, 2.0) * 0.15;
 }
 
+/// Drives the audio-thread-owned playlist: drains UI commands, triggers the end-of-song fade,
+/// and — once the output has faded to silence — advances the index and decodes+installs the next
+/// song. Runs every callback before rendering, so advancement keeps working while the UI's
+/// repaint loop is frozen (e.g. a hidden browser tab). Decoding here is intentional: it only
+/// happens at a transition while the output is already silent, so the brief stall is inaudible.
+fn step_playback(st: &mut AudioState) {
+    let sr = st.sample_rate.max(1.0) as f32;
+    // ~40 ms fade-out before a manual transition, so the lazy decode lands in silence.
+    let short_fade = 1.0 / (0.040 * sr);
+
+    // (a) Drain UI commands. Manual intents take precedence over a natural-end fade.
+    while let Some(cmd) = st.playback.commands.pop_front() {
+        match cmd {
+            PlaybackCommand::SetPlaylist { entries, index } => {
+                st.playback.entries = entries;
+                st.playback.pending = Some(index);
+            }
+            PlaybackCommand::Reorder { entries, index } => {
+                // Swap the list under the still-playing song; no transition.
+                st.playback.entries = entries;
+                st.playback.index = index;
+            }
+            PlaybackCommand::PlayAt(i) => st.playback.pending = Some(i),
+            PlaybackCommand::Next => st.playback.pending = st.playback.manual_step(1),
+            PlaybackCommand::Prev => st.playback.pending = st.playback.manual_step(-1),
+        }
+    }
+    // A manual transition interrupting a playing song does a quick fade-out first.
+    if st.playback.pending.is_some() && st.controller.is_some() && st.fade_gain > 0.0 {
+        st.fade_step = short_fade;
+    }
+
+    // (b) End-of-song fade trigger (moved off the UI thread): count loops, and start the long
+    //     3 s auto-fade when the sequence has ended or looped twice.
+    if let Some(controller) = &mut st.controller {
+        if controller.jumps > 0 {
+            controller.jumps = 0;
+            st.playback.loop_count += 1;
+        }
+        let ended = std::mem::take(&mut controller.fading_start);
+        if st.fade_step == 0.0 && (ended || st.playback.loop_count >= 2) {
+            st.fade_step = 1.0 / (3.0 * sr);
+        }
+    }
+
+    // (c) Perform a transition once we're silent (faded out, or nothing playing yet).
+    let silent = st.controller.is_none() || (st.fade_step > 0.0 && st.fade_gain <= 0.0);
+    if !silent {
+        return;
+    }
+    // Resolve a natural-end advance if no manual target is queued and a song actually ended.
+    if st.playback.pending.is_none() && st.controller.is_some() && st.fade_step > 0.0 {
+        match st.playback.auto_advance() {
+            AutoAdvance::Repeat => st.playback.pending = Some(st.playback.index),
+            AutoAdvance::Play(i) => st.playback.pending = Some(i),
+            AutoAdvance::Stop => {
+                st.controller = None;
+                st.fade_step = 0.0;
+                st.fade_gain = 0.0;
+                st.playback.stopped = true;
+                st.playback.status_gen = st.playback.status_gen.wrapping_add(1);
+                return;
+            }
+        }
+    }
+    let Some(target) = st.playback.pending.take() else {
+        return;
+    };
+    // Clone out what the decode needs so the entries borrow ends before we mutate `st`.
+    let to_decode = st
+        .playback
+        .entries
+        .get(target)
+        .map(|e| (e.archive.clone(), e.track.song_id));
+    let decoded = match to_decode {
+        Some((Some(arc), song_id)) => SynthController::new(st.sample_rate, &arc, song_id),
+        _ => None,
+    };
+    match decoded {
+        Some(controller) => {
+            st.controller = Some(controller);
+            st.playback.index = target;
+            st.playback.loop_count = 0;
+            st.fade_gain = 0.0; // fade the new song in
+            st.fade_step = 0.0;
+            st.playback.stopped = false;
+            st.playback.needs_ui = false;
+        }
+        None => {
+            // Entry missing or its source isn't loaded (cross-source): go silent, ask the UI.
+            st.controller = None;
+            st.fade_step = 0.0;
+            st.fade_gain = 0.0;
+            if target < st.playback.entries.len() {
+                st.playback.index = target;
+                st.playback.needs_ui = true;
+            }
+        }
+    }
+    st.playback.status_gen = st.playback.status_gen.wrapping_add(1);
+}
+
 /// The per-sample gain pipeline: smoothed master volume × song fade (in/out) × pause ramp.
 /// All transitions are ramped inside the callback so no UI action produces a click.
 struct GainRamp {
@@ -205,6 +308,9 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
     let st = &mut *guard;
     // Heartbeat for the web stall detector (see `AudioEngine::callback_age`).
     st.last_callback = t0;
+    // Advance the playlist (fade trigger + lazy decode) before rendering; keeps working while
+    // the UI is frozen. May install a new controller.
+    step_playback(st);
     if st.controller.is_none() || (st.paused && st.pause_gain <= 0.0) {
         data.fill(0.0);
         if !st.paused {

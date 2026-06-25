@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use optime_core::{FsVisController, InstrumentResampleMode, SoundData, SynthController};
+use optime_core::{FsVisController, InstrumentResampleMode, SoundData};
 
 #[cfg(target_arch = "wasm32")]
 use crate::web::get_track_ref_from_query_string;
@@ -14,6 +14,7 @@ use crate::persisted::{
     InstrumentResampleChoice, PerDeviceSettings, Persisted, RepeatMode, SortMode, TrackRef,
 };
 use crate::piano_roll::PianoRoll;
+use crate::player::{PlaybackCommand, PlaylistEntry};
 use crate::song_names;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{audio::AudioEngine, player, TRACK_COUNT};
@@ -92,22 +93,10 @@ enum MobileTab {
     Settings,
 }
 
-/// A locked-in decision of which song a prev/next step lands on, so a swipe preview and the
-/// commit that follows agree even with shuffle's randomness.
-#[derive(Clone, Copy)]
-enum StepTarget {
-    /// An index into the flattened song list.
-    List(usize),
-    /// A position within the active playlist queue.
-    Queue(usize),
-}
-
 /// The adjacent song's pre-rendered piano roll, shown sliding in during a swipe.
 struct SwipePreview {
     /// +1 = next (dragging left), -1 = previous (dragging right).
     dir: isize,
-    /// Where the swipe will land when committed.
-    target: StepTarget,
     /// A roll pre-filled with the target song's opening notes.
     roll: PianoRoll,
     /// The look-ahead runner that filled `roll`; handed to the app on commit.
@@ -144,7 +133,7 @@ pub struct OptimeApp {
     audio_failed: bool,
     sample_rate: f64,
 
-    archives: Vec<SoundData>,
+    archives: Vec<Arc<SoundData>>,
     songs: Vec<Song>,
     current_song: Option<usize>,
 
@@ -164,8 +153,6 @@ pub struct OptimeApp {
     /// Saved state that persists across sessions
     p: Persisted,
 
-    /// Loops completed by the current song (counted from `SynthController::jumps`).
-    loop_count: u32,
     /// xorshift64 state for shuffle.
     rng: u64,
 
@@ -180,8 +167,12 @@ pub struct OptimeApp {
     new_playlist_name: String,
     /// Source key (demo stem or user file name) of the currently loaded archives.
     current_source: String,
-    /// When playing from a playlist/collection: its tracks and the current position.
-    queue: Option<(Vec<TrackRef>, usize)>,
+    /// The current playlist in *natural* (unshuffled) order — the song list snapshot or a
+    /// collection's tracks. The audio thread owns the live (possibly shuffled) order + position;
+    /// this is what the UI re-materializes from on a shuffle toggle.
+    playlist: Vec<TrackRef>,
+    /// Last `playback.status_gen` the UI reconciled, to detect audio-thread-driven advances.
+    last_status_gen: u64,
     /// A track waiting for its source archive to finish loading (cross-source playlist jump
     /// or session restore).
     pending_play: Option<TrackRef>,
@@ -254,14 +245,14 @@ impl OptimeApp {
             media: None,
             media_tried: false,
             status: "Load a ROM, an SDAT, or a demo to begin.".to_owned(),
-            loop_count: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
             length_cache: std::collections::HashMap::new(),
             needs_sort: false,
             library_view: LibraryView::Root,
             new_playlist_name: String::new(),
             current_source: String::new(),
-            queue: None,
+            playlist: Vec::new(),
+            last_status_gen: 0,
             pending_play: None,
             resume_paused: false,
             mobile_tab: MobileTab::NowPlaying,
@@ -301,7 +292,7 @@ impl OptimeApp {
     fn track_ref(&self, i: usize) -> Option<TrackRef> {
         self.songs.get(i).map(|s| TrackRef {
             source: self.current_source.clone(),
-            sseq_id: s.song_id,
+            song_id: s.song_id,
             label: s.label.clone(),
         })
     }
@@ -316,7 +307,7 @@ impl OptimeApp {
     fn current_is_gba(&self) -> bool {
         self.current_song
             .and_then(|i| self.songs.get(i))
-            .is_some_and(|s| matches!(self.archives[s.archive_index], SoundData::Gba(_)))
+            .is_some_and(|s| matches!(*self.archives[s.archive_index], SoundData::Gba(_)))
     }
 
     /// Human-readable name of the current song's console.
@@ -370,7 +361,7 @@ impl OptimeApp {
                 self.sample_rate = audio.sample_rate;
                 self.audio = Some(audio);
                 if let Some(i) = self.current_song {
-                    self.play_song(i);
+                    self.play_from_list(i);
                 }
             }
             None => {
@@ -458,7 +449,7 @@ impl OptimeApp {
             self.status = format!("No songs found in {source} (not an SDAT, NDS, or GBA ROM).");
             return;
         }
-        self.archives = archives;
+        self.archives = archives.into_iter().map(Arc::new).collect();
         self.songs.clear();
         for (i, data) in self.archives.iter().enumerate() {
             // GBA ROMs carry no song names; supply curated titles + OST order by game code.
@@ -498,11 +489,15 @@ impl OptimeApp {
         // A track was waiting for this source (playlist jump / session restore).
         if let Some(t) = self.pending_play.take() {
             if t.source == self.current_source {
-                if let Some(i) = self.songs.iter().position(|s| s.song_id == t.sseq_id) {
-                    self.play_song_keep_queue(i);
-                    if std::mem::take(&mut self.resume_paused) {
-                        self.paused = true;
-                    }
+                // Session restore with no playlist context yet: default to the full song list.
+                if self.playlist.is_empty() {
+                    self.playlist = (0..self.songs.len())
+                        .filter_map(|i| self.track_ref(i))
+                        .collect();
+                }
+                self.start_playlist(Some(t));
+                if std::mem::take(&mut self.resume_paused) {
+                    self.paused = true;
                 }
             } else {
                 self.pending_play = Some(t);
@@ -600,80 +595,187 @@ impl OptimeApp {
         }
     }
 
-    /// Starts playing the song at `index`, leaving any playlist queue: navigation reverts to
-    /// the full song list.
-    fn play_song(&mut self, index: usize) {
-        self.queue = None;
-        self.play_song_keep_queue(index);
-    }
-
-    /// Starts playing the song at `index` in the flattened list without touching the queue.
-    fn play_song_keep_queue(&mut self, index: usize) {
-        let Some(song) = self.songs.get(index) else {
+    /// Plays the song at flattened-list index `index`, making the whole song list the playlist.
+    fn play_from_list(&mut self, index: usize) {
+        let Some(start) = self.track_ref(index) else {
             return;
         };
-        let (archive_index, song_id) = (song.archive_index, song.song_id);
-        let data = &self.archives[song.archive_index];
-        match SynthController::new(self.sample_rate, data, song.song_id) {
-            Some(controller) => {
-                self.current_song = Some(index);
-                self.paused = false;
-                self.loop_count = 0;
-                if let Some(t) = self.track_ref(index) {
-                    self.p.library.push_recent(&t);
-                }
-                self.piano_roll.clear();
-                // Parallel look-ahead runner; we drive it forward ourselves each frame.
-                self.look_ahead = FsVisController::new(data, song.song_id);
-                self.status = format!("Playing: {}", song.label);
-                if let Some(audio) = &self.audio {
-                    if let Ok(mut st) = audio.shared.lock() {
-                        st.config = self.config();
-                        st.paused = false;
-                        // Start from silence and let the callback fade the new song in
-                        // (~30 ms) — no click on song switches.
-                        st.fade_gain = 0.0;
-                        st.fade_step = 0.0;
-                        st.controller = Some(controller);
-                    }
-                }
-            }
-            None => self.status = format!("Failed to load: {}", song.label),
-        }
-
-        // Pre-render the whole-track overview bar (desktop only). Cleared first so a failed load
-        // or a song switch never shows the previous track's overview.
-        self.overview = None;
-        self.overview_tex = None;
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.current_song == Some(index) {
-            self.overview = FsVisController::overview(&self.archives[archive_index], song_id);
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = (archive_index, song_id);
-            if let Some(track_ref) = self.current_track_ref() {
-                let _ = update_query_string(track_ref);
-            }
-        }
+        self.playlist = (0..self.songs.len())
+            .filter_map(|i| self.track_ref(i))
+            .collect();
+        self.start_playlist(Some(start));
     }
 
-    fn restart(&mut self) {
-        if let Some(i) = self.current_song {
-            self.play_song_keep_queue(i);
+    /// Plays `tracks` as the playlist, starting at the track at `pos`.
+    fn play_collection_at(&mut self, tracks: Vec<TrackRef>, pos: usize) {
+        if tracks.is_empty() {
+            return;
         }
+        let pos = pos.min(tracks.len() - 1);
+        let start = tracks[pos].clone();
+        self.playlist = tracks;
+        self.start_playlist(Some(start));
     }
 
-    /// A pseudo-random index in `0..n`, avoiding `current` when possible (xorshift64).
-    fn rand_index(&mut self, n: usize, current: Option<usize>) -> usize {
-        loop {
+    /// Plays `tracks` from the top (a random entry first when shuffle is on).
+    fn play_all_collection(&mut self, tracks: Vec<TrackRef>) {
+        if tracks.is_empty() {
+            return;
+        }
+        self.playlist = tracks;
+        self.start_playlist(None);
+    }
+
+    /// (Re)materializes `self.playlist` (applying shuffle once, here — the whole order is fixed at
+    /// this point) and sends it to the audio thread, starting at `start` (or the first entry after
+    /// shuffling when `None`). If the chosen start entry's source isn't loaded, defers: fetches the
+    /// source and resumes from [`Self::load_bytes`] when it arrives.
+    fn start_playlist(&mut self, start: Option<TrackRef>) {
+        self.paused = false;
+        if self.playlist.is_empty() {
+            return;
+        }
+        let natural = self.playlist.clone();
+        let ordered = if self.p.shuffle {
+            self.materialize_shuffle(&natural, start.as_ref())
+        } else {
+            natural
+        };
+        let index = match &start {
+            Some(s) => ordered.iter().position(|t| t.same_song(s)).unwrap_or(0),
+            None => 0,
+        };
+        let start_track = ordered[index].clone();
+        if start_track.source != self.current_source {
+            // The chosen source isn't loaded — fetch it (demo) and resume on arrival.
+            self.pending_play = Some(start_track.clone());
+            if let Some((label, stem)) = DEMOS.iter().find(|(_, stem)| *stem == start_track.source)
+            {
+                let (label, stem) = (*label, *stem);
+                self.request_demo(stem, label);
+            } else {
+                self.status = format!(
+                    "Open '{}' to play: {}",
+                    start_track.source, start_track.label
+                );
+            }
+            return;
+        }
+        let entries = self.build_entries(&ordered);
+        self.send_command(PlaybackCommand::SetPlaylist { entries, index });
+    }
+
+    /// A fresh shuffle (Fisher–Yates, xorshift64) of `tracks`, with `keep` — the song that should
+    /// start playing — moved to the front so it plays first and the rest follow shuffled.
+    fn materialize_shuffle(
+        &mut self,
+        tracks: &[TrackRef],
+        keep: Option<&TrackRef>,
+    ) -> Vec<TrackRef> {
+        let mut out: Vec<TrackRef> = tracks.to_vec();
+        for i in (1..out.len()).rev() {
             self.rng ^= self.rng << 13;
             self.rng ^= self.rng >> 7;
             self.rng ^= self.rng << 17;
-            let r = (self.rng % n as u64) as usize;
-            if n == 1 || Some(r) != current {
-                return r;
+            let j = (self.rng % (i as u64 + 1)) as usize;
+            out.swap(i, j);
+        }
+        if let Some(k) = keep {
+            if let Some(pos) = out.iter().position(|t| t.same_song(k)) {
+                let item = out.remove(pos);
+                out.insert(0, item);
+            }
+        }
+        out
+    }
+
+    /// Maps playlist tracks to [`PlaylistEntry`]s, attaching the loaded source archive (or `None`
+    /// for a track whose source isn't loaded — the audio thread then asks the UI to fetch it).
+    fn build_entries(&self, tracks: &[TrackRef]) -> Vec<PlaylistEntry> {
+        tracks
+            .iter()
+            .map(|t| PlaylistEntry {
+                archive: self.resolve_archive(t),
+                track: t.clone(),
+            })
+            .collect()
+    }
+
+    /// The loaded source archive for `t`, or `None` if `t` belongs to a source that isn't loaded.
+    fn resolve_archive(&self, t: &TrackRef) -> Option<Arc<SoundData>> {
+        if t.source != self.current_source {
+            return None;
+        }
+        self.songs
+            .iter()
+            .find(|s| s.song_id == t.song_id)
+            .map(|s| self.archives[s.archive_index].clone())
+    }
+
+    /// Pushes a command plus the latest level state (config / paused / repeat) to the audio thread.
+    fn send_command(&mut self, cmd: PlaybackCommand) {
+        let config = self.config();
+        if let Some(audio) = &self.audio {
+            if let Ok(mut st) = audio.shared.lock() {
+                st.config = config;
+                st.paused = self.paused;
+                st.playback.repeat = self.p.repeat;
+                st.playback.commands.push_back(cmd);
+            }
+        }
+    }
+
+    /// Skips to the next (`delta >= 0`) or previous entry.
+    fn send_transport(&mut self, delta: isize) {
+        self.paused = false;
+        self.send_command(if delta >= 0 {
+            PlaybackCommand::Next
+        } else {
+            PlaybackCommand::Prev
+        });
+    }
+
+    /// Restarts the currently-playing entry from the top.
+    fn restart(&mut self) {
+        self.paused = false;
+        let config = self.config();
+        if let Some(audio) = &self.audio {
+            if let Ok(mut st) = audio.shared.lock() {
+                let i = st.playback.index;
+                st.config = config;
+                st.paused = false;
+                st.playback.repeat = self.p.repeat;
+                st.playback.commands.push_back(PlaybackCommand::PlayAt(i));
+            }
+        }
+    }
+
+    /// Re-materializes the playlist order for the new shuffle state, keeping the current song
+    /// playing (no restart). Call *after* flipping `self.p.shuffle`.
+    fn toggle_shuffle(&mut self) {
+        if self.playlist.is_empty() {
+            return;
+        }
+        let cur = self.current_track_ref();
+        let natural = self.playlist.clone();
+        let ordered = if self.p.shuffle {
+            self.materialize_shuffle(&natural, cur.as_ref())
+        } else {
+            natural
+        };
+        let index = cur
+            .as_ref()
+            .and_then(|c| ordered.iter().position(|t| t.same_song(c)))
+            .unwrap_or(0);
+        let entries = self.build_entries(&ordered);
+        self.send_command(PlaybackCommand::Reorder { entries, index });
+    }
+
+    /// Pushes the (already-updated) repeat mode to the audio thread.
+    fn push_repeat(&mut self) {
+        if let Some(audio) = &self.audio {
+            if let Ok(mut st) = audio.shared.lock() {
+                st.playback.repeat = self.p.repeat;
             }
         }
     }
@@ -691,8 +793,8 @@ impl OptimeApp {
         };
         for action in actions {
             match action {
-                MediaAction::Next => self.step_song(1),
-                MediaAction::Prev => self.step_song(-1),
+                MediaAction::Next => self.send_transport(1),
+                MediaAction::Prev => self.send_transport(-1),
                 MediaAction::PlayPause => self.paused = !self.paused,
                 MediaAction::Play => self.paused = false,
                 MediaAction::Pause | MediaAction::Stop => self.paused = true,
@@ -708,75 +810,30 @@ impl OptimeApp {
         }
     }
 
-    /// Steps to the previous/next song in queue order: within the active playlist queue if one
-    /// is set, otherwise the full list. Random when shuffle is on, else wraparound order.
-    fn step_song(&mut self, delta: isize) {
-        if let Some(target) = self.step_target(delta) {
-            self.commit_step(target);
-        }
-    }
-
-    /// Decides where a prev/next step lands (consuming the shuffle RNG), without playing it.
-    fn step_target(&mut self, delta: isize) -> Option<StepTarget> {
-        if let Some((tracks, pos)) = self.queue.clone() {
-            if tracks.is_empty() {
-                self.queue = None;
-            } else {
-                let next = if self.p.shuffle && tracks.len() > 1 {
-                    self.rand_index(tracks.len(), Some(pos))
-                } else {
-                    (pos as isize + delta).rem_euclid(tracks.len() as isize) as usize
-                };
-                return Some(StepTarget::Queue(next));
-            }
-        }
-        let n = self.songs.len();
-        if n == 0 {
-            return None;
-        }
-        let next = if self.p.shuffle && n > 1 {
-            self.rand_index(n, self.current_song)
-        } else {
-            let cur = self.current_song.unwrap_or(0) as isize;
-            (cur + delta).rem_euclid(n as isize) as usize
-        };
-        Some(StepTarget::List(next))
-    }
-
-    /// Starts playing a previously decided step target.
-    fn commit_step(&mut self, target: StepTarget) {
-        match target {
-            StepTarget::List(i) => self.play_song(i),
-            StepTarget::Queue(pos) => {
-                if let Some((tracks, _)) = self.queue.clone() {
-                    if let Some(t) = tracks.get(pos).cloned() {
-                        self.queue = Some((tracks, pos));
-                        self.play_ref(t);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Builds the swipe preview for the song a step in `delta` direction would land on: a piano
-    /// roll pre-filled with that song's opening notes via its own look-ahead runner.
+    /// Builds the swipe preview for the entry a step in `delta` direction would land on (read from
+    /// the audio-owned playlist, shuffle already applied): a piano roll pre-filled with that song's
+    /// opening notes via its own look-ahead runner.
     fn build_swipe_preview(&mut self, delta: isize) -> Option<SwipePreview> {
-        let target = self.step_target(delta)?;
-        // Resolve the target to an archive + song within the currently loaded source (a queue
-        // track from another source previews as an empty roll).
-        let resolved = match target {
-            StepTarget::List(i) => self.songs.get(i).map(|s| (s.archive_index, s.song_id)),
-            StepTarget::Queue(pos) => self
-                .queue
-                .as_ref()
-                .and_then(|(tracks, _)| tracks.get(pos))
-                .filter(|t| t.source == self.current_source)
-                .and_then(|t| {
+        // Resolve the adjacent entry to an archive + song within the loaded source (a track from
+        // another source previews as an empty roll).
+        let resolved = {
+            let shared = self.audio.as_ref().map(|a| a.shared.clone())?;
+            let st = shared.lock().ok()?;
+            let n = st.playback.entries.len();
+            if n == 0 {
+                None
+            } else {
+                let target = (st.playback.index as isize + delta).rem_euclid(n as isize) as usize;
+                let t = &st.playback.entries[target].track;
+                if t.source == self.current_source {
                     self.songs
                         .iter()
-                        .find(|s| s.song_id == t.sseq_id)
+                        .find(|s| s.song_id == t.song_id)
                         .map(|s| (s.archive_index, s.song_id))
-                }),
+                } else {
+                    None
+                }
+            }
         };
         let mut roll = PianoRoll::default();
         let look = resolved.and_then(|(archive_index, song_id)| {
@@ -792,62 +849,90 @@ impl OptimeApp {
         });
         Some(SwipePreview {
             dir: delta,
-            target,
             roll,
             look,
         })
     }
 
-    /// Plays a persistent track reference, loading its source archive first if needed (demo
-    /// sources are auto-fetched; user files must be re-opened manually).
-    fn play_ref(&mut self, t: TrackRef) {
-        if t.source == self.current_source {
-            if let Some(i) = self.songs.iter().position(|s| s.song_id == t.sseq_id) {
-                self.play_song_keep_queue(i);
-            } else {
-                self.status = format!("Track not found in current archive: {}", t.label);
+    /// Reflects advances the audio thread performed on its own (so auto-advance / fade-out keep
+    /// working while the UI's repaint loop is frozen — e.g. a hidden tab): when the audio thread's
+    /// `status_gen` changes, update the highlight, look-ahead, status, recents and media session to
+    /// match its authoritative `playback.index`. Does not touch the audio controller.
+    fn reconcile_playback(&mut self) {
+        let Some(shared) = self.audio.as_ref().map(|a| a.shared.clone()) else {
+            return;
+        };
+        let (needs_ui, stopped, track) = {
+            let Ok(mut st) = shared.lock() else {
+                return;
+            };
+            if st.playback.status_gen == self.last_status_gen {
+                return;
             }
-            return;
-        }
-        if let Some((label, stem)) = DEMOS.iter().find(|(_, stem)| *stem == t.source) {
-            let (label, stem) = (*label, *stem);
-            self.pending_play = Some(t);
-            self.request_demo(stem, label);
-        } else {
-            self.status = format!("Open '{}' to play: {}", t.source, t.label);
-        }
-    }
-
-    /// Starts playing `tracks` as the active queue, from position `pos`.
-    fn play_queue(&mut self, tracks: Vec<TrackRef>, pos: usize) {
-        if tracks.is_empty() {
-            return;
-        }
-        let pos = pos.min(tracks.len() - 1);
-        let t = tracks[pos].clone();
-        self.queue = Some((tracks, pos));
-        self.play_ref(t);
-    }
-
-    /// What to do when the current song has finished its fade-out.
-    fn handle_song_end(&mut self) {
-        match self.p.repeat {
-            RepeatMode::One => self.restart(),
-            RepeatMode::All => self.step_song(1),
-            RepeatMode::Off => {
-                let at_end = match &self.queue {
-                    Some((tracks, pos)) => pos + 1 >= tracks.len(),
-                    None => self.current_song.is_none_or(|i| i + 1 >= self.songs.len()),
-                };
-                if at_end && !self.p.shuffle {
-                    // Reload the song (resetting the fade) and leave it paused at the start.
-                    self.restart();
+            self.last_status_gen = st.playback.status_gen;
+            let needs_ui = std::mem::take(&mut st.playback.needs_ui);
+            let stopped = std::mem::take(&mut st.playback.stopped);
+            let track = st
+                .playback
+                .entries
+                .get(st.playback.index)
+                .map(|e| e.track.clone());
+            (needs_ui, stopped, track)
+        };
+        if needs_ui {
+            // The audio thread couldn't decode this entry. If its source isn't loaded, fetch it
+            // and resume; if the source *is* loaded the song is simply missing — stop, rather than
+            // re-sending it and looping (each retry would re-trigger `needs_ui`).
+            if let Some(t) = track {
+                if t.source == self.current_source {
                     self.paused = true;
-                    self.status = "End of queue.".to_owned();
+                    self.status = format!("Track not found: {}", t.label);
                 } else {
-                    self.step_song(1);
+                    self.start_playlist(Some(t));
                 }
             }
+            return;
+        }
+        if stopped {
+            // End of queue under RepeatMode::Off.
+            self.paused = true;
+            self.status = "End of queue.".to_owned();
+            return;
+        }
+        if let Some(t) = track {
+            self.on_now_playing(t);
+        }
+    }
+
+    /// Updates the UI visuals for a newly-playing track. The audio thread already installed the
+    /// controller; this only refreshes the highlight, look-ahead, overview, status and history.
+    fn on_now_playing(&mut self, t: TrackRef) {
+        self.p.library.push_recent(&t);
+        self.piano_roll.clear();
+        self.look_ahead = None;
+        self.overview = None;
+        self.overview_tex = None;
+        let idx = if t.source == self.current_source {
+            self.songs.iter().position(|s| s.song_id == t.song_id)
+        } else {
+            None
+        };
+        self.current_song = idx;
+        if let Some(i) = idx {
+            let (archive_index, song_id, label) = {
+                let s = &self.songs[i];
+                (s.archive_index, s.song_id, s.label.clone())
+            };
+            self.look_ahead = FsVisController::new(&self.archives[archive_index], song_id);
+            self.status = format!("Playing: {label}");
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.overview = FsVisController::overview(&self.archives[archive_index], song_id);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = update_query_string(t);
         }
     }
 
@@ -918,14 +1003,16 @@ impl OptimeApp {
 
     /// Whether a GBA ROM is currently loaded (enables the audio-data export button).
     fn gba_loaded(&self) -> bool {
-        self.archives.iter().any(|a| matches!(a, SoundData::Gba(_)))
+        self.archives
+            .iter()
+            .any(|a| matches!(**a, SoundData::Gba(_)))
     }
 
     /// Exports the loaded GBA ROM's audio data as an audio-only `.gba` image: everything the
     /// MP2K engine can't reach from the song table is stripped, so the file can be shipped
     /// (e.g. in `demos/`) without bundling the game's code or art.
     fn export_gba_audio(&mut self) {
-        let Some(rom) = self.archives.iter().find_map(|a| match a {
+        let Some(rom) = self.archives.iter().find_map(|a| match &**a {
             SoundData::Gba(rom) => Some(rom),
             _ => None,
         }) else {
@@ -945,22 +1032,21 @@ impl OptimeApp {
         );
     }
 
-    /// Pushes UI config into the audio thread and pulls a note snapshot for the visualizer.
-    /// Returns the snapshot and whether autoplay should advance to the next song.
-    fn sync_audio(&mut self) -> (VisSnapshot, bool) {
+    /// Pushes UI config (config / paused / volume) into the audio thread and pulls a note snapshot
+    /// for the visualizer. The fade-out + advance now live entirely in the audio callback (see
+    /// [`crate::audio`]); the UI reflects the result via [`Self::reconcile_playback`].
+    fn sync_audio(&mut self) -> VisSnapshot {
         let config = self.config();
         let mut snap = VisSnapshot::default();
-        let mut advance = false;
-        // Clone the shared handle so we drop the borrow of `self.audio` and can still touch
-        // `self.held_notes` while holding the lock.
         let Some(shared) = self.audio.as_ref().map(|a| a.shared.clone()) else {
-            return (snap, advance);
+            return snap;
         };
         let Ok(mut st) = shared.lock() else {
-            return (snap, advance);
+            return snap;
         };
-        st.config = config.clone();
+        st.config = config;
         st.paused = self.paused;
+        st.playback.repeat = self.p.repeat;
         // Swipe attenuation: the song gets quieter as its visualizer slides offscreen.
         st.volume = self.p.volume * self.swipe_gain;
 
@@ -975,50 +1061,6 @@ impl OptimeApp {
             self.voice_history.pop_front();
         }
 
-        // End-of-song: fade out once the sequence has finished (or looped twice), then let
-        // [`Self::handle_song_end`] apply the repeat mode.
-        if let Some(controller) = &mut st.controller {
-            if controller.jumps > 0 {
-                controller.jumps = 0;
-                self.loop_count += 1;
-            }
-            let ended = std::mem::take(&mut controller.fading_start);
-            if st.fade_step == 0.0 && (ended || self.loop_count >= 2) {
-                // 3-second fade at the device sample rate.
-                st.fade_step = 1.0 / (3.0 * self.sample_rate as f32);
-            }
-        }
-        if st.controller.is_some() && st.fade_step > 0.0 && st.fade_gain <= 0.0 {
-            advance = true;
-        }
-
-        if let Some(controller) = &mut st.controller {
-            snap.active = true;
-            snap.steps = controller.steps_elapsed();
-            snap.step_rate = controller.step_rate();
-            snap.bpm = controller.current_bpm();
-            for t in 0..TRACK_COUNT {
-                for n in 0..128 {
-                    snap.notes_on[t][n] = controller.notes_on[t][n] != 0;
-                }
-            }
-        }
-        (snap, advance)
-    }
-
-    /// A read-only visualizer snapshot of whatever controller is *currently* installed — used to
-    /// re-prime after [`Self::handle_song_end`] swaps in a new song, since the snapshot taken in
-    /// [`Self::sync_audio`] still reflects the song that just ended. Without this the piano roll
-    /// would prime at the old song's end step and over-drive the new look-ahead far past the
-    /// visible window (evicting the opening notes from its bounded buffer).
-    fn fresh_vis_snapshot(&self) -> VisSnapshot {
-        let mut snap = VisSnapshot::default();
-        let Some(shared) = self.audio.as_ref().map(|a| a.shared.clone()) else {
-            return snap;
-        };
-        let Ok(st) = shared.lock() else {
-            return snap;
-        };
         if let Some(controller) = &st.controller {
             snap.active = true;
             snap.steps = controller.steps_elapsed();
@@ -1036,7 +1078,7 @@ impl OptimeApp {
     /// The desktop piano-roll panel: a pre-rendered whole-track overview bar with the visible
     /// window highlighted, the current tempo marking beneath it, then the scrolling roll.
     fn piano_roll_panel(&mut self, ui: &mut egui::Ui, snap: &VisSnapshot) {
-        // Lazily (re)build the overview texture from the song loaded in `play_song_keep_queue`.
+        // Lazily (re)build the overview texture from the song loaded in `on_now_playing`.
         if self.overview_tex.is_none() {
             if let Some(ov) = &self.overview {
                 let img = crate::piano_roll::overview_image(ov, 1024, 72);
@@ -1162,7 +1204,7 @@ impl OptimeApp {
             let length = song.length.map(fmt_duration);
             let track = TrackRef {
                 source: self.current_source.clone(),
-                sseq_id: song.song_id,
+                song_id: song.song_id,
                 label: String::new(),
             };
             let liked = self.p.library.is_liked(&track);
@@ -1217,7 +1259,7 @@ impl OptimeApp {
         }
         match action {
             Some(Action::Play(i)) => {
-                self.play_song(i);
+                self.play_from_list(i);
                 return true;
             }
             Some(Action::Like(i)) => {
@@ -1362,12 +1404,7 @@ impl OptimeApp {
                 )
                 .clicked()
         {
-            let pos = if self.p.shuffle {
-                self.rand_index(tracks.len(), None)
-            } else {
-                0
-            };
-            self.play_queue(tracks.clone(), pos);
+            self.play_all_collection(tracks.clone());
             started = true;
         }
         ui.add_space(4.0);
@@ -1399,7 +1436,7 @@ impl OptimeApp {
             );
         }
         if let Some(i) = play {
-            self.play_queue(tracks.clone(), i);
+            self.play_collection_at(tracks.clone(), i);
             started = true;
         }
         if let Some(i) = remove {
@@ -1881,7 +1918,7 @@ impl OptimeApp {
             .put(next_rect, egui::Button::new("⏭").frame(false))
             .clicked()
         {
-            self.step_song(1);
+            self.send_transport(1);
         }
 
         if resp.clicked() {
@@ -1933,9 +1970,10 @@ impl OptimeApp {
 
                 if icon_button(ui, "🔀", small, 18.0, false, self.p.shuffle, true).clicked() {
                     self.p.shuffle = !self.p.shuffle;
+                    self.toggle_shuffle();
                 }
                 if icon_button(ui, "⏮", small, 20.0, false, false, have_songs).clicked() {
-                    self.step_song(-1);
+                    self.send_transport(-1);
                 }
                 let pause_icon = if self.paused || self.current_song.is_none() {
                     "▶"
@@ -1946,7 +1984,7 @@ impl OptimeApp {
                     self.paused = !self.paused;
                 }
                 if icon_button(ui, "⏭", small, 20.0, false, false, have_songs).clicked() {
-                    self.step_song(1);
+                    self.send_transport(1);
                 }
                 let repeat_icon = match self.p.repeat {
                     RepeatMode::One => "🔂",
@@ -1963,6 +2001,7 @@ impl OptimeApp {
                 );
                 if repeat.on_hover_text("Repeat: off / all / one").clicked() {
                     self.p.repeat = self.p.repeat.next();
+                    self.push_repeat();
                 }
                 let current = self.current_track_ref();
                 let liked = current.as_ref().is_some_and(|t| self.p.library.is_liked(t));
@@ -2028,13 +2067,14 @@ impl OptimeApp {
                         let old_roll = std::mem::take(&mut self.piano_roll);
                         self.swipe_out = Some((old_roll, exit_side));
                         if let Some(p) = self.swipe_preview.take() {
-                            self.commit_step(p.target);
+                            // `dir`: +1 = next (dragged left), -1 = previous.
+                            self.send_transport(p.dir);
                             self.piano_roll = p.roll;
                             if let Some(look) = p.look {
                                 self.look_ahead = Some(look);
                             }
                         } else {
-                            self.step_song(if exit_side < 0.0 { 1 } else { -1 });
+                            self.send_transport(if exit_side < 0.0 { 1 } else { -1 });
                         }
                         self.swipe_offset -= exit_side * w;
                     } else {
@@ -2142,23 +2182,18 @@ impl eframe::App for OptimeApp {
             )
         });
         if left {
-            self.step_song(-1);
+            self.send_transport(-1);
         }
         if right {
-            self.step_song(1);
+            self.send_transport(1);
         }
 
         self.handle_media_controls(ctx, frame);
 
-        let (snap, advance) = self.sync_audio();
-        let snap = if advance {
-            self.handle_song_end();
-            // `snap` reflects the song that just ended; re-read so the piano roll and visualizer
-            // prime at the newly-started song's position (≈ step 0) rather than the old end.
-            self.fresh_vis_snapshot()
-        } else {
-            snap
-        };
+        // Apply any advance the audio thread performed on its own (keeps working while frozen),
+        // then sync config + pull the visualizer snapshot for the now-current song.
+        self.reconcile_playback();
+        let snap = self.sync_audio();
         // Re-derived each frame by the Now Playing swipe; full volume everywhere else.
         self.swipe_gain = 1.0;
 
@@ -2247,19 +2282,22 @@ impl eframe::App for OptimeApp {
                     self.restart();
                 }
                 if ui.button("⏮").on_hover_text("Previous (←)").clicked() {
-                    self.step_song(-1);
+                    self.send_transport(-1);
                 }
                 if ui.button("⏭").on_hover_text("Next (→)").clicked() {
-                    self.step_song(1);
+                    self.send_transport(1);
                 }
                 ui.separator();
-                ui.toggle_value(&mut self.p.shuffle, "🔀 Shuffle");
+                if ui.toggle_value(&mut self.p.shuffle, "🔀 Shuffle").clicked() {
+                    self.toggle_shuffle();
+                }
                 if ui
                     .button(self.p.repeat.label())
                     .on_hover_text("Repeat mode: off / all / one")
                     .clicked()
                 {
                     self.p.repeat = self.p.repeat.next();
+                    self.push_repeat();
                 }
                 if let Some(t) = self.current_track_ref() {
                     let liked = self.p.library.is_liked(&t);
