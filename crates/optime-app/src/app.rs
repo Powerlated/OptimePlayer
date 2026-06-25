@@ -1925,6 +1925,10 @@ impl OptimeApp {
                 let total = 5.0 * small + big;
                 let spacing = (ui.available_width() - total).max(0.0) / 7.0;
                 ui.spacing_mut().item_spacing.x = spacing;
+                // Pin the row height to the largest button up front, so the small buttons
+                // placed before the big play disc center to the same height as those after
+                // it (otherwise egui center-aligns them against the shorter row they see).
+                ui.set_min_height(big);
                 ui.add_space(spacing);
 
                 if icon_button(ui, "🔀", small, 18.0, false, self.p.shuffle, true).clicked() {
