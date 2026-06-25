@@ -51,6 +51,10 @@ struct NoteEvent {
     pitch: u8,
     start: f64,
     end: f64,
+    /// The note's end-command hasn't been received yet (a still-held note / unresolved tie,
+    /// signalled by a zero look-ahead duration). `end` is unknown, so it is drawn as still
+    /// sounding and extends off the right edge of the roll until its length resolves.
+    open: bool,
 }
 
 /// Piano-roll renderer: owns the visible note list and a smoothed playhead clock.
@@ -119,14 +123,18 @@ impl PianoRoll {
             }
             // Real note length: gate time for GBA (ties resolved in the look-ahead), the note's
             // duration in ticks for DS. A minimum *width* is enforced at draw time instead of
-            // padding the length here, so the bars match the true note durations.
+            // padding the length here, so the bars match the true note durations. A zero duration
+            // means the end hasn't been received yet (a held note / open tie) — flag it so the
+            // bar runs off the right edge rather than collapsing to a sliver.
             let start = n.timestamp as f64;
+            let open = n.duration == 0;
             let end = start + n.duration as f64;
             self.notes.push(NoteEvent {
                 track: n.track,
                 pitch: n.key,
                 start,
                 end,
+                open,
             });
         }
     }
@@ -154,7 +162,8 @@ impl PianoRoll {
         // Which pitches are currently under the cursor (for key lighting).
         let mut lit: [Option<usize>; 128] = [None; 128];
         for n in &self.notes {
-            if n.start <= self.display_tick && self.display_tick <= n.end {
+            // An open note (end not yet received) stays lit for as long as it is held.
+            if n.start <= self.display_tick && (n.open || self.display_tick <= n.end) {
                 lit[n.pitch as usize] = Some(n.track);
             }
         }
@@ -219,8 +228,13 @@ impl PianoRoll {
     ) {
         for n in &self.notes {
             let x_start = xt(n.start);
-            // Keep at least a sliver visible for very short / still-held notes.
-            let x_end = xt(n.end).max(x_start + MIN_NOTE_PX);
+            // An open note (no end command yet) runs off the right edge; otherwise keep at least
+            // a sliver visible for very short notes.
+            let x_end = if n.open {
+                roll.max.x
+            } else {
+                xt(n.end).max(x_start + MIN_NOTE_PX)
+            };
             if x_end < roll.min.x || x_start > roll.max.x {
                 continue;
             }
@@ -234,7 +248,7 @@ impl PianoRoll {
             let pad = (lane_h * 0.14).clamp(0.5, 2.0);
             let bar = Rect::from_min_max(Pos2::new(x0, top + pad), Pos2::new(x1, bot - pad));
 
-            let playing = n.start <= self.display_tick && self.display_tick <= n.end;
+            let playing = n.start <= self.display_tick && (n.open || self.display_tick <= n.end);
             let base = track_color(n.track);
             // Upcoming notes (fully right of the cursor) are slightly dimmer.
             let a = if x_start > cursor_x { 0.6 } else { 1.0 } * dim;
