@@ -297,29 +297,37 @@ pub fn icon_button(
 /// drawn underneath (e.g. the piano roll, which can only be clipped to an axis-aligned rect)
 /// appears to have rounded corners of `radius`. Fill `color` with the surrounding background
 /// so the masked corners blend into the panel.
+///
+/// Each corner notch (square corner minus quarter-disc) is *concave*, so it can't be drawn as
+/// a single `convex_polygon` — egui's tessellator would collapse it to the straight chord
+/// (visible as a diagonal line, notably on the iOS WebGL backend). Instead the notch is built
+/// as an explicit triangle fan in a `Mesh`, which renders exactly on every backend.
 pub fn mask_rounded_corners(painter: &egui::Painter, rect: Rect, radius: f32, color: Color32) {
     use std::f32::consts::FRAC_PI_2;
     let r = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
     if r <= 0.0 {
         return;
     }
-    // Each corner: the square outer point, the two tangent points where the rounding
-    // begins, and the quarter-circle arc bulging toward the outer point. Filling the region
-    // between the square corner and the arc leaves a rounded edge.
-    // (corner point, arc center, arc start angle) per corner.
+    // (square corner point, arc center, arc start angle) per corner. The quarter-circle arc
+    // bulges toward the square corner; the fan from the corner across the arc fills the notch.
     let corners = [
         (rect.left_top(), Pos2::new(rect.left() + r, rect.top() + r), std::f32::consts::PI),
         (rect.right_top(), Pos2::new(rect.right() - r, rect.top() + r), -FRAC_PI_2),
         (rect.right_bottom(), Pos2::new(rect.right() - r, rect.bottom() - r), 0.0),
         (rect.left_bottom(), Pos2::new(rect.left() + r, rect.bottom() - r), FRAC_PI_2),
     ];
+    const SEGS: u32 = 16;
+    let mut mesh = egui::Mesh::default();
     for (outer, center, start) in corners {
-        let mut pts = vec![outer];
-        let segs = 8;
-        for i in 0..=segs {
-            let a = start + FRAC_PI_2 * (i as f32 / segs as f32);
-            pts.push(Pos2::new(center.x + r * a.cos(), center.y + r * a.sin()));
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(outer, color);
+        for i in 0..=SEGS {
+            let a = start + FRAC_PI_2 * (i as f32 / SEGS as f32);
+            mesh.colored_vertex(Pos2::new(center.x + r * a.cos(), center.y + r * a.sin()), color);
         }
-        painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+        for i in 0..SEGS {
+            mesh.add_triangle(base, base + 1 + i, base + 2 + i);
+        }
     }
+    painter.add(egui::Shape::mesh(mesh));
 }
