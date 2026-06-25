@@ -661,8 +661,16 @@ impl OptimeApp {
             }
             return;
         }
-        let entries = self.build_entries(&ordered);
-        self.send_command(PlaybackCommand::SetPlaylist { entries, index });
+        if self.audio.is_some() {
+            let entries = self.build_entries(&ordered);
+            self.send_command(PlaybackCommand::SetPlaylist { entries, index });
+        } else {
+            // No audio engine yet (web defers it until the first user gesture). A `SetPlaylist`
+            // command would be dropped here, so reflect the start track in the UI directly — the
+            // highlight + piano roll appear immediately, and `ensure_audio` starts playback from
+            // `current_song` once the user interacts and the engine comes up.
+            self.on_now_playing(start_track);
+        }
     }
 
     /// A fresh shuffle (Fisher–Yates, xorshift64) of `tracks`, with `keep` — the song that should
@@ -925,10 +933,7 @@ impl OptimeApp {
             };
             self.look_ahead = FsVisController::new(&self.archives[archive_index], song_id);
             self.status = format!("Playing: {label}");
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                self.overview = FsVisController::overview(&self.archives[archive_index], song_id);
-            }
+            self.overview = FsVisController::overview(&self.archives[archive_index], song_id);
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -2164,6 +2169,10 @@ impl OptimeApp {
 impl eframe::App for OptimeApp {
     /// Persists the library, playback prefs, and synth settings (native: disk; web: localStorage).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Capture the currently playing song so a refresh/relaunch restores it.
+        if let Some(track) = self.current_track_ref() {
+            self.p.last_track = Some(track);
+        }
         eframe::set_value(storage, eframe::APP_KEY, &self.p);
     }
 
