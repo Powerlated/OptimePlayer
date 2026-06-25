@@ -33,6 +33,7 @@ fn instrument(
         sampler_cutoff_hz,
         smooth_psg_pops,
         smooth_sample_pops,
+        pop_slew_ms: 2.0,
     }
 }
 

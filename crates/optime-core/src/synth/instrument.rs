@@ -9,12 +9,8 @@ use crate::dsp::resample::{
 };
 use crate::dsp::slewer::Slewer;
 use crate::sample::{InstrumentResampleMode, Sample};
-use crate::synth_controller::PopSmoothing;
+use crate::synth_controller::{PopSmoothing, DEFAULT_POP_SLEW_SECONDS};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
-
-/// Seconds a pop-smoothed voice takes to slew across the full gain range. Short enough to be
-/// inaudible as an envelope, long enough to turn the hard on/off steps into click-free ramps.
-const POP_SLEW_SECONDS: f64 = 0.002;
 
 /// A single playing voice.
 #[derive(Clone)]
@@ -31,8 +27,11 @@ pub struct SampleInstrument {
     pub playing: bool,
     /// The gain actually applied last sample. Tracks [`Self::volume`] exactly, except for
     /// pop-smoothed voices, where it slews toward it (see [`Self::advance`]'s `pops`). The slew
-    /// step is kept at `inv_sample_rate / POP_SLEW_SECONDS` (synced on every rate change).
+    /// step is kept at `inv_sample_rate / pop_slew_seconds` (synced on rate change and note start).
     gain: Slewer,
+    /// How long (seconds) the pop-smoothing gain ramp takes to cross the full range. Set from the
+    /// config's [`PopSmoothing::slew_seconds`] each note start.
+    pop_slew_seconds: f64,
     /// Set by [`Self::begin_fade_out`]: the voice slews to silence and then stops itself.
     fading_out: bool,
     /// Fractional sample position.
@@ -62,7 +61,8 @@ impl SampleInstrument {
             pitch,
             volume: 1.0,
             playing: false,
-            gain: Slewer::from_time(1.0, POP_SLEW_SECONDS, sample_rate),
+            gain: Slewer::from_time(1.0, DEFAULT_POP_SLEW_SECONDS, sample_rate),
+            pop_slew_seconds: DEFAULT_POP_SLEW_SECONDS,
             fading_out: false,
             sample_t: 0.0,
             wrapped: false,
@@ -77,6 +77,9 @@ impl SampleInstrument {
     /// starts from silence and slews up; everything else starts at `volume` exactly.
     pub fn begin_note(&mut self, volume: f64, pops: PopSmoothing) {
         self.volume = volume;
+        // Adopt the configured slew time so the ramp speed follows the setting.
+        self.pop_slew_seconds = pops.slew_seconds;
+        self.refresh_pop_step();
         self.gain
             .set(if pops.enabled_for(self.sample.is_psg_square) {
                 0.0
@@ -84,6 +87,16 @@ impl SampleInstrument {
                 volume
             });
         self.fading_out = false;
+    }
+
+    /// Re-derives the gain slewer's per-sample step from the current sample rate and slew time.
+    fn refresh_pop_step(&mut self) {
+        let step = if self.pop_slew_seconds > 0.0 {
+            self.inv_sample_rate / self.pop_slew_seconds
+        } else {
+            f64::INFINITY // an instant (un-smoothed) gain change
+        };
+        self.gain.set_step(step);
     }
 
     /// Starts a short fade to silence; the voice flips [`Self::playing`] off once it lands.
@@ -97,7 +110,7 @@ impl SampleInstrument {
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         self.inv_sample_rate = 1.0 / sample_rate;
         // Keep the pop-smoothing slew the same wall-clock duration at the new rate.
-        self.gain.set_step(self.inv_sample_rate / POP_SLEW_SECONDS);
+        self.refresh_pop_step();
     }
 
     /// Advances playback by one output sample, updating [`Self::output`].
@@ -714,6 +727,7 @@ mod tests {
         let psg_on = PopSmoothing {
             psg: true,
             sample: false,
+            ..PopSmoothing::default()
         };
         instr.begin_note(1.0, psg_on);
         instr.advance(InstrumentResampleMode::NearestNeighbor, None, psg_on);

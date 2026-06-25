@@ -102,8 +102,12 @@ pub struct GbaPlayer {
     seq: Mp2kSequencer,
     ds_channels: Vec<Option<DirectSoundChannel>>,
     cgb_channels: [Option<CgbChannel>; 4],
-    /// DirectSound sample cache: wave address → decoded sample (`None` caches failures).
-    sample_cache: HashMap<u32, Option<Arc<Sample>>>,
+    /// DirectSound sample cache: (wave address, DC-removed?) → decoded sample (`None` caches
+    /// failures). Keyed by the DC flag so toggling the setting re-decodes rather than serving a
+    /// stale variant.
+    sample_cache: HashMap<(u32, bool), Option<Arc<Sample>>>,
+    /// Whether to subtract each DirectSound sample's DC offset, refreshed from the config each tick.
+    remove_dc: bool,
     /// CGB programmable-wave cache.
     wave_cache: HashMap<u32, Arc<Sample>>,
     square_samples: [Arc<Sample>; 4],
@@ -125,6 +129,7 @@ impl GbaPlayer {
             ds_channels: vec![None; MAX_DIRECTSOUND_CHANNELS],
             cgb_channels: [None, None, None, None],
             sample_cache: HashMap::new(),
+            remove_dc: false,
             wave_cache: HashMap::new(),
             square_samples: build_square_samples(),
             noise_samples: build_noise_samples(),
@@ -150,9 +155,10 @@ impl GbaPlayer {
     pub fn tick(
         &mut self,
         feedback: &mut TickFeedback,
-        _config: &PerDeviceSettings,
+        config: &PerDeviceSettings,
         events: &mut Vec<SynthEvent>,
     ) {
+        self.remove_dc = config.remove_sample_dc_offset;
         // Channels whose voices the synthesizer stopped (one-shot samples that ran out).
         for &(track, voice) in &feedback.ended_voices {
             for chan in self.ds_channels.iter_mut() {
@@ -526,17 +532,22 @@ impl GbaPlayer {
 
     /// Decodes (and caches) the DirectSound wave at `wav_addr`.
     fn direct_sound_sample(&mut self, wav_addr: u32) -> Option<Arc<Sample>> {
-        if let Some(cached) = self.sample_cache.get(&wav_addr) {
+        let key = (wav_addr, self.remove_dc);
+        if let Some(cached) = self.sample_cache.get(&key) {
             return cached.clone();
         }
+        let remove_dc = self.remove_dc;
         let sample = WaveData::read(&self.rom, wav_addr).map(|wav| {
             let raw = &self.rom[wav.data_offset..wav.data_offset + wav.size as usize];
             let mut data = crate::sample::decode_pcm8(raw);
             // Real DirectSound output is AC-coupled, so a sample's DC offset is filtered away on
-            // hardware; remove it here too, otherwise the voice thumps by its offset each time the
-            // envelope opens or closes (a pop the hardware never makes). The "Stats for Nerds"
-            // view reports how far each sample was shifted (see `extract::sample_dc_stats`).
-            dc_center(&mut data);
+            // hardware; removing it stops the voice thumping by its offset each time the envelope
+            // opens or closes (a pop the hardware never makes). Opt-in (it edits the raw sample
+            // data); the "Stats for Nerds" view reports how far each sample would be shifted (see
+            // `extract::sample_dc_stats`).
+            if remove_dc {
+                dc_center(&mut data);
+            }
             let mut sample = Sample::new(
                 data,
                 440.0,
@@ -547,7 +558,7 @@ impl GbaPlayer {
             sample.sample_length = wav.size as usize;
             Arc::new(sample)
         });
-        self.sample_cache.insert(wav_addr, sample.clone());
+        self.sample_cache.insert(key, sample.clone());
         sample
     }
 

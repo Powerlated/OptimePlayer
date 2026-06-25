@@ -33,7 +33,7 @@ impl InstrumentResampleChoice {
 
 /// Per-device resampling settings — each console keeps its own, so e.g. the DS can play
 /// Crunchy sinc while the GBA plays Clean sinc.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct InstrumentResampleSettings {
     /// Resampling choice enum
     pub choice: InstrumentResampleChoice,
@@ -48,6 +48,16 @@ pub struct InstrumentResampleSettings {
     pub smooth_psg_pops: bool,
     /// Smooth out sampled (DirectSound/SWAR) voice pops/clicks. Applies in every resampling mode.
     pub smooth_sample_pops: bool,
+    /// How long (milliseconds) the PSG/sample de-click gain ramp takes. `#[serde(default)]` so old
+    /// saved settings (which predate the field) load as the previous fixed 2 ms.
+    #[serde(default = "default_pop_slew_ms")]
+    pub pop_slew_ms: f32,
+}
+
+/// The previous fixed de-click ramp time (2 ms); the serde fallback for `pop_slew_ms` so old saves
+/// keep their original behavior.
+fn default_pop_slew_ms() -> f32 {
+    2.0
 }
 
 impl InstrumentResampleSettings {
@@ -141,6 +151,11 @@ pub struct PerDeviceSettings {
     /// Route sampled (non-PSG) voices through the intermediate mixer (then upsample to output).
     pub use_mixer: bool,
     pub psg_crunch_compensation: bool,
+    /// Subtract each decoded sample's DC offset (GBA DirectSound only) to match the console's
+    /// AC-coupled output. Off by default — it changes the raw sample data, so it's opt-in.
+    /// `#[serde(default)]` so old saves load as `false`.
+    #[serde(default)]
+    pub remove_sample_dc_offset: bool,
     /// Which of the 16 tracks are mixed into the output. Runtime UI state (the app injects the
     /// live piano-roll mutes each frame), **not** persisted — deserializing old data falls back to
     /// "all enabled".
@@ -178,6 +193,7 @@ impl PerDeviceSettings {
         PopSmoothing {
             psg: self.instrument_resample.smooth_psg_pops,
             sample: self.instrument_resample.smooth_sample_pops,
+            slew_seconds: f64::from(self.instrument_resample.pop_slew_ms.max(0.0)) / 1000.0,
         }
     }
 
@@ -209,6 +225,7 @@ impl PerDeviceSettings {
                 sampler_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
                 smooth_psg_pops: false,
                 smooth_sample_pops: false,
+                pop_slew_ms: 2.0,
             },
             // Clean reconstruction is the sane default for upsampling a finished bus.
             mixer_resample: MixerResampleSettings {
@@ -221,6 +238,7 @@ impl PerDeviceSettings {
             mixer_sample_rate: 48_000,
             use_mixer: false,
             psg_crunch_compensation: false,
+            remove_sample_dc_offset: false,
             track_enables: all_tracks_enabled(),
         }
     }

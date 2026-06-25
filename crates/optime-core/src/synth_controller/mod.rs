@@ -24,7 +24,7 @@ mod config;
 pub mod messages;
 mod vis;
 
-pub use config::{DelaySmoothing, HighShelf, PopSmoothing};
+pub use config::{DelaySmoothing, HighShelf, PopSmoothing, DEFAULT_POP_SLEW_SECONDS};
 pub use vis::{FsVisController, SongOverview, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};

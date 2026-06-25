@@ -50,16 +50,33 @@ impl HighShelf {
     }
 }
 
-/// Per-voice-kind de-click gain slew: slew a voice's gain over ~2 ms on note start/stop instead of
-/// stepping it, turning abrupt on/off transitions into click-free ramps. Selected per kind so PSG
-/// (square/wave/noise) and sampled (DirectSound/SWAR) voices can be smoothed independently — the
-/// hard PSG edges are part of the chiptune character, while sampled de-clicking is usually wanted.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The default de-click slew time in seconds — slow enough to kill the click, short enough to be
+/// inaudible as an envelope. Used when no explicit time is configured.
+pub const DEFAULT_POP_SLEW_SECONDS: f64 = 0.002;
+
+/// Per-voice-kind de-click gain slew: slew a voice's gain over a few ms on note start/stop instead
+/// of stepping it, turning abrupt on/off transitions into click-free ramps. Selected per kind so
+/// PSG (square/wave/noise) and sampled (DirectSound/SWAR) voices can be smoothed independently —
+/// the hard PSG edges are part of the chiptune character, while sampled de-clicking is usually
+/// wanted. [`slew_seconds`](Self::slew_seconds) sets how long the ramp takes (shared by both kinds).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PopSmoothing {
     /// Slew PSG (square/wave/noise) voices.
     pub psg: bool,
     /// Slew sampled (DirectSound/SWAR) voices.
     pub sample: bool,
+    /// Seconds the de-click ramp takes to cross the full gain range. `0` makes it instant.
+    pub slew_seconds: f64,
+}
+
+impl Default for PopSmoothing {
+    fn default() -> Self {
+        Self {
+            psg: false,
+            sample: false,
+            slew_seconds: DEFAULT_POP_SLEW_SECONDS,
+        }
+    }
 }
 
 impl PopSmoothing {

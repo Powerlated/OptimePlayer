@@ -50,6 +50,7 @@ fn main() {
                 sampler_cutoff_hz: 0,
                 smooth_psg_pops: false,
                 smooth_sample_pops: false,
+                pop_slew_ms: 2.0,
             },
         ),
         (
@@ -61,6 +62,7 @@ fn main() {
                 sampler_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
                 smooth_psg_pops: false,
                 smooth_sample_pops: false,
+                pop_slew_ms: 2.0,
             },
         ),
     ] {

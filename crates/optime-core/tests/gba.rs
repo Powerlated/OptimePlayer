@@ -141,6 +141,41 @@ fn lookahead_sees_the_note() {
 }
 
 #[test]
+fn remove_sample_dc_offset_is_opt_in_and_centers_the_signal() {
+    // A DC-biased looping wave: every sample is +100 (s8), mean ≈ +0.78 of full scale.
+    let mut rom = build_rom();
+    for i in 0..64 {
+        rom[WAVE + 16 + i] = 100;
+    }
+    let data = SoundData::load_all(&rom).remove(0);
+    let sr = 32768.0;
+
+    let mean_of = |remove: bool| -> f32 {
+        let config = PerDeviceSettings {
+            remove_sample_dc_offset: remove,
+            ..PerDeviceSettings::neutral()
+        };
+        let mut controller = SynthController::new(sr, &data, 0).expect("song 0 should load");
+        // Render the sustained portion of the note (skip the very start) and average it.
+        let mut out = vec![0.0f32; (0.3 * sr) as usize * 2];
+        controller.fill(&mut out, &config);
+        let tail = &out[out.len() / 2..];
+        tail.iter().sum::<f32>() / tail.len() as f32
+    };
+
+    // Off (the default): the biased sample keeps its DC, so the rendered signal is offset.
+    assert!(
+        mean_of(false).abs() > 0.05,
+        "with DC removal off the biased sample should leave a clear offset"
+    );
+    // On: the sample is centered, so the steady-state mean collapses toward zero.
+    assert!(
+        mean_of(true).abs() < 0.01,
+        "with DC removal on the rendered signal should be centered"
+    );
+}
+
+#[test]
 fn sample_dc_stats_report_the_offset_removed() {
     // Give the wave a known DC bias: every sample is +50 (s8), so its mean is 50/128 of full
     // scale — exactly what the decoder removes and the stat must report.

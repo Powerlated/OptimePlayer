@@ -1502,6 +1502,7 @@ impl OptimeApp {
         // The settings panel edits whichever console the current song plays on; the DS and GBA
         // keep independent copies.
         let device_name = self.current_device_name();
+        let is_gba = self.current_is_gba();
         let d = self.device_settings_mut();
         ui.heading("Settings");
         ui.label(format!("Settings are stored independently for each supported emulated device. You are currently editing the settings for: {device_name}"));
@@ -1607,9 +1608,32 @@ impl OptimeApp {
             "Smooth sample pops",
         )
         .on_hover_text(
-            "Slew sampled (DirectSound / SWAR) voice gains over ~2 ms so notes starting or cut \
-                mid-waveform don't click. Unchecked preserves the original edges.",
+            "Slew sampled (DirectSound / SWAR) voice gains so notes starting or cut mid-waveform \
+                don't click. Unchecked preserves the original edges.",
         );
+        ui.add_enabled(
+            d.instrument_resample.smooth_psg_pops || d.instrument_resample.smooth_sample_pops,
+            egui::Slider::new(&mut d.instrument_resample.pop_slew_ms, 0.1..=20.0)
+                .text("De-click slew time")
+                .suffix(" ms")
+                .logarithmic(true),
+        )
+        .on_hover_text(
+            "How long the de-click gain ramp takes for the smoothed voices above. Longer is \
+                gentler (fewer clicks) but softens note attacks; ~2 ms is a click-free default.",
+        );
+        if is_gba {
+            ui.checkbox(
+                &mut d.remove_sample_dc_offset,
+                "Remove sample DC offset",
+            )
+            .on_hover_text(
+                "Subtract each DirectSound sample's average level so it sits centered on zero, \
+                    matching the GBA's AC-coupled output and removing the thump a biased sample \
+                    makes when its envelope opens or closes. See \"Stats for Nerds\" for how far \
+                    each sample is shifted. Off preserves the raw ROM data.",
+            );
+        }
         ui.separator();
         ui.label("Mixer settings");
         {
