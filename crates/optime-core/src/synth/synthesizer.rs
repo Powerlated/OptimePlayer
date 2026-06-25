@@ -496,7 +496,10 @@ mod tests {
             synth.next_sample(&smooth);
         }
         assert!((synth.val_r - 1.0).abs() < 1e-9, "should settle hard right");
-        assert!(synth.val_l.abs() < 1e-9, "left should be silent once settled");
+        assert!(
+            synth.val_l.abs() < 1e-9,
+            "left should be silent once settled"
+        );
 
         // Smoothing off: the pan change is applied on the very next sample.
         let mut synth2 = SampleSynthesizer::new(sample_rate, 4);

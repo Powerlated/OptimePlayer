@@ -77,11 +77,12 @@ impl SampleInstrument {
     /// starts from silence and slews up; everything else starts at `volume` exactly.
     pub fn begin_note(&mut self, volume: f64, pops: PopSmoothing) {
         self.volume = volume;
-        self.gain.set(if pops.enabled_for(self.sample.is_psg_square) {
-            0.0
-        } else {
-            volume
-        });
+        self.gain
+            .set(if pops.enabled_for(self.sample.is_psg_square) {
+                0.0
+            } else {
+                volume
+            });
         self.fading_out = false;
     }
 
