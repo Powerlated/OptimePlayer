@@ -292,3 +292,34 @@ pub fn icon_button(
     }
     resp
 }
+
+/// Paints `color`-filled wedges over the four square corners of `rect` so opaque content
+/// drawn underneath (e.g. the piano roll, which can only be clipped to an axis-aligned rect)
+/// appears to have rounded corners of `radius`. Fill `color` with the surrounding background
+/// so the masked corners blend into the panel.
+pub fn mask_rounded_corners(painter: &egui::Painter, rect: Rect, radius: f32, color: Color32) {
+    use std::f32::consts::FRAC_PI_2;
+    let r = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
+    if r <= 0.0 {
+        return;
+    }
+    // Each corner: the square outer point, the two tangent points where the rounding
+    // begins, and the quarter-circle arc bulging toward the outer point. Filling the region
+    // between the square corner and the arc leaves a rounded edge.
+    // (corner point, arc center, arc start angle) per corner.
+    let corners = [
+        (rect.left_top(), Pos2::new(rect.left() + r, rect.top() + r), std::f32::consts::PI),
+        (rect.right_top(), Pos2::new(rect.right() - r, rect.top() + r), -FRAC_PI_2),
+        (rect.right_bottom(), Pos2::new(rect.right() - r, rect.bottom() - r), 0.0),
+        (rect.left_bottom(), Pos2::new(rect.left() + r, rect.bottom() - r), FRAC_PI_2),
+    ];
+    for (outer, center, start) in corners {
+        let mut pts = vec![outer];
+        let segs = 8;
+        for i in 0..=segs {
+            let a = start + FRAC_PI_2 * (i as f32 / segs as f32);
+            pts.push(Pos2::new(center.x + r * a.cos(), center.y + r * a.sin()));
+        }
+        painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+    }
+}

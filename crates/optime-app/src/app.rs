@@ -2073,7 +2073,9 @@ impl OptimeApp {
                     roll.draw(&mut child, true);
                 }
 
-                // Card outline over the visualizer area.
+                // Round the corners of the (rectangularly-clipped) roll by masking the four
+                // square corners with the panel background, then draw the card outline on top.
+                crate::theme::mask_rounded_corners(ui.painter(), rect, 12.0, crate::theme::BG);
                 ui.painter().rect_stroke(
                     rect,
                     12.0,
