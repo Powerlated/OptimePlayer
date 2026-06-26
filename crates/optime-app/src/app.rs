@@ -2497,7 +2497,7 @@ impl eframe::App for OptimeApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.vis_tab, VisTab::PianoRoll, "🎹 Piano Roll");
-                ui.selectable_value(&mut self.vis_tab, VisTab::Tracks, "🎚 Tracks");
+                ui.selectable_value(&mut self.vis_tab, VisTab::Tracks, "Tracks");
             });
             ui.separator();
 
