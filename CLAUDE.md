@@ -26,7 +26,7 @@ The workspace pins **nightly Rust** (`rust-toolchain.toml`): the default `simd` 
 - Web dev server: `cd crates/optime-app && trunk serve` (needs `rustup target add wasm32-unknown-unknown` and `cargo install trunk`)
 - Web release build: `cd crates/optime-app && trunk build --release`
 
-The web app deploys to GitHub Pages via `.github/workflows/deploy.yml` (Trunk release build with `--public-url "/<repo>/"` → Pages artifact). It triggers on pushes to `rust-rewrite`/`master`.
+The web app deploys to GitHub Pages via `.github/workflows/deploy.yml` (Trunk release build with `--public-url "/<repo>/"` → Pages artifact). It triggers on pushes to `rust-rewrite`/`master`. The same workflow also stages the legacy browser app (see "Legacy app") into `dist/legacy-js/` so it is served alongside the Rust app at `/<repo>/legacy-js/`: it copies `legacy-js/` verbatim plus only the shared resources the legacy app loads relative to itself — `fonts/`, the three `assets/piano_section_*.png`, and the six `demos/*.sdat` its demo buttons reference (not the whole `demos/` dir, which carries large `.zip`/`.gz`/`.gbaaudio` files the legacy app can't use).
 
 ## Architecture
 
