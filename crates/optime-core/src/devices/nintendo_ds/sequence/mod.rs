@@ -172,20 +172,10 @@ impl Sequence {
         }
     }
 
-    fn send_message(
-        &mut self,
-        idx: usize,
-        msg_type: MessageType,
-        param0: i32,
-        param1: i32,
-        param2: i32,
-    ) {
+    fn send_message(&mut self, idx: usize, msg_type: MessageType) {
         self.message_buffer.insert(Message {
             track_num: idx,
             msg_type,
-            param0,
-            param1,
-            param2,
             timestamp: 0,
         });
     }

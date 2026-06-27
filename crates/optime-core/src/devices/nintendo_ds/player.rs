@@ -187,7 +187,18 @@ impl NdsPlayer {
         events: &mut Vec<SynthEvent>,
     ) {
         match msg.msg_type {
-            MessageType::PlayNote => self.play_note(msg, config, events),
+            MessageType::PlayNote {
+                note,
+                velocity,
+                duration,
+            } => self.play_note(
+                msg.track_num,
+                note,
+                velocity,
+                duration as u32,
+                config,
+                events,
+            ),
             MessageType::Jump => events.push(SynthEvent::Looped),
             MessageType::TrackEnded => {
                 let any_active = self.sequence.tracks.iter().any(|tr| tr.active);
@@ -195,14 +206,14 @@ impl NdsPlayer {
                     events.push(SynthEvent::Ended);
                 }
             }
-            MessageType::VolumeChange => {
+            MessageType::VolumeChange { .. } => {
                 // No-op: track volume (with expression and master) is summed in the decibel
                 // domain per tick by `track_volume_db`, matching pokediamond, rather than applied
                 // as a separate linear mixer gain.
             }
-            MessageType::PanChange => events.push(SynthEvent::TrackPan {
+            MessageType::PanChange { pan } => events.push(SynthEvent::TrackPan {
                 track: msg.track_num,
-                pan: msg.param0 as f64 / 128.0,
+                pan: pan as f64 / 128.0,
             }),
             MessageType::PitchBend => {
                 let track = &self.sequence.tracks[msg.track_num];
@@ -215,21 +226,20 @@ impl NdsPlayer {
                     semitones,
                 });
             }
-            MessageType::InstrumentChange => {}
+            MessageType::InstrumentChange { .. } => {}
         }
     }
 
     /// Starts a note from a [`MessageType::PlayNote`] message.
     fn play_note(
         &mut self,
-        msg: Message,
+        t: usize,
+        midi_note: i32,
+        velocity: i32,
+        duration: u32,
         config: &PerDeviceSettings,
         events: &mut Vec<SynthEvent>,
     ) {
-        let t = msg.track_num;
-        let midi_note = msg.param0;
-        let velocity = msg.param1;
-        let duration = msg.param2 as u32;
         let program = self.sequence.tracks[t].program;
 
         // Resolve the region + sample.

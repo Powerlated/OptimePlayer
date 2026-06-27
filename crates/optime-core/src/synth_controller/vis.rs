@@ -299,11 +299,15 @@ impl Lookahead {
 
                     while let Some(msg) = sequence.message_buffer.pop() {
                         match msg.msg_type {
-                            MessageType::PlayNote => out.push(VisEvent::Note(VisNote {
+                            MessageType::PlayNote {
+                                note,
+                                velocity,
+                                duration,
+                            } => out.push(VisEvent::Note(VisNote {
                                 track: msg.track_num,
-                                key: msg.param0 as u8,
-                                velocity: msg.param1,
-                                duration: msg.param2.max(0) as u32,
+                                key: note as u8,
+                                velocity,
+                                duration: duration.max(0) as u32,
                                 timestamp: sequence.ticks_elapsed,
                             })),
                             MessageType::Jump => out.push(VisEvent::Looped),

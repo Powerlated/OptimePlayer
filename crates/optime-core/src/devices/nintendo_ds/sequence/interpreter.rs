@@ -40,7 +40,14 @@ impl Sequence {
                 return;
             }
             if !self.tracks[idx].muted {
-                self.send_message(idx, MessageType::PlayNote, key, velocity, length);
+                self.send_message(
+                    idx,
+                    MessageType::PlayNote {
+                        note: key,
+                        velocity,
+                        duration: length,
+                    },
+                );
             }
             self.tracks[idx].portamento_key = key;
             if self.tracks[idx].note_wait {
@@ -67,10 +74,10 @@ impl Sequence {
                         self.tracks[idx].bank = bank;
                         self.send_message(
                             idx,
-                            MessageType::InstrumentChange,
-                            bank as i32,
-                            program as i32,
-                            0,
+                            MessageType::InstrumentChange {
+                                bank: bank as i32,
+                                program: program as i32,
+                            },
                         );
                     }
                     _ => {}
@@ -88,7 +95,7 @@ impl Sequence {
                     let dest = self.read_pc_inc(idx, 3);
                     if run_cmd {
                         self.tracks[idx].pc = dest;
-                        self.send_message(idx, MessageType::Jump, 0, 0, 0);
+                        self.send_message(idx, MessageType::Jump);
                     }
                 }
                 0x95 => {
@@ -141,7 +148,7 @@ impl Sequence {
                     }
                     0xFF => {
                         self.end_track(idx);
-                        self.send_message(idx, MessageType::TrackEnded, 0, 0, 0);
+                        self.send_message(idx, MessageType::TrackEnded);
                         // Non-zero so the per-tick `while resting_for == 0` loop stops.
                         self.tracks[idx].resting_for = 1;
                     }
@@ -167,21 +174,21 @@ impl Sequence {
                 // stereo engine is a separate Haas/crossover design, so we keep this mapping.)
                 let pan = if u8v == 127 { 128 } else { u8v };
                 self.tracks[idx].pan = pan;
-                self.send_message(idx, MessageType::PanChange, pan, 0, 0);
+                self.send_message(idx, MessageType::PanChange { pan });
             }
             0xC1 => {
                 self.tracks[idx].volume = u8v;
-                self.send_message(idx, MessageType::VolumeChange, u8v, 0, 0);
+                self.send_message(idx, MessageType::VolumeChange { volume: u8v });
             }
             0xC2 => self.tracks[idx].master_volume = u8v,
             0xC3 => self.tracks[idx].transpose = s8v,
             0xC4 => {
                 self.tracks[idx].pitch_bend = s8v;
-                self.send_message(idx, MessageType::PitchBend, 0, 0, 0);
+                self.send_message(idx, MessageType::PitchBend);
             }
             0xC5 => {
                 self.tracks[idx].pitch_bend_range = u8v;
-                self.send_message(idx, MessageType::PitchBend, 0, 0, 0);
+                self.send_message(idx, MessageType::PitchBend);
             }
             0xC6 => self.tracks[idx].priority = u8v,
             0xC7 => self.tracks[idx].note_wait = u8v != 0,

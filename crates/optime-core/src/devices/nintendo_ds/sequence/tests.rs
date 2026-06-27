@@ -25,10 +25,14 @@ fn note_opcode_emits_play_note_with_single_byte_duration() {
     s.tick(&[false; TRACK_COUNT]);
     let msgs = drain(&mut s);
     assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0].msg_type, MessageType::PlayNote);
-    assert_eq!(msgs[0].param0, 60);
-    assert_eq!(msgs[0].param1, 127);
-    assert_eq!(msgs[0].param2, 0x10);
+    assert_eq!(
+        msgs[0].msg_type,
+        MessageType::PlayNote {
+            note: 60,
+            velocity: 127,
+            duration: 0x10,
+        }
+    );
     // note-wait set resting_for to the duration (0x10); the tick then decrements it once.
     assert_eq!(s.tracks[0].resting_for, 0x10 - 1);
 }
@@ -48,8 +52,10 @@ fn note_wait_off_fires_notes_back_to_back() {
     let msgs = drain(&mut s);
     let notes: Vec<i32> = msgs
         .iter()
-        .filter(|m| m.msg_type == MessageType::PlayNote)
-        .map(|m| m.param0)
+        .filter_map(|m| match m.msg_type {
+            MessageType::PlayNote { note, .. } => Some(note),
+            _ => None,
+        })
         .collect();
     assert_eq!(
         notes,
@@ -71,8 +77,10 @@ fn note_wait_on_advances_by_note_duration() {
     s.tick(&[false; TRACK_COUNT]);
     let notes: Vec<i32> = drain(&mut s)
         .iter()
-        .filter(|m| m.msg_type == MessageType::PlayNote)
-        .map(|m| m.param0)
+        .filter_map(|m| match m.msg_type {
+            MessageType::PlayNote { note, .. } => Some(note),
+            _ => None,
+        })
         .collect();
     assert_eq!(notes, vec![60], "only the first note should have fired");
     assert_eq!(s.tracks[0].resting_for, 7); // dur 8 - 1
@@ -84,8 +92,10 @@ fn transpose_shifts_note_keys() {
     let mut s = seq(&[0xC3, 12, 0x3C, 0x7F, 0x04, 0xFF]);
     s.tick(&[false; TRACK_COUNT]);
     let msgs = drain(&mut s);
-    assert_eq!(msgs[0].msg_type, MessageType::PlayNote);
-    assert_eq!(msgs[0].param0, 72);
+    assert!(matches!(
+        msgs[0].msg_type,
+        MessageType::PlayNote { note: 72, .. }
+    ));
 }
 
 #[test]
@@ -142,7 +152,10 @@ fn variable_length_duration_decodes_multi_byte() {
     let mut s = seq(&[0x3C, 0x7F, 0x81, 0x00, 0x80, 0x04, 0xFF]);
     s.tick(&[false; TRACK_COUNT]);
     let msgs = drain(&mut s);
-    assert_eq!(msgs[0].param2, 128);
+    assert!(matches!(
+        msgs[0].msg_type,
+        MessageType::PlayNote { duration: 128, .. }
+    ));
 }
 
 #[test]
@@ -167,14 +180,14 @@ fn control_opcodes_set_state_and_emit_messages() {
     assert_eq!(
         types,
         vec![
-            MessageType::VolumeChange,
-            MessageType::PanChange,
-            MessageType::InstrumentChange,
+            MessageType::VolumeChange { volume: 100 },
+            MessageType::PanChange { pan: 64 },
+            MessageType::InstrumentChange {
+                bank: 0,
+                program: 5,
+            },
         ]
     );
-    assert_eq!(msgs[0].param0, 100);
-    assert_eq!(msgs[2].param0, 0); // bank
-    assert_eq!(msgs[2].param1, 5); // program
 }
 
 #[test]
