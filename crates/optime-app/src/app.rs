@@ -51,6 +51,105 @@ fn sinc_taps_slider(ui: &mut egui::Ui, sinc_taps: &mut usize) {
     );
 }
 
+/// The "Default" listing order for a **sparse** curated table. Each input is `(sparse_index,
+/// native_order)`; songs with a `sparse_index` are *anchored* to that absolute output position and
+/// the rest *fill* the remaining slots in native order. Returns the songs' original indices in their
+/// new order. Implemented as a merge: at each output slot it emits the next anchored song once its
+/// target index is reached (or once no fillers remain), otherwise the next filler — robust to
+/// colliding or out-of-range `sparse_index` values (which simply land at the next free slot / the
+/// end).
+fn sparse_default_order(keys: &[(Option<usize>, usize)]) -> Vec<usize> {
+    let n = keys.len();
+    let mut anchored: Vec<usize> = (0..n).filter(|&i| keys[i].0.is_some()).collect();
+    anchored.sort_by_key(|&i| (keys[i].0.unwrap(), keys[i].1));
+    let mut fillers: Vec<usize> = (0..n).filter(|&i| keys[i].0.is_none()).collect();
+    fillers.sort_by_key(|&i| keys[i].1);
+
+    let mut order = Vec::with_capacity(n);
+    let (mut ai, mut fi) = (0, 0);
+    for pos in 0..n {
+        let take_anchored =
+            ai < anchored.len() && (fi >= fillers.len() || keys[anchored[ai]].0.unwrap() <= pos);
+        if take_anchored {
+            order.push(anchored[ai]);
+            ai += 1;
+        } else {
+            order.push(fillers[fi]);
+            fi += 1;
+        }
+    }
+    order.extend(anchored[ai..].iter().chain(fillers[fi..].iter()).copied());
+    order
+}
+
+/// Renders a song's id as a dim, monospaced `#123` tag — shared by the library list and the
+/// song-name editor so the number is styled identically in both. `min_digits` right-pads the number
+/// (monospaced) so a column of tags shares one width and the song names line up; pass 0 for none.
+fn song_id_tag(
+    ui: &mut egui::Ui,
+    song_id: u32,
+    color: egui::Color32,
+    min_digits: usize,
+) -> egui::Response {
+    ui.label(
+        egui::RichText::new(format!("#{song_id:>min_digits$}"))
+            .monospace()
+            .color(color),
+    )
+}
+
+/// The song-title half of a library row: a static iOS-style row (browse list) or an editable name
+/// field (song-name editor). Selects which widget [`song_id_and_title`] draws after the id tag.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+enum SongTitle<'a> {
+    /// Read-only row with the length, status badges, and selection highlight; click to play.
+    Static {
+        name: &'a str,
+        length: Option<&'a str>,
+        badges: &'a [(&'a str, egui::Color32)],
+        selected: bool,
+    },
+    /// Editable single-line name field (the editor); the caller wires up rename/reset.
+    Edit { name: &'a mut String },
+}
+
+/// The two responses [`song_id_and_title`] hands back: the id tag (for a hover) and the title widget
+/// (click-to-play in browse mode, rename/reset in edit mode).
+struct SongRow {
+    /// Only the native song-name editor reads this (for the curated-state hover).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    id: egui::Response,
+    title: egui::Response,
+}
+
+/// Renders one library row's leading `#id` tag and the song title, shared by the browse list and the
+/// song-name editor so both lay out and pad the number identically. The caller supplies the
+/// surrounding layout (transport/menu controls) and wires up the returned responses.
+fn song_id_and_title(
+    ui: &mut egui::Ui,
+    song_id: u32,
+    id_digits: usize,
+    id_color: egui::Color32,
+    title: SongTitle<'_>,
+) -> SongRow {
+    let id = song_id_tag(ui, song_id, id_color, id_digits);
+    let title = match title {
+        SongTitle::Static {
+            name,
+            length,
+            badges,
+            selected,
+        } => {
+            let row_w = ui.available_width();
+            crate::theme::ios_row_ext(ui, row_w, None, name, length, badges, selected, false)
+        }
+        SongTitle::Edit { name } => {
+            ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY))
+        }
+    };
+    SongRow { id, title }
+}
+
 /// One entry in the flattened song list.
 struct Song {
     archive_index: usize,
@@ -66,10 +165,33 @@ struct Song {
     /// then the rest), when the game has a curated table. In "Default" sort these songs are listed
     /// first, in this order; songs without one follow, in native order.
     ost_order: Option<usize>,
+    /// The song's absolute "Default"-sort position when the curated table is **sparse** (only a few
+    /// of the game's songs are labeled): the labeled song is placed at this list index among the
+    /// unlabeled ones, instead of being grouped at the front by [`Self::ost_order`]. `None` for
+    /// dense/album-ordered tables, which keep the front-grouped behavior.
+    sparse_index: Option<usize>,
     /// Playback length in seconds, once computed (lazily, in the background).
     length: Option<f64>,
     /// Whether the length has been computed yet (a computed-but-failed length stays `None`).
     length_computed: bool,
+    /// Whether this song belongs in the curated song-names JSON: `true` if it came from the loaded
+    /// table, or it's been renamed/reordered in "Edit song names" mode. Only these songs are written
+    /// back on save, so untouched (e.g. ROM-embedded-name) songs stay out of the file. Only read by
+    /// the native-only editor.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    curated: bool,
+}
+
+/// Where the song-name editor should move a song (see [`OptimeApp::reposition_song`]). Movement is
+/// through the unlabeled slots only; other curated songs stay pinned.
+#[cfg(not(target_arch = "wasm32"))]
+enum CuratedTarget {
+    /// Towards the start by one movable slot.
+    Up,
+    /// Towards the end by one movable slot.
+    Down,
+    /// To the movable slot implied by a typed 0-based list position.
+    Abs(usize),
 }
 
 /// Which visualizer the central panel shows.
@@ -125,6 +247,15 @@ const DEMOS: &[(&str, &str)] = &[
     ("Pokémon Black 2", "pokemon-black-2.sdat"),
     ("Ace Attorney", "ace-attorney.sdat"),
 ];
+
+// Extra, **local-only** demo entries generated at build time from the optional, gitignored
+// `local_extras.txt` manifest (see `build.rs`); empty in a clean clone. Defines `LOCAL_DEMOS`.
+include!(concat!(env!("OUT_DIR"), "/local_demos.rs"));
+
+/// All demo entries: the committed [`DEMOS`] plus any local-only ones from `local_extras.txt`.
+fn all_demos() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    DEMOS.iter().chain(LOCAL_DEMOS.iter())
+}
 
 /// The application state.
 pub struct OptimeApp {
@@ -214,6 +345,20 @@ pub struct OptimeApp {
     /// Cached per-sample DC-offset stats for the current song, recomputed when the window opens
     /// or the song changes. The key is the `(archive_index, song_id)` they were computed for.
     stats_cache: Option<((usize, u32), Vec<optime_core::SampleDcStat>)>,
+
+    /// Session-only (never persisted) "Edit song names" mode: when on, the library list rows become
+    /// editable (rename + reorder) and a Save button writes the curated titles + order back to the
+    /// source-tree JSON. A maintainer dev-tool, meaningful only when run from the checkout.
+    #[cfg(not(target_arch = "wasm32"))]
+    song_edit_enabled: bool,
+    /// The adjustable target filename the editor's "Save to JSON" writes to (under
+    /// `song_names::source_json_dir()`). Seeded from the loaded game's table, then user-editable.
+    #[cfg(not(target_arch = "wasm32"))]
+    song_edit_filename: String,
+    /// The source key [`Self::song_edit_filename`] was seeded for, so it re-seeds when a different
+    /// game is loaded (but keeps the user's edits while the same game stays loaded).
+    #[cfg(not(target_arch = "wasm32"))]
+    song_edit_filename_for: String,
 }
 
 impl OptimeApp {
@@ -275,16 +420,21 @@ impl OptimeApp {
             overview_tex: None,
             stats_open: false,
             stats_cache: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            song_edit_enabled: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            song_edit_filename: String::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            song_edit_filename_for: String::new(),
         };
 
         // Resume where the last session left off (paused), if the last track was from a demo
         // we can re-fetch; otherwise fall back to the first demo.
         match track {
-            Some(t) if DEMOS.iter().any(|(_, stem)| *stem == t.source) => {
+            Some(t) if all_demos().any(|(_, stem)| *stem == t.source) => {
                 app.resume_paused = true;
                 app.pending_play = Some(t.clone());
-                let label = DEMOS
-                    .iter()
+                let label = all_demos()
                     .find(|(_, stem)| *stem == t.source)
                     .map(|(l, _)| *l)
                     .unwrap_or("demo");
@@ -448,9 +598,24 @@ impl OptimeApp {
     }
 
     /// Parses sound archives from `bytes` (DS `.nds`/`.sdat`, or a GBA ROM) and rebuilds the
-    /// song list. `key` is the persistent source identity (demo stem or user file name);
-    /// `source` is the display name for status text.
+    /// song list. Gzip-compressed input (e.g. a `*.sdat.gz` / `*.gbaaudio.gz` demo, or a `.gz` the
+    /// user opens) is transparently decompressed first. `key` is the persistent source identity
+    /// (demo stem or user file name); `source` is the display name for status text.
     fn load_bytes(&mut self, bytes: &[u8], key: &str, source: &str) {
+        // Decompress if the payload is gzip (magic `1f 8b`); otherwise use the bytes as-is.
+        let decompressed;
+        let bytes: &[u8] = if bytes.starts_with(&[0x1f, 0x8b]) {
+            use std::io::Read;
+            let mut out = Vec::new();
+            if let Err(e) = flate2::read::GzDecoder::new(bytes).read_to_end(&mut out) {
+                self.status = format!("Failed to decompress {source}: {e}");
+                return;
+            }
+            decompressed = out;
+            &decompressed
+        } else {
+            bytes
+        };
         let archives = SoundData::load_all(bytes);
         if archives.is_empty() {
             self.status = format!("No songs found in {source} (not an SDAT, NDS, or GBA ROM).");
@@ -462,14 +627,15 @@ impl OptimeApp {
             // GBA ROMs carry no song names; supply curated titles + OST order by game code.
             let game_code = data.gba_game_code();
             for id in data.song_ids() {
-                let meta = game_code
-                    .as_deref()
-                    .and_then(|gc| song_names::lookup(gc, id));
-                let name = data
-                    .song_name(id)
-                    .or_else(|| meta.as_ref().map(|m| m.title.to_owned()))
+                let meta = song_names::lookup(Some(key), game_code.as_deref(), id);
+                // A curated title (the editor's output) wins over the ROM's embedded name.
+                let name = meta
+                    .as_ref()
+                    .map(|m| m.title.clone())
+                    .or_else(|| data.song_name(id))
                     .unwrap_or_else(|| format!("Song {id}"));
-                let ost_order = meta.map(|m| m.order);
+                let ost_order = meta.as_ref().map(|m| m.order);
+                let sparse_index = meta.as_ref().and_then(|m| m.sparse_index);
                 let label = format!("{name} (#{id})");
                 // Reuse any previously computed length for this exact song.
                 let (length, length_computed) = match self.length_cache.get(&(key.to_owned(), id)) {
@@ -483,8 +649,10 @@ impl OptimeApp {
                     label,
                     order: self.songs.len(),
                     ost_order,
+                    sparse_index,
                     length,
                     length_computed,
+                    curated: ost_order.is_some(),
                 });
             }
         }
@@ -543,7 +711,8 @@ impl OptimeApp {
         }
         let all_known = self.songs.iter().all(|s| s.length_computed);
 
-        if self.needs_sort {
+        // While editing song names, the list is in manual order — don't let a sort reshuffle it.
+        if self.needs_sort && !self.song_edit_active() {
             // Length sort needs every length first; the others can sort right away.
             if self.p.sort_mode != SortMode::Length || all_known {
                 self.apply_sort();
@@ -568,38 +737,67 @@ impl OptimeApp {
         // Copy out so the sort closure doesn't borrow `self` alongside `&mut self.songs`.
         let mode = self.p.sort_mode;
         let desc = self.p.sort_descending;
-        // The ascending key comparison for the active mode (Default keeps native order).
-        let key_cmp = |a: &Song, b: &Song| -> Ordering {
-            match mode {
-                // OST tracks first, in album order; everything else after, in native order.
-                SortMode::Default => match (a.ost_order, b.ost_order) {
-                    (Some(x), Some(y)) => x.cmp(&y),
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => a.order.cmp(&b.order),
-                },
-                SortMode::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                SortMode::Length => a
-                    .length
-                    .unwrap_or(f64::INFINITY)
-                    .partial_cmp(&b.length.unwrap_or(f64::INFINITY))
-                    .unwrap_or(Ordering::Equal),
-            }
-        };
-        self.songs.sort_by(|a, b| {
-            let primary = key_cmp(a, b);
-            let primary = if desc { primary.reverse() } else { primary };
-            // Native order breaks ties (and, for Default, is the whole ordering); it follows the
-            // ascending/descending direction too so a descending sort fully reverses the list.
-            let tie = a.order.cmp(&b.order);
-            primary.then(if desc { tie.reverse() } else { tie })
-        });
+        if mode == SortMode::Default && self.songs.iter().any(|s| s.sparse_index.is_some()) {
+            // Sparse curated table: place each labeled song at its absolute index, with the unlabeled
+            // songs filling the gaps in native order (the comparator below would instead clump the
+            // labeled songs at the front).
+            self.apply_sparse_default(desc);
+        } else {
+            // The ascending key comparison for the active mode (Default keeps native order).
+            let key_cmp = |a: &Song, b: &Song| -> Ordering {
+                match mode {
+                    // OST tracks first, in album order; everything else after, in native order.
+                    SortMode::Default => match (a.ost_order, b.ost_order) {
+                        (Some(x), Some(y)) => x.cmp(&y),
+                        (Some(_), None) => Ordering::Less,
+                        (None, Some(_)) => Ordering::Greater,
+                        (None, None) => a.order.cmp(&b.order),
+                    },
+                    SortMode::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                    SortMode::Length => a
+                        .length
+                        .unwrap_or(f64::INFINITY)
+                        .partial_cmp(&b.length.unwrap_or(f64::INFINITY))
+                        .unwrap_or(Ordering::Equal),
+                }
+            };
+            self.songs.sort_by(|a, b| {
+                let primary = key_cmp(a, b);
+                let primary = if desc { primary.reverse() } else { primary };
+                // Native order breaks ties (and, for Default, is the whole ordering); it follows the
+                // ascending/descending direction too so a descending sort fully reverses the list.
+                let tie = a.order.cmp(&b.order);
+                primary.then(if desc { tie.reverse() } else { tie })
+            });
+        }
         if let Some((ai, sid)) = current {
             self.current_song = self
                 .songs
                 .iter()
                 .position(|s| s.archive_index == ai && s.song_id == sid);
         }
+    }
+
+    /// Reorders [`Self::songs`] for a **sparse** curated table: each song with a `sparse_index` is
+    /// placed at that absolute list position, and the remaining (unlabeled) songs fill the gaps in
+    /// native order (see [`sparse_default_order`]). `desc` reverses the whole list.
+    fn apply_sparse_default(&mut self, desc: bool) {
+        let keys: Vec<(Option<usize>, usize)> = self
+            .songs
+            .iter()
+            .map(|s| (s.sparse_index, s.order))
+            .collect();
+        let mut order = sparse_default_order(&keys);
+        if desc {
+            order.reverse();
+        }
+
+        // Apply the permutation (Song isn't Clone, so move each out of an `Option` slot).
+        let mut slots: Vec<Option<Song>> = self.songs.drain(..).map(Some).collect();
+        self.songs = order
+            .into_iter()
+            .map(|i| slots[i].take().unwrap())
+            .collect();
     }
 
     /// Plays the song at flattened-list index `index`, making the whole song list the playlist.
@@ -656,7 +854,7 @@ impl OptimeApp {
         if start_track.source != self.current_source {
             // The chosen source isn't loaded — fetch it (demo) and resume on arrival.
             self.pending_play = Some(start_track.clone());
-            if let Some((label, stem)) = DEMOS.iter().find(|(_, stem)| *stem == start_track.source)
+            if let Some((label, stem)) = all_demos().find(|(_, stem)| *stem == start_track.source)
             {
                 let (label, stem) = (*label, *stem);
                 self.request_demo(stem, label);
@@ -956,7 +1154,7 @@ impl OptimeApp {
         {
             std::thread::spawn(move || {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("DS / GBA sound", &["nds", "sdat", "gba", "gbaaudio"])
+                    .add_filter("DS / GBA sound", &["nds", "sdat", "gba", "gbaaudio", "gz"])
                     .pick_file()
                 {
                     let key = path
@@ -975,7 +1173,7 @@ impl OptimeApp {
         {
             wasm_bindgen_futures::spawn_local(async move {
                 if let Some(handle) = rfd::AsyncFileDialog::new()
-                    .add_filter("DS / GBA sound", &["nds", "sdat", "gba"])
+                    .add_filter("DS / GBA sound", &["nds", "sdat", "gba", "gbaaudio", "gz"])
                     .pick_file()
                     .await
                 {
@@ -1147,6 +1345,11 @@ impl OptimeApp {
     /// The full song list with like / add-to-playlist menus and status badges.
     /// Returns `true` if a song was started.
     fn song_list_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        // "Edit song names" mode replaces the list with an inline title/order editor (native only).
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.song_edit_enabled {
+            return self.song_edit_list_ui(ui);
+        }
         enum Action {
             Play(usize),
             Like(usize),
@@ -1211,6 +1414,15 @@ impl OptimeApp {
         }
         ui.add_space(2.0);
         ui.spacing_mut().item_spacing.y = 0.0;
+        // Pad every id to the widest song's digit count so the names line up in one column.
+        let id_digits = self
+            .songs
+            .iter()
+            .map(|s| s.song_id)
+            .max()
+            .unwrap_or(0)
+            .to_string()
+            .len();
         for (i, song) in self.songs.iter().enumerate() {
             let selected = self.current_song == Some(i);
             let length = song.length.map(fmt_duration);
@@ -1248,23 +1460,28 @@ impl OptimeApp {
                             .color(crate::theme::TEXT_DIM),
                         |ui| song_menu(ui, i, liked, &self.p.library.playlists, &mut action),
                     );
-                    let row_w = ui.available_width();
-
-                    let resp = crate::theme::ios_row_ext(
-                        ui,
-                        row_w,
-                        None,
-                        &song.label,
-                        length.as_deref(),
-                        &badges,
-                        selected,
-                        false,
-                    );
-                    if resp.clicked() {
-                        action = Some(Action::Play(i));
-                    }
-                    resp.context_menu(|ui| {
-                        song_menu(ui, i, liked, &self.p.library.playlists, &mut action)
+                    // The id sits to the left of the name (as in the editor): place it first in a
+                    // left-to-right sub-area, then let the row fill the remaining width.
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let resp = song_id_and_title(
+                            ui,
+                            song.song_id,
+                            id_digits,
+                            crate::theme::TEXT_DIM,
+                            SongTitle::Static {
+                                name: &song.name,
+                                length: length.as_deref(),
+                                badges: &badges,
+                                selected,
+                            },
+                        )
+                        .title;
+                        if resp.clicked() {
+                            action = Some(Action::Play(i));
+                        }
+                        resp.context_menu(|ui| {
+                            song_menu(ui, i, liked, &self.p.library.playlists, &mut action)
+                        });
                     });
                 },
             );
@@ -1283,6 +1500,314 @@ impl OptimeApp {
             None => {}
         }
         false
+    }
+
+    /// The library list in "Edit song names" mode: every loaded song as an editable row (rename +
+    /// reorder), plus a "Save to JSON" header that writes the titles and order back to the
+    /// source-tree JSON. Operates directly on [`Self::songs`] in `Vec` order (sorting is suspended
+    /// while editing). Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn song_edit_list_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        /// One deferred edit applied after the row loop (so we never reorder mid-iteration).
+        enum Edit {
+            Play(usize),
+            MoveUp(usize),
+            MoveDown(usize),
+            MoveTo(usize, usize),
+            Save,
+        }
+        let mut edit: Option<Edit> = None;
+
+        // Seed the (adjustable) target filename from the loaded game's table the first time, and
+        // again whenever a different game is loaded — but keep the user's edits in between.
+        if self.song_edit_filename_for != self.current_source {
+            let game_code = self.archives.first().and_then(|a| a.gba_game_code());
+            let (file, _) =
+                song_names::target_filename(Some(&self.current_source), game_code.as_deref());
+            self.song_edit_filename = file;
+            self.song_edit_filename_for = self.current_source.clone();
+        }
+        let path = song_names::source_json_dir().join(&self.song_edit_filename);
+        let wired = song_names::is_known_filename(&self.song_edit_filename);
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Editing song names").strong());
+            if ui
+                .button("💾 Save to JSON")
+                .on_hover_text(format!("Write to {}", path.display()))
+                .clicked()
+            {
+                edit = Some(Edit::Save);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("File:")
+                    .small()
+                    .color(crate::theme::TEXT_DIM),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.song_edit_filename)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("filename.json"),
+            )
+            .on_hover_text(path.display().to_string());
+        });
+        if !wired {
+            ui.label(
+                egui::RichText::new(
+                    "Not yet wired: after saving, add this file to JSONS_BY_GBA_GAME_CODE / \
+                     JSONS_BY_GAME_FILENAME in song_names/mod.rs so it loads next build.",
+                )
+                .small()
+                .color(crate::theme::ACCENT),
+            );
+        }
+        ui.separator();
+        ui.spacing_mut().item_spacing.y = 2.0;
+
+        let len = self.songs.len();
+        for i in 0..len {
+            let song_id = self.songs[i].song_id;
+            // Curated songs (accent-coloured id) are the ones a save will write.
+            let curated = self.songs[i].curated;
+            // The currently-playing song's play button is shown red.
+            let is_current = self.current_song == Some(i);
+            let mut pos = i + 1;
+            ui.horizontal(|ui| {
+                let play = egui::RichText::new("▶");
+                let play = if is_current {
+                    play.color(egui::Color32::from_rgb(0xff, 0x45, 0x45))
+                } else {
+                    play
+                };
+                if ui
+                    .add(egui::Button::new(play).small())
+                    .on_hover_text("Play")
+                    .clicked()
+                {
+                    edit = Some(Edit::Play(i));
+                }
+                if ui
+                    .add_enabled(i > 0, egui::Button::new("↑").small())
+                    .clicked()
+                {
+                    edit = Some(Edit::MoveUp(i));
+                }
+                if ui
+                    .add_enabled(i + 1 < len, egui::Button::new("↓").small())
+                    .clicked()
+                {
+                    edit = Some(Edit::MoveDown(i));
+                }
+                ui.add(egui::DragValue::new(&mut pos).range(1..=len.max(1)))
+                    .on_hover_text("Position — drag or type to move this song");
+                let id_color = if curated {
+                    crate::theme::ACCENT
+                } else {
+                    crate::theme::TEXT_DIM
+                };
+                let row = song_id_and_title(
+                    ui,
+                    song_id,
+                    0,
+                    id_color,
+                    SongTitle::Edit {
+                        name: &mut self.songs[i].name,
+                    },
+                );
+                row.id.on_hover_text(if curated {
+                    "Curated — written on save"
+                } else {
+                    "Not in the saved table until you rename or move it"
+                });
+                let resp = row.title;
+                if resp.changed() && !self.songs[i].name.trim().is_empty() {
+                    let s = &mut self.songs[i];
+                    s.label = format!("{} (#{})", s.name, s.song_id);
+                    s.curated = true; // a rename opts the song into the saved table
+                }
+                // Clearing the field resets the song to its default (ROM/derived) title and drops it
+                // from the curated table — applied on commit so the field can be cleared and retyped.
+                if resp.lost_focus() && self.songs[i].name.trim().is_empty() {
+                    let default = self.default_song_name(i);
+                    let s = &mut self.songs[i];
+                    s.name = default;
+                    s.label = format!("{} (#{})", s.name, s.song_id);
+                    s.curated = false;
+                    s.sparse_index = None;
+                }
+            });
+            // A DragValue change is detected by the position drifting from this row's index.
+            if pos != i + 1 {
+                edit = Some(Edit::MoveTo(i, pos.saturating_sub(1).min(len - 1)));
+            }
+        }
+
+        match edit {
+            Some(Edit::Play(i)) => {
+                self.play_from_list(i);
+                return true;
+            }
+            // The moved song travels through the unlabeled slots only; every *other* curated song
+            // stays pinned to its list position, so reordering never shifts a curated song. The
+            // moved song opts into the saved table.
+            Some(Edit::MoveUp(i)) => self.reposition_song(i, CuratedTarget::Up),
+            Some(Edit::MoveDown(i)) => self.reposition_song(i, CuratedTarget::Down),
+            Some(Edit::MoveTo(from, to)) => self.reposition_song(from, CuratedTarget::Abs(to)),
+            Some(Edit::Save) => self.save_song_names(),
+            None => {}
+        }
+        false
+    }
+
+    /// The song's default (non-curated) title: the ROM-embedded name if any, otherwise `Song {id}` —
+    /// i.e. the title it would have with no curated-JSON entry. Used to reset a cleared row.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn default_song_name(&self, i: usize) -> String {
+        let s = &self.songs[i];
+        self.archives[s.archive_index]
+            .song_name(s.song_id)
+            .unwrap_or_else(|| format!("Song {}", s.song_id))
+    }
+
+    /// Moves the song at `moved_slot` to a new list position by bubbling it through its own slot plus
+    /// the unlabeled slots — every *other* curated (labeled) song is pinned, so a reorder never
+    /// shifts a curated song; only unlabeled songs flow around the move. The target is a neighbouring
+    /// movable slot (`Up`/`Down`) or, for a typed list position (`Abs`), just past the unlabeled
+    /// songs still ahead of it. (Labels the moved song, and preserves the current-song highlight via
+    /// the same identity-remap [`Self::apply_sort`] uses.)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reposition_song(&mut self, moved_slot: usize, target: CuratedTarget) {
+        self.songs[moved_slot].curated = true;
+        // The slots the move may touch: the moved song's own slot plus every unlabeled song's. Other
+        // curated songs are absent, so they're never swapped — they keep their exact list position.
+        let slots: Vec<usize> = (0..self.songs.len())
+            .filter(|&j| j == moved_slot || !self.songs[j].curated)
+            .collect();
+        let k = slots.len();
+        let from_rank = slots.iter().position(|&s| s == moved_slot).unwrap();
+        let to_rank = match target {
+            CuratedTarget::Up => from_rank.saturating_sub(1),
+            CuratedTarget::Down => (from_rank + 1).min(k - 1),
+            // Land just past the unlabeled songs still ahead of the typed position.
+            CuratedTarget::Abs(to) => slots
+                .iter()
+                .filter(|&&s| s < to && s != moved_slot)
+                .count()
+                .min(k - 1),
+        };
+        if to_rank == from_rank {
+            return;
+        }
+        let playing = self
+            .current_song
+            .and_then(|c| self.songs.get(c))
+            .map(|s| (s.archive_index, s.song_id));
+        // Bubble the song one movable slot at a time (each swap exchanges it with an unlabeled song,
+        // never another curated song).
+        if to_rank > from_rank {
+            for r in from_rank..to_rank {
+                self.songs.swap(slots[r], slots[r + 1]);
+            }
+        } else {
+            for r in (to_rank..from_rank).rev() {
+                self.songs.swap(slots[r], slots[r + 1]);
+            }
+        }
+        if let Some((ai, sid)) = playing {
+            self.current_song = self
+                .songs
+                .iter()
+                .position(|s| s.archive_index == ai && s.song_id == sid);
+        }
+    }
+
+    /// Writes the current [`Self::songs`] titles and order (the editor's state) back to the matching
+    /// source-tree JSON, as `[{ "songId", "title", "sparseIndex" }]`. Only the **curated** songs (the
+    /// ones from the loaded table plus any renamed/reordered this session) are written, each with its
+    /// absolute list position (`sparseIndex`) so a sparse table keeps its songs interspersed among the
+    /// unlabeled ones on reload — untouched ROM-named songs stay out of the file. Native dev-tool:
+    /// only works when the app runs from the checkout. Also mirrors the saved positions into
+    /// `sparse_index` so the order survives a later Default re-sort this session.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_song_names(&mut self) {
+        #[derive(serde::Serialize)]
+        struct Out<'a> {
+            #[serde(rename = "songId")]
+            song_id: u32,
+            title: &'a str,
+            #[serde(rename = "sparseIndex")]
+            sparse_index: usize,
+        }
+        let entries: Vec<Out> = self
+            .songs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.curated)
+            .map(|(idx, s)| Out {
+                song_id: s.song_id,
+                title: &s.name,
+                sparse_index: idx,
+            })
+            .collect();
+        if entries.is_empty() {
+            self.status =
+                "Nothing to save — rename or reorder a song first (untouched songs aren't written)."
+                    .to_owned();
+            return;
+        }
+        let n = entries.len();
+        // Write to the editor's adjustable filename (seeded from the loaded game's table).
+        let file = self.song_edit_filename.trim().to_owned();
+        if file.is_empty() {
+            self.status = "Enter a filename to save to.".to_owned();
+            return;
+        }
+        let wired = song_names::is_known_filename(&file);
+        let path = song_names::source_json_dir().join(&file);
+
+        let json = match serde_json::to_string_pretty(&entries) {
+            Ok(mut j) => {
+                j.push('\n');
+                j
+            }
+            Err(e) => {
+                self.status = format!("Failed to serialize song names: {e}");
+                return;
+            }
+        };
+        drop(entries);
+        if let Err(e) = std::fs::write(&path, json) {
+            self.status = format!("Failed to write {}: {e}", path.display());
+            return;
+        }
+        // Mirror the saved positions in-session: each curated song keeps its absolute list index as
+        // its `sparse_index`, so the Default re-sort puts it right back where it is now.
+        for i in 0..self.songs.len() {
+            self.songs[i].sparse_index = self.songs[i].curated.then_some(i);
+        }
+        self.status = if wired {
+            format!("Saved {n} song names to {}.", path.display())
+        } else {
+            format!(
+                "Saved {n} song names to {} — add it to JSONS_BY_* in song_names/mod.rs to load it \
+                 next build.",
+                path.display()
+            )
+        };
+    }
+
+    /// Whether the inline song-name editor is active (always `false` on web, where it isn't built).
+    fn song_edit_active(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.song_edit_enabled
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
     }
 
     /// Adds song `i` to playlist `p` (deduplicated), reporting the result in the status line.
@@ -1753,6 +2278,19 @@ impl OptimeApp {
         {
             self.stats_open = true;
             self.stats_cache = None; // recompute for whatever is playing now
+        }
+        // Maintainer dev-tool: turn the library list into an inline title/order editor that writes
+        // the curated names back to this crate's source-tree JSON (only when run from the checkout).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ui.separator();
+            ui.checkbox(&mut self.song_edit_enabled, "Edit song names")
+                .on_hover_text(
+                "Make the song list editable (rename + reorder), then \"Save to JSON\" writes the \
+                 titles and order back to crates/optime-app/src/song_names/*.json. A maintainer \
+                 tool — the saved file is baked in on the next build; only works when the app is \
+                 run from the source checkout.",
+            );
         }
     }
 
@@ -2255,7 +2793,7 @@ impl OptimeApp {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let mut requested = None;
                     let active = &self.current_source;
-                    for (label, stem) in DEMOS {
+                    for (label, stem) in all_demos() {
                         let selected = active == stem;
                         let w = ui.available_width();
                         if crate::theme::ios_row(ui, w, Some("💿"), label, &[], selected, true)
@@ -2273,6 +2811,38 @@ impl OptimeApp {
                 self.song_list_ui(ui);
             });
         });
+    }
+
+    /// All keyboard shortcuts pass through here so they share one inhibition rule: whenever egui is
+    /// routing keystrokes to a focused widget (e.g. typing a title in the song-name editor, or any
+    /// text field / active drag-value), every shortcut is suppressed — the keystroke belongs to that
+    /// widget. Otherwise each shortcut *consumes* its key so it can't also reach a background widget.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // A focused text field (or any widget wanting keyboard input) inhibits all shortcuts.
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let (prev, next, toggle) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Space),
+            )
+        });
+        // Arrow keys switch songs; spacebar toggles play/pause (starting the first song if idle).
+        if prev {
+            self.send_transport(-1);
+        }
+        if next {
+            self.send_transport(1);
+        }
+        if toggle {
+            if self.current_song.is_some() {
+                self.paused = !self.paused;
+            } else if !self.songs.is_empty() {
+                self.play_from_list(0);
+            }
+        }
     }
 }
 
@@ -2293,19 +2863,8 @@ impl eframe::App for OptimeApp {
         self.poll_pending_file();
         self.update_library_order(ctx);
 
-        // Arrow-key song navigation (sequence switching).
-        let (left, right) = ctx.input(|i| {
-            (
-                i.key_pressed(egui::Key::ArrowLeft),
-                i.key_pressed(egui::Key::ArrowRight),
-            )
-        });
-        if left {
-            self.send_transport(-1);
-        }
-        if right {
-            self.send_transport(1);
-        }
+        // All keyboard shortcuts (song nav + play/pause), with the focused-widget inhibition.
+        self.handle_shortcuts(ctx);
 
         self.handle_media_controls(ctx, frame);
 
@@ -2357,7 +2916,7 @@ impl eframe::App for OptimeApp {
         egui::SidePanel::left("songs")
             .resizable(true)
             .default_width(260.0)
-            .width_range(200.0..=400.0)
+            .width_range(200.0..=600.0)
             .show(ctx, |ui| {
                 ui.heading("Optime Player");
                 ui.add_space(4.0);
@@ -2368,8 +2927,12 @@ impl eframe::App for OptimeApp {
                 });
                 ui.collapsing("Demos", |ui| {
                     let mut requested = None;
-                    for (label, stem) in DEMOS {
-                        if ui.button(*label).clicked() {
+                    for (label, stem) in all_demos() {
+                        let mut text = egui::RichText::new(*label);
+                        if self.current_source == *stem {
+                            text = text.color(egui::Color32::RED);
+                        }
+                        if ui.button(text).clicked() {
                             requested = Some((*stem, *label));
                         }
                     }
@@ -2588,5 +3151,54 @@ fn save_bytes(filename: &str, bytes: &[u8]) {
     #[cfg(target_arch = "wasm32")]
     {
         crate::web::download(filename, bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sparse_default_order;
+
+    // Helper: songs identified by native order; `anchored[i]` gives song i its sparse_index.
+    fn keys(anchored: &[(usize, usize)], n: usize) -> Vec<(Option<usize>, usize)> {
+        (0..n)
+            .map(|i| {
+                let sparse = anchored.iter().find(|(idx, _)| *idx == i).map(|(_, s)| *s);
+                (sparse, i)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn anchored_song_holds_its_absolute_position() {
+        // Song 2 anchored at index 2 stays put among the unlabeled ones.
+        assert_eq!(
+            sparse_default_order(&keys(&[(2, 2)], 5)),
+            vec![0, 1, 2, 3, 4]
+        );
+        // Anchored at the front: it jumps to 0, the rest keep native order.
+        assert_eq!(sparse_default_order(&keys(&[(2, 0)], 4)), vec![2, 0, 1, 3]);
+        // Anchored near the end.
+        assert_eq!(sparse_default_order(&keys(&[(0, 3)], 4)), vec![1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn two_anchored_intersperse_and_collisions_resolve() {
+        // Two anchors at 1 and 3, three fillers fill 0,2,4.
+        assert_eq!(
+            sparse_default_order(&keys(&[(0, 1), (4, 3)], 5)),
+            vec![1, 0, 2, 4, 3]
+        );
+        // Colliding targets (both want 2): first lands at 2, the other at the next free slot.
+        assert_eq!(
+            sparse_default_order(&keys(&[(0, 2), (1, 2)], 5)),
+            vec![2, 3, 0, 1, 4]
+        );
+        // Out-of-range index parks at the end.
+        assert_eq!(sparse_default_order(&keys(&[(1, 99)], 3)), vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn no_anchors_keeps_native_order() {
+        assert_eq!(sparse_default_order(&keys(&[], 4)), vec![0, 1, 2, 3]);
     }
 }

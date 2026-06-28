@@ -10,6 +10,17 @@ dist/
 
 *.gba
 *.nds
+*.gbaaudio.gz
+
+# Reference OST audio used only to source song titles (not redistributed).
+*.zip
+*.mp3
+
+# Local-only "extras" (see crates/optime-app/build.rs): a personal checkout's ROM-hack
+# metadata + demo and the maintainer dev-scripts that generate it. Never committed.
+/crates/optime-app/local_extras.txt
+/crates/optime-app/src/song_names/local/
+/tools/
 
 # Fan-translation toolset (used only to source Mother 3 song titles, not redistributed).
 translation-tools/

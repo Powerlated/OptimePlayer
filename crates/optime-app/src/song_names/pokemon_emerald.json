@@ -1,0 +1,838 @@
+[
+  {
+    "songId": 442,
+    "title": "Opening Movie: Double Battles"
+  },
+  {
+    "songId": 413,
+    "title": "Title Screen: Main Theme"
+  },
+  {
+    "songId": 414,
+    "title": "Introductions"
+  },
+  {
+    "songId": 405,
+    "title": "Littleroot Town"
+  },
+  {
+    "songId": 383,
+    "title": "Birch Pokémon Lab"
+  },
+  {
+    "songId": 415,
+    "title": "May"
+  },
+  {
+    "songId": 410,
+    "title": "H-Help Me!"
+  },
+  {
+    "songId": 474,
+    "title": "Battle! (Wild Pokémon)"
+  },
+  {
+    "songId": 353,
+    "title": "Victory! (Wild Pokémon)"
+  },
+  {
+    "songId": 359,
+    "title": "Route 101"
+  },
+  {
+    "songId": 363,
+    "title": "Oldale Town"
+  },
+  {
+    "songId": 400,
+    "title": "Pokémon Center"
+  },
+  {
+    "songId": 368,
+    "title": "Pokémon Healed"
+  },
+  {
+    "songId": 380,
+    "title": "Trainers' Eyes Meet (Youngster)"
+  },
+  {
+    "songId": 379,
+    "title": "Trainers' Eyes Meet (Lass)"
+  },
+  {
+    "songId": 476,
+    "title": "Battle! (Trainer Battle)"
+  },
+  {
+    "songId": 412,
+    "title": "Victory! (Trainer Battle)"
+  },
+  {
+    "songId": 367,
+    "title": "Level Up!"
+  },
+  {
+    "songId": 362,
+    "title": "Petalburg City"
+  },
+  {
+    "songId": 420,
+    "title": "Hurry Along"
+  },
+  {
+    "songId": 401,
+    "title": "Route 104"
+  },
+  {
+    "songId": 366,
+    "title": "Petalburg Woods"
+  },
+  {
+    "songId": 441,
+    "title": "Team Magma Appears!"
+  },
+  {
+    "songId": 475,
+    "title": "Battle! (Team Aqua / Team Magma)"
+  },
+  {
+    "songId": 424,
+    "title": "Victory! (Team Aqua / Team Magma)"
+  },
+  {
+    "songId": 399,
+    "title": "Rustboro City"
+  },
+  {
+    "songId": 435,
+    "title": "Trainers' School"
+  },
+  {
+    "songId": 431,
+    "title": "Crossing the Sea"
+  },
+  {
+    "songId": 427,
+    "title": "Dewford Town"
+  },
+  {
+    "songId": 407,
+    "title": "Trainers' Eyes Meet (Tuber)"
+  },
+  {
+    "songId": 433,
+    "title": "Slateport City"
+  },
+  {
+    "songId": 375,
+    "title": "Oceanic Museum"
+  },
+  {
+    "songId": 360,
+    "title": "Route 110"
+  },
+  {
+    "songId": 403,
+    "title": "Cycling"
+  },
+  {
+    "songId": 426,
+    "title": "Game Corner"
+  },
+  {
+    "songId": 390,
+    "title": "Win"
+  },
+  {
+    "songId": 391,
+    "title": "Lose"
+  },
+  {
+    "songId": 392,
+    "title": "Reel Time"
+  },
+  {
+    "songId": 389,
+    "title": "Jackpot"
+  },
+  {
+    "songId": 398,
+    "title": "Verdanturf Town"
+  },
+  {
+    "songId": 418,
+    "title": "Route 113"
+  },
+  {
+    "songId": 449,
+    "title": "Twins"
+  },
+  {
+    "songId": 437,
+    "title": "Fallarbor Town"
+  },
+  {
+    "songId": 425,
+    "title": "Cable Car"
+  },
+  {
+    "songId": 406,
+    "title": "Mt. Chimney"
+  },
+  {
+    "songId": 451,
+    "title": "Trainers' Eyes Meet (Hiker)"
+  },
+  {
+    "songId": 409,
+    "title": "Route 111"
+  },
+  {
+    "songId": 364,
+    "title": "Pokémon Gym"
+  },
+  {
+    "songId": 477,
+    "title": "Battle! (Gym Leader)"
+  },
+  {
+    "songId": 354,
+    "title": "Victory! (Gym Leader)"
+  },
+  {
+    "songId": 369,
+    "title": "Obtained a Badge!"
+  },
+  {
+    "songId": 372,
+    "title": "Obtained a TM!"
+  },
+  {
+    "songId": 365,
+    "title": "Surf"
+  },
+  {
+    "songId": 402,
+    "title": "Route 119"
+  },
+  {
+    "songId": 382,
+    "title": "Fortree City"
+  },
+  {
+    "songId": 361,
+    "title": "Route 120"
+  },
+  {
+    "songId": 453,
+    "title": "Interviewers"
+  },
+  {
+    "songId": 428,
+    "title": "Safari Zone"
+  },
+  {
+    "songId": 397,
+    "title": "Trainers' Eyes Meet (Gentleman)"
+  },
+  {
+    "songId": 408,
+    "title": "Lilycove City"
+  },
+  {
+    "songId": 373,
+    "title": "Museum"
+  },
+  {
+    "songId": 378,
+    "title": "Move Deleted"
+  },
+  {
+    "songId": 421,
+    "title": "Brendan"
+  },
+  {
+    "songId": 481,
+    "title": "Battle! (Brendan / May)"
+  },
+  {
+    "songId": 377,
+    "title": "Evolution"
+  },
+  {
+    "songId": 371,
+    "title": "Congratulations! Your Pokémon Evolved!"
+  },
+  {
+    "songId": 404,
+    "title": "Poké Mart"
+  },
+  {
+    "songId": 432,
+    "title": "Mt. Pyre"
+  },
+  {
+    "songId": 423,
+    "title": "Trainers' Eyes Meet (Psychic)"
+  },
+  {
+    "songId": 416,
+    "title": "Trainers' Eyes Meet (Hex Maniac)"
+  },
+  {
+    "songId": 434,
+    "title": "Mt. Pyre Exterior"
+  },
+  {
+    "songId": 430,
+    "title": "Hideout"
+  },
+  {
+    "songId": 370,
+    "title": "Obtained an Item!"
+  },
+  {
+    "songId": 419,
+    "title": "Team Aqua Appears!"
+  },
+  {
+    "songId": 483,
+    "title": "Battle! (Team Aqua / Team Magma Leaders)"
+  },
+  {
+    "songId": 388,
+    "title": "The Super-Ancient Pokémon Awaken!"
+  },
+  {
+    "songId": 444,
+    "title": "Drought"
+  },
+  {
+    "songId": 443,
+    "title": "Heavy Rain"
+  },
+  {
+    "songId": 411,
+    "title": "Dive"
+  },
+  {
+    "songId": 445,
+    "title": "Sootopolis City"
+  },
+  {
+    "songId": 386,
+    "title": "Cave of Origin"
+  },
+  {
+    "songId": 480,
+    "title": "Battle! (Super-Ancient Pokémon)"
+  },
+  {
+    "songId": 385,
+    "title": "Trainers' Eyes Meet (Swimmer)"
+  },
+  {
+    "songId": 422,
+    "title": "Ever Grande City"
+  },
+  {
+    "songId": 387,
+    "title": "Obtained a Berry!"
+  },
+  {
+    "songId": 452,
+    "title": "Contest Lobby"
+  },
+  {
+    "songId": 440,
+    "title": "Pokémon Contest!"
+  },
+  {
+    "songId": 446,
+    "title": "Results Announcement"
+  },
+  {
+    "songId": 439,
+    "title": "Contest Winner"
+  },
+  {
+    "songId": 438,
+    "title": "Sealed Chamber"
+  },
+  {
+    "songId": 479,
+    "title": "Battle! (Regirock / Regice / Registeel)"
+  },
+  {
+    "songId": 448,
+    "title": "The Trick House"
+  },
+  {
+    "songId": 381,
+    "title": "Abandoned Ship"
+  },
+  {
+    "songId": 384,
+    "title": "Battle Tower (Ruby & Sapphire)"
+  },
+  {
+    "songId": 429,
+    "title": "Victory Road"
+  },
+  {
+    "songId": 417,
+    "title": "Trainers' Eyes Meet (Cooltrainer)"
+  },
+  {
+    "songId": 450,
+    "title": "The Elite Four Appear!"
+  },
+  {
+    "songId": 482,
+    "title": "Battle! (Elite Four)"
+  },
+  {
+    "songId": 454,
+    "title": "Champion Steven"
+  },
+  {
+    "songId": 478,
+    "title": "Battle! (Steven)"
+  },
+  {
+    "songId": 355,
+    "title": "Victory! (Steven)"
+  },
+  {
+    "songId": 447,
+    "title": "Room of Glory"
+  },
+  {
+    "songId": 436,
+    "title": "The Hall of Fame"
+  },
+  {
+    "songId": 455,
+    "title": "Ending Theme"
+  },
+  {
+    "songId": 456,
+    "title": "The End"
+  },
+  {
+    "songId": 350,
+    "title": "Littleroot Town (Test Version)"
+  },
+  {
+    "songId": 351,
+    "title": "Route 38 (Gold & Silver)"
+  },
+  {
+    "songId": 352,
+    "title": "Pokémon Caught!"
+  },
+  {
+    "songId": 356,
+    "title": "Pokémon Communication Center (Crystal)"
+  },
+  {
+    "songId": 357,
+    "title": "Pewter City (Gold & Silver)"
+  },
+  {
+    "songId": 358,
+    "title": "Battle! (Legendary Beast) (Crystal)"
+  },
+  {
+    "songId": 374,
+    "title": "Route 122"
+  },
+  {
+    "songId": 376,
+    "title": "Evolution (Intro)"
+  },
+  {
+    "songId": 393,
+    "title": "Pokémon Contest! (Link, Movement 1)"
+  },
+  {
+    "songId": 394,
+    "title": "Pokémon Contest! (Link, Movement 2)"
+  },
+  {
+    "songId": 395,
+    "title": "Pokémon Contest! (Link, Movement 3)"
+  },
+  {
+    "songId": 396,
+    "title": "Pokémon Contest! (Link, Movement 4)"
+  },
+  {
+    "songId": 457,
+    "title": "Battle Frontier"
+  },
+  {
+    "songId": 458,
+    "title": "Battle Arena"
+  },
+  {
+    "songId": 459,
+    "title": "Obtained Battle Points!"
+  },
+  {
+    "songId": 460,
+    "title": "Match Call Registered"
+  },
+  {
+    "songId": 461,
+    "title": "Battle Pyramid"
+  },
+  {
+    "songId": 462,
+    "title": "Battle Pyramid (Summit)"
+  },
+  {
+    "songId": 463,
+    "title": "Battle Palace"
+  },
+  {
+    "songId": 464,
+    "title": "Rayquaza Appears"
+  },
+  {
+    "songId": 465,
+    "title": "Battle Tower"
+  },
+  {
+    "songId": 466,
+    "title": "Obtained a Symbol!"
+  },
+  {
+    "songId": 467,
+    "title": "Battle Dome"
+  },
+  {
+    "songId": 468,
+    "title": "Battle Pike"
+  },
+  {
+    "songId": 469,
+    "title": "Battle Factory"
+  },
+  {
+    "songId": 470,
+    "title": "Battle! (Rayquaza)"
+  },
+  {
+    "songId": 471,
+    "title": "Battle! (Frontier Brain)"
+  },
+  {
+    "songId": 472,
+    "title": "Battle! (Mew)"
+  },
+  {
+    "songId": 473,
+    "title": "Battle Dome Lobby"
+  },
+  {
+    "songId": 484,
+    "title": "Follow Me (FireRed & LeafGreen)"
+  },
+  {
+    "songId": 485,
+    "title": "Game Corner (Kanto)"
+  },
+  {
+    "songId": 486,
+    "title": "Team Rocket Hideout"
+  },
+  {
+    "songId": 487,
+    "title": "Pokémon Gym (Kanto)"
+  },
+  {
+    "songId": 488,
+    "title": "Jigglypuff's Song"
+  },
+  {
+    "songId": 489,
+    "title": "Opening Movie (FireRed & LeafGreen)"
+  },
+  {
+    "songId": 490,
+    "title": "Title Screen (FireRed & LeafGreen)"
+  },
+  {
+    "songId": 491,
+    "title": "Cinnabar Island"
+  },
+  {
+    "songId": 492,
+    "title": "Lavender Town"
+  },
+  {
+    "songId": 493,
+    "title": "Pokémon Healed (Kanto)"
+  },
+  {
+    "songId": 494,
+    "title": "Cycling (Kanto)"
+  },
+  {
+    "songId": 495,
+    "title": "Trainers' Eyes Meet (Team Rocket)"
+  },
+  {
+    "songId": 496,
+    "title": "Trainers' Eyes Meet (Girl, Kanto)"
+  },
+  {
+    "songId": 497,
+    "title": "Trainers' Eyes Meet (Boy, Kanto)"
+  },
+  {
+    "songId": 498,
+    "title": "Hall of Fame (Kanto)"
+  },
+  {
+    "songId": 499,
+    "title": "Viridian Forest"
+  },
+  {
+    "songId": 500,
+    "title": "Mt. Moon"
+  },
+  {
+    "songId": 501,
+    "title": "Pokémon Mansion"
+  },
+  {
+    "songId": 502,
+    "title": "Ending Theme (FireRed & LeafGreen)"
+  },
+  {
+    "songId": 503,
+    "title": "Route 1 (Kanto)"
+  },
+  {
+    "songId": 504,
+    "title": "Route 24 (Kanto)"
+  },
+  {
+    "songId": 505,
+    "title": "Route 3 (Kanto)"
+  },
+  {
+    "songId": 506,
+    "title": "Route 11 (Kanto)"
+  },
+  {
+    "songId": 507,
+    "title": "Victory Road (Kanto)"
+  },
+  {
+    "songId": 508,
+    "title": "Battle! (Gym Leader, Kanto)"
+  },
+  {
+    "songId": 509,
+    "title": "Battle! (Trainer, Kanto)"
+  },
+  {
+    "songId": 510,
+    "title": "Battle! (Wild Pokémon, Kanto)"
+  },
+  {
+    "songId": 511,
+    "title": "Battle! (Champion, Kanto)"
+  },
+  {
+    "songId": 512,
+    "title": "Pallet Town"
+  },
+  {
+    "songId": 513,
+    "title": "Oak Pokémon Lab"
+  },
+  {
+    "songId": 514,
+    "title": "Professor Oak"
+  },
+  {
+    "songId": 515,
+    "title": "Pokémon Center (Kanto)"
+  },
+  {
+    "songId": 516,
+    "title": "S.S. Anne"
+  },
+  {
+    "songId": 517,
+    "title": "Surf (Kanto)"
+  },
+  {
+    "songId": 518,
+    "title": "Pokémon Tower"
+  },
+  {
+    "songId": 519,
+    "title": "Silph Co."
+  },
+  {
+    "songId": 520,
+    "title": "Fuchsia City"
+  },
+  {
+    "songId": 521,
+    "title": "Celadon City"
+  },
+  {
+    "songId": 522,
+    "title": "Victory! (Trainer, Kanto)"
+  },
+  {
+    "songId": 523,
+    "title": "Victory! (Wild Pokémon, Kanto)"
+  },
+  {
+    "songId": 524,
+    "title": "Victory! (Gym Leader, Kanto)"
+  },
+  {
+    "songId": 525,
+    "title": "Vermilion City"
+  },
+  {
+    "songId": 526,
+    "title": "Pewter City"
+  },
+  {
+    "songId": 527,
+    "title": "Trainers' Eyes Meet (Rival)"
+  },
+  {
+    "songId": 528,
+    "title": "Rival's Departure"
+  },
+  {
+    "songId": 529,
+    "title": "Pokédex Evaluation"
+  },
+  {
+    "songId": 530,
+    "title": "Obtained a Key Item!"
+  },
+  {
+    "songId": 531,
+    "title": "Pokémon Caught! (Intro, Kanto)"
+  },
+  {
+    "songId": 532,
+    "title": "Photo"
+  },
+  {
+    "songId": 533,
+    "title": "Game Freak"
+  },
+  {
+    "songId": 534,
+    "title": "Pokémon Caught! (Kanto)"
+  },
+  {
+    "songId": 535,
+    "title": "New Game (Instructions)"
+  },
+  {
+    "songId": 536,
+    "title": "New Game (Intro)"
+  },
+  {
+    "songId": 537,
+    "title": "New Game (Exit)"
+  },
+  {
+    "songId": 538,
+    "title": "Pokémon Jump"
+  },
+  {
+    "songId": 539,
+    "title": "Union Room"
+  },
+  {
+    "songId": 540,
+    "title": "Pokémon Network Center"
+  },
+  {
+    "songId": 541,
+    "title": "Mystery Gift"
+  },
+  {
+    "songId": 542,
+    "title": "Berry Picking"
+  },
+  {
+    "songId": 543,
+    "title": "Sevii Islands (Cave)"
+  },
+  {
+    "songId": 544,
+    "title": "Teachy TV"
+  },
+  {
+    "songId": 545,
+    "title": "Sevii Islands (Route)"
+  },
+  {
+    "songId": 546,
+    "title": "Sevii Islands (Dungeon)"
+  },
+  {
+    "songId": 547,
+    "title": "Sevii Islands (1-3)"
+  },
+  {
+    "songId": 548,
+    "title": "Sevii Islands (4-5)"
+  },
+  {
+    "songId": 549,
+    "title": "Sevii Islands (6-7)"
+  },
+  {
+    "songId": 550,
+    "title": "Poké Flute"
+  },
+  {
+    "songId": 551,
+    "title": "Battle! (Deoxys)"
+  },
+  {
+    "songId": 552,
+    "title": "Battle! (Mewtwo)"
+  },
+  {
+    "songId": 553,
+    "title": "Battle! (Legendary Pokémon, Kanto)"
+  },
+  {
+    "songId": 554,
+    "title": "Trainers' Eyes Meet (Gym Leader, Kanto)"
+  },
+  {
+    "songId": 555,
+    "title": "Deoxys Appears"
+  },
+  {
+    "songId": 556,
+    "title": "Trainer Tower"
+  },
+  {
+    "songId": 557,
+    "title": "Pallet Town (Slow)"
+  },
+  {
+    "songId": 558,
+    "title": "Teachy TV (Menu)"
+  }
+]
