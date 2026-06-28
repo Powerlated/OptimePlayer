@@ -1,10 +1,7 @@
 //! The user's persistent library — playlists, liked songs, play history — plus the
 //! serializable bundle of everything saved to eframe storage between sessions.
 
-pub use optime_core::{
-    HighShelf, InstrumentResampleChoice, InstrumentResampleSettings, MixerResampleSettings,
-    PerDeviceSettings,
-};
+pub use optime_core::{InstrumentResampleChoice, PerDeviceSettings};
 
 /// What happens when the current song ends (Spotify-style repeat cycle).
 #[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -155,80 +152,10 @@ impl Default for Persisted {
             sort_mode: SortMode::Default,
             sort_descending: false,
 
-            nds: PerDeviceSettings {
-                stereo_separation: true,
-                force_stereo_separation: false,
-                smooth_pan: true,
-                delay_smoothing_choice: 1,
-                bass_mono: true,
-                bass_mono_freq: 200.0,
-                tuning_choice: 0,
-                pure_tonic: 0,
-                instrument_resample: InstrumentResampleSettings {
-                    choice: InstrumentResampleChoice::SincOutputNyquist,
-                    sinc_taps: 32,
-                    psg_cutoff_hz: 15_000,
-                    sampler_cutoff_hz: 15_000,
-                    smooth_psg_pops: false,
-                    smooth_sample_pops: false,
-                    pop_slew_ms: 2.0,
-                },
-                use_mixer: true,
-                mixer_sample_rate: 32768,
-                psg_crunch_compensation: true,
-                remove_sample_dc_offset: false,
-                mixer_resample: MixerResampleSettings {
-                    choice: InstrumentResampleChoice::SincSampleNyquist,
-                    sinc_taps: 32,
-                    cutoff_hz: 15_000,
-                },
-                shelf: HighShelf {
-                    enabled: true,
-                    order: 2,
-                    q: 0.5,
-                    cutoff_hz: 12700.0,
-                    gain_db: -10.0,
-                },
-                // Runtime-only (the app injects the live piano-roll mutes each frame); start
-                // with every track audible.
-                track_enables: [true; optime_core::TRACK_COUNT],
-            },
-            gba: PerDeviceSettings {
-                stereo_separation: true,
-                force_stereo_separation: false,
-                smooth_pan: true,
-                delay_smoothing_choice: 1,
-                bass_mono: true,
-                bass_mono_freq: 200.0,
-                tuning_choice: 0,
-                pure_tonic: 0,
-                instrument_resample: InstrumentResampleSettings {
-                    choice: InstrumentResampleChoice::SincSampleNyquist,
-                    sinc_taps: 32,
-                    psg_cutoff_hz: 15_000,
-                    sampler_cutoff_hz: 15_000,
-                    smooth_psg_pops: true,
-                    smooth_sample_pops: true,
-                    pop_slew_ms: 2.0,
-                },
-                use_mixer: true,
-                mixer_sample_rate: 13379,
-                psg_crunch_compensation: true,
-                remove_sample_dc_offset: false,
-                mixer_resample: MixerResampleSettings {
-                    choice: InstrumentResampleChoice::SincOutputNyquist,
-                    sinc_taps: 32,
-                    cutoff_hz: 15_000,
-                },
-                shelf: HighShelf {
-                    enabled: true,
-                    order: 2,
-                    q: 0.5,
-                    cutoff_hz: 12700.0,
-                    gain_db: -20.0,
-                },
-                track_enables: [true; optime_core::TRACK_COUNT],
-            },
+            // The high-quality presets are owned by the engine (so offline tools share them); the
+            // app's runtime-only piano-roll track mutes are injected per frame over these.
+            nds: PerDeviceSettings::high_quality_nintendo_ds(),
+            gba: PerDeviceSettings::high_quality_gba(),
         }
     }
 }

@@ -16,6 +16,9 @@ dist/
 *.zip
 *.mp3
 
+# Offline album exports (the `export_album_flac` example output); large, never committed.
+*.flac
+
 # Local-only "extras" (see crates/optime-app/build.rs): a personal checkout's ROM-hack
 # metadata + demo and the maintainer dev-scripts that generate it. Never committed.
 /crates/optime-app/local_extras.txt

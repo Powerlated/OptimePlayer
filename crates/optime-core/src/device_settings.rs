@@ -242,4 +242,89 @@ impl PerDeviceSettings {
             track_enables: all_tracks_enabled(),
         }
     }
+
+    /// The high-quality Nintendo DS preset: the app's out-of-the-box DS settings (mixer on at
+    /// 32768 Hz, crunchy output-Nyquist sinc voices, clean sinc mixer upsample, stereo separation
+    /// and the high-shelf de-harsher). Shared by `Persisted::default` (the app) and offline tools.
+    pub fn high_quality_nintendo_ds() -> Self {
+        Self {
+            stereo_separation: true,
+            force_stereo_separation: false,
+            smooth_pan: true,
+            delay_smoothing_choice: 1,
+            bass_mono: true,
+            bass_mono_freq: 200.0,
+            tuning_choice: 0,
+            pure_tonic: 0,
+            instrument_resample: InstrumentResampleSettings {
+                choice: InstrumentResampleChoice::SincOutputNyquist,
+                sinc_taps: 32,
+                psg_cutoff_hz: 15_000,
+                sampler_cutoff_hz: 15_000,
+                smooth_psg_pops: false,
+                smooth_sample_pops: false,
+                pop_slew_ms: 2.0,
+            },
+            use_mixer: true,
+            mixer_sample_rate: 32768,
+            psg_crunch_compensation: true,
+            remove_sample_dc_offset: false,
+            mixer_resample: MixerResampleSettings {
+                choice: InstrumentResampleChoice::SincSampleNyquist,
+                sinc_taps: 32,
+                cutoff_hz: 15_000,
+            },
+            shelf: HighShelf {
+                enabled: true,
+                order: 2,
+                q: 0.5,
+                cutoff_hz: 12700.0,
+                gain_db: -10.0,
+            },
+            track_enables: all_tracks_enabled(),
+        }
+    }
+
+    /// The high-quality Game Boy Advance preset: the app's out-of-the-box GBA settings (mixer on at
+    /// the GBA-native 13379 Hz with crunchy output-Nyquist mixer upsample, clean sinc voices with
+    /// pop-smoothing, stereo separation and a deeper high-shelf). Shared by `Persisted::default`
+    /// (the app) and offline tools.
+    pub fn high_quality_gba() -> Self {
+        Self {
+            stereo_separation: true,
+            force_stereo_separation: false,
+            smooth_pan: true,
+            delay_smoothing_choice: 1,
+            bass_mono: true,
+            bass_mono_freq: 200.0,
+            tuning_choice: 0,
+            pure_tonic: 0,
+            instrument_resample: InstrumentResampleSettings {
+                choice: InstrumentResampleChoice::SincSampleNyquist,
+                sinc_taps: 32,
+                psg_cutoff_hz: 15_000,
+                sampler_cutoff_hz: 15_000,
+                smooth_psg_pops: true,
+                smooth_sample_pops: true,
+                pop_slew_ms: 2.0,
+            },
+            use_mixer: true,
+            mixer_sample_rate: 13379,
+            psg_crunch_compensation: true,
+            remove_sample_dc_offset: false,
+            mixer_resample: MixerResampleSettings {
+                choice: InstrumentResampleChoice::SincOutputNyquist,
+                sinc_taps: 32,
+                cutoff_hz: 15_000,
+            },
+            shelf: HighShelf {
+                enabled: true,
+                order: 2,
+                q: 0.5,
+                cutoff_hz: 12700.0,
+                gain_db: -20.0,
+            },
+            track_enables: all_tracks_enabled(),
+        }
+    }
 }
