@@ -183,6 +183,184 @@ impl Bank {
     }
 }
 
+/// How a bound song loops and when it fades out — the single home for the end-of-song fade
+/// policy that every renderer (live playback and the offline exporters) shares.
+///
+/// The consumer hands this to [`SynthController::set_loop_and_transition`]; the controller then
+/// counts sequence loops, begins the linear fade-out when the policy says so, applies the fade
+/// gain to its own output, and pumps [`PlaybackEvent`]s the consumer drains with
+/// [`SynthController::take_messages`]. The default ([`LoopAndTransitionOptions::none`]) never
+/// fades, so a controller that is just rendered (visualizers, tests) is unaffected.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoopAndTransitionOptions {
+    /// Begin the end-of-song fade after the sequence has looped this many times (`None` = never).
+    pub loops_before_fade: Option<u32>,
+    /// Also begin the fade when the sequence signals it has ended (a `FINE`/end-of-song event).
+    pub fade_on_end: bool,
+    /// Hold full gain this long (seconds) after the fade is triggered before the ramp starts.
+    pub grace_seconds: f64,
+    /// Linear fade-out duration in seconds.
+    pub fade_seconds: f64,
+}
+
+impl LoopAndTransitionOptions {
+    /// No auto-fade: full gain forever (the controller's default).
+    pub const fn none() -> Self {
+        Self {
+            loops_before_fade: None,
+            fade_on_end: false,
+            grace_seconds: 0.0,
+            fade_seconds: 0.0,
+        }
+    }
+
+    /// The offline-export policy: two loops, a 2 s grace, then a 10 s fade.
+    pub const fn export() -> Self {
+        Self {
+            loops_before_fade: Some(2),
+            fade_on_end: true,
+            grace_seconds: 2.0,
+            fade_seconds: 10.0,
+        }
+    }
+
+    /// The live-playback policy: two loops (or end), no grace, a 3 s fade.
+    pub const fn live() -> Self {
+        Self {
+            loops_before_fade: Some(2),
+            fade_on_end: true,
+            grace_seconds: 0.0,
+            fade_seconds: 3.0,
+        }
+    }
+}
+
+impl Default for LoopAndTransitionOptions {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+/// High-level playback events the controller pumps to its consumer (drained via
+/// [`SynthController::take_messages`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlaybackEvent {
+    /// The sequence completed a loop.
+    Looped,
+    /// The end-of-song fade-out began (auto-triggered by the policy, or requested).
+    TransitionStarted,
+    /// The fade-out reached silence; the song is finished and the consumer should advance/stop.
+    Finished,
+}
+
+/// Owns the loop-count → fade-out policy and the per-output-sample fade gain. Built from
+/// [`LoopAndTransitionOptions`] and advanced one output sample at a time inside the render path,
+/// so the linear ramp lives in exactly one place.
+struct Transition {
+    opts: LoopAndTransitionOptions,
+    sample_rate: f64,
+    loops_seen: u32,
+    /// `None` until the fade is triggered; then counts output samples since the trigger.
+    elapsed: Option<u64>,
+    /// Output samples of full-gain grace before the ramp starts.
+    grace_samples: u64,
+    /// Fade-out duration in seconds (the ramp denominator; matches the legacy `FADEOUT_LENGTH`).
+    fade_seconds: f64,
+    /// Latched once the gain has reached zero (so `Finished` is emitted exactly once).
+    finished: bool,
+}
+
+impl Transition {
+    fn new(sample_rate: f64, opts: LoopAndTransitionOptions) -> Self {
+        Self {
+            opts,
+            sample_rate,
+            loops_seen: 0,
+            elapsed: None,
+            grace_samples: (sample_rate * opts.grace_seconds) as u64,
+            fade_seconds: opts.fade_seconds,
+            finished: false,
+        }
+    }
+
+    /// Re-arms the policy from scratch (no fade in progress, loop count reset).
+    fn set_opts(&mut self, opts: LoopAndTransitionOptions) {
+        *self = Self::new(self.sample_rate, opts);
+    }
+
+    /// Begins the configured fade now (idempotent: a fade already in progress is left alone).
+    fn trip(&mut self, messages: &mut Vec<PlaybackEvent>) {
+        if self.elapsed.is_none() {
+            self.elapsed = Some(0);
+            messages.push(PlaybackEvent::TransitionStarted);
+        }
+    }
+
+    /// Begins an immediate fade of `fade_seconds` (no grace), overriding any in-progress fade with
+    /// the new ramp — the live path's quick fade before a manual song switch.
+    fn request(&mut self, fade_seconds: f64, messages: &mut Vec<PlaybackEvent>) {
+        self.grace_samples = 0;
+        self.fade_seconds = fade_seconds;
+        self.elapsed = Some(0);
+        self.finished = false;
+        messages.push(PlaybackEvent::TransitionStarted);
+    }
+
+    /// A sequence loop occurred: count it, pump `Looped`, and trip the fade if the policy is met.
+    fn on_loop(&mut self, messages: &mut Vec<PlaybackEvent>) {
+        self.loops_seen += 1;
+        messages.push(PlaybackEvent::Looped);
+        if let Some(n) = self.opts.loops_before_fade {
+            if self.loops_seen >= n {
+                self.trip(messages);
+            }
+        }
+    }
+
+    /// The sequence signalled its end: trip the fade if the policy fades on end.
+    fn on_end(&mut self, messages: &mut Vec<PlaybackEvent>) {
+        if self.opts.fade_on_end {
+            self.trip(messages);
+        }
+    }
+
+    /// The fade gain for the current output sample (1.0 until triggered / during grace).
+    fn gain(&self) -> f32 {
+        match self.elapsed {
+            None => 1.0,
+            Some(n) => {
+                if n < self.grace_samples {
+                    1.0
+                } else {
+                    // Bit-for-bit the legacy ramp: `1 - (k/sr)/fade_seconds` in f64, then to f32.
+                    let k = (n - self.grace_samples) as f64;
+                    (1.0 - (k / self.sample_rate) / self.fade_seconds) as f32
+                }
+            }
+        }
+    }
+
+    /// Returns the gain for this output sample and advances by one, emitting `Finished` the first
+    /// time the ramp reaches silence (then holding at zero).
+    fn advance(&mut self, messages: &mut Vec<PlaybackEvent>) -> f32 {
+        match self.elapsed {
+            None => 1.0,
+            Some(n) => {
+                let g = self.gain();
+                if g <= 0.0 {
+                    if !self.finished {
+                        self.finished = true;
+                        messages.push(PlaybackEvent::Finished);
+                    }
+                    return 0.0;
+                }
+                self.elapsed = Some(n + 1);
+                g
+            }
+        }
+    }
+}
+
 /// The synthesis runtime: voice pools + master clock, driven by a device player.
 pub struct SynthController {
     sample_rate: f64,
@@ -198,10 +376,10 @@ pub struct SynthController {
     bank: Bank,
     /// `notes_on[track][note]` is 1 while a sequence note sounds (drives the visualizer).
     pub notes_on: Vec<[u8; 128]>,
-    /// Count of sequence loops seen (used by callers to detect loop points).
-    pub jumps: u32,
-    /// Set when the song has ended and should fade out.
-    pub fading_start: bool,
+    /// The loop-count → fade-out policy and the per-sample fade gain it applies to the output.
+    transition: Transition,
+    /// High-level [`PlaybackEvent`]s pumped to the consumer (drained by [`Self::take_messages`]).
+    messages: Vec<PlaybackEvent>,
     /// Synth-side voice endings reported back to the device on the next tick.
     feedback: TickFeedback,
     /// Reusable event buffer.
@@ -236,8 +414,8 @@ impl SynthController {
             mixer_slot_owner,
             bank: Bank::new(mixer_rate),
             notes_on: vec![[0u8; 128]; TRACK_COUNT],
-            jumps: 0,
-            fading_start: false,
+            transition: Transition::new(sample_rate, LoopAndTransitionOptions::none()),
+            messages: Vec::new(),
             feedback: TickFeedback::default(),
             events: Vec::new(),
             timer: 0.0,
@@ -316,6 +494,29 @@ impl SynthController {
             synths.iter().map(|s| s.active_voice_count()).sum()
         };
         count(&self.synths) + count(&self.mixer_synths)
+    }
+
+    /// Sets the loop-count → fade-out policy (re-arming it from scratch: no fade in progress, loop
+    /// count reset). See [`LoopAndTransitionOptions`].
+    pub fn set_loop_and_transition(&mut self, opts: LoopAndTransitionOptions) {
+        self.transition.set_opts(opts);
+    }
+
+    /// Begins an immediate fade-out of `fade_seconds` (no grace), overriding any in-progress fade —
+    /// the live path's quick fade before a manual song switch. Emits [`PlaybackEvent::Finished`]
+    /// once the gain reaches silence, like an auto-triggered fade.
+    pub fn request_transition(&mut self, fade_seconds: f64) {
+        self.transition.request(fade_seconds, &mut self.messages);
+    }
+
+    /// Drains the [`PlaybackEvent`]s pumped since the last call (loops / transition start / finish).
+    pub fn take_messages(&mut self) -> std::vec::Drain<'_, PlaybackEvent> {
+        self.messages.drain(..)
+    }
+
+    /// The current end-of-song fade gain (1.0 until the fade is triggered / during its grace).
+    pub fn fade_gain(&self) -> f32 {
+        self.transition.gain()
     }
 
     /// Changes the output sample rate at any time, re-targeting every voice and filter. A no-op
@@ -408,7 +609,9 @@ impl SynthController {
             val_r += mr;
         }
         let (val_l, val_r) = self.master_filter(val_l, val_r, config);
-        (val_l as f32, val_r as f32)
+        // The end-of-song fade is applied here, once per output sample, so it lives in one place.
+        let g = self.transition.advance(&mut self.messages);
+        (val_l as f32 * g, val_r as f32 * g)
     }
 
     /// Fills `out` with interleaved stereo (L, R, L, R, …) samples.
@@ -459,8 +662,10 @@ impl SynthController {
                     r += mr;
                 }
                 let (l, r) = self.master_filter(l, r, config);
-                frame_out[0] = l as f32;
-                frame_out[1] = r as f32;
+                // Per-sample fade gain (see `next_sample`), keeping the block path bit-identical.
+                let g = self.transition.advance(&mut self.messages);
+                frame_out[0] = l as f32 * g;
+                frame_out[1] = r as f32 * g;
             }
             frame += n;
         }
@@ -626,8 +831,85 @@ impl SynthController {
                 self.synths[track].set_finetune(semitones, config.tuning());
                 self.mixer_synths[track].set_finetune(semitones, config.tuning());
             }
-            SynthEvent::Looped => self.jumps += 1,
-            SynthEvent::Ended => self.fading_start = true,
+            SynthEvent::Looped => self.transition.on_loop(&mut self.messages),
+            SynthEvent::Ended => self.transition.on_end(&mut self.messages),
+        }
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::*;
+
+    const SR: f64 = 32_768.0;
+
+    /// The shared fade ramp reproduces the legacy `1 - (k/sr)/fade` shape, with a full-gain grace
+    /// before it, and emits `Finished` exactly once when it reaches silence.
+    #[test]
+    fn export_ramp_matches_legacy_math() {
+        let opts = LoopAndTransitionOptions::export();
+        let mut t = Transition::new(SR, opts);
+        let mut msgs = Vec::new();
+
+        // Two loops trip the fade: `Looped`, `Looped`, then `TransitionStarted`.
+        t.on_loop(&mut msgs);
+        t.on_loop(&mut msgs);
+        assert_eq!(
+            msgs,
+            [
+                PlaybackEvent::Looped,
+                PlaybackEvent::Looped,
+                PlaybackEvent::TransitionStarted
+            ]
+        );
+        msgs.clear();
+
+        let grace = (SR * opts.grace_seconds) as u64; // 65_536
+        let fade = (SR * opts.fade_seconds) as u64; // 327_680
+        let mut finished_at = None;
+        for n in 0..(grace + fade + 4) {
+            let g = t.advance(&mut msgs);
+            let expected = if n < grace {
+                1.0f32
+            } else {
+                (1.0 - ((n - grace) as f64 / SR) / opts.fade_seconds) as f32
+            };
+            if g <= 0.0 {
+                finished_at.get_or_insert(n);
+            } else {
+                assert_eq!(g, expected, "gain mismatch at sample {n}");
+            }
+        }
+        assert_eq!(finished_at, Some(grace + fade), "fade ends at grace+fade");
+        assert_eq!(
+            msgs,
+            [PlaybackEvent::Finished],
+            "exactly one Finished is pumped"
+        );
+    }
+
+    /// A requested transition fades immediately (no grace) over its own duration.
+    #[test]
+    fn requested_transition_has_no_grace() {
+        let mut t = Transition::new(SR, LoopAndTransitionOptions::none());
+        let mut msgs = Vec::new();
+        t.request(0.040, &mut msgs);
+        assert_eq!(msgs, [PlaybackEvent::TransitionStarted]);
+        // First sample is still full gain; it falls immediately after.
+        assert_eq!(t.advance(&mut Vec::new()), 1.0);
+        assert!(t.advance(&mut Vec::new()) < 1.0);
+    }
+
+    /// The default policy never fades, so a plain render is unaffected.
+    #[test]
+    fn none_policy_never_fades() {
+        let mut t = Transition::new(SR, LoopAndTransitionOptions::none());
+        let mut msgs = Vec::new();
+        t.on_loop(&mut msgs);
+        t.on_end(&mut msgs);
+        assert_eq!(msgs, [PlaybackEvent::Looped]); // Looped reported, but no transition
+        for _ in 0..1000 {
+            assert_eq!(t.advance(&mut Vec::new()), 1.0);
         }
     }
 }

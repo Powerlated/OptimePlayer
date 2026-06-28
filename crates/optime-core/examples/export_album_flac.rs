@@ -27,7 +27,9 @@ use clap::Parser;
 use ebur128::{EbuR128, Mode};
 use flac_codec::encode::{FlacSampleWriter, Options};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use optime_core::{PerDeviceSettings, SoundData, SynthController};
+use optime_core::{
+    LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, SynthController,
+};
 use rayon::prelude::*;
 use serde_json::Value;
 
@@ -37,7 +39,9 @@ const TARGET_LUFS: f64 = -16.0;
 const SILENCE_I16: i16 = 16;
 
 #[derive(Parser)]
-#[command(about = "Render an archive's songs into one -16 LUFS stereo FLAC, in song-name JSON order.")]
+#[command(
+    about = "Render an archive's songs into one -16 LUFS stereo FLAC, in song-name JSON order."
+)]
 struct Args {
     /// Decompressed sound archive (DS SDAT, DSE, or GBA `.gbaaudio`).
     archive: PathBuf,
@@ -54,54 +58,36 @@ struct Args {
     limit: Option<usize>,
 }
 
-/// Renders one song to stereo frames: two loops then a 10-second fade, capped at 480s. Mirrors the
-/// app's `render_to_samples` (including its 0.5 headroom gain).
+/// Renders one song to stereo frames using the shared controller fade policy (two loops then a
+/// 10-second fade, capped at 480s), applying the same 0.5 headroom gain as the app's WAV export.
 fn render_song(data: &SoundData, song_id: u32, config: &PerDeviceSettings) -> Vec<(f32, f32)> {
-    const FADEOUT_LENGTH: f64 = 10.0;
-    const LOOP_COUNT: u32 = 2;
     let sr = f64::from(SR);
     let Some(mut controller) = SynthController::new(sr, data, song_id) else {
         return Vec::new();
     };
+    controller.set_loop_and_transition(LoopAndTransitionOptions::export());
     let max_samples = (sr * 480.0) as u64;
     const CHUNK_FRAMES: usize = 512;
     let mut buf = vec![0.0f32; 2 * CHUNK_FRAMES];
 
     let mut out = Vec::new();
     let mut sample: u64 = 0;
-    let mut loop_count = 0u32;
-    let mut fading_out = false;
-    let mut fadeout_start_sample = 0u64;
-
-    'render: while sample < max_samples {
+    while sample < max_samples {
         let n = CHUNK_FRAMES.min((max_samples - sample) as usize);
         let chunk = &mut buf[..2 * n];
         controller.fill(chunk, config);
 
-        if controller.jumps > 0 {
-            controller.jumps = 0;
-            loop_count += 1;
-            if loop_count == LOOP_COUNT {
-                controller.fading_start = true;
-            }
-        }
-        if controller.fading_start {
-            controller.fading_start = false;
-            fading_out = true;
-            fadeout_start_sample = sample + (sr * 2.0) as u64;
-        }
-
+        // The controller has already applied the fade gain; just add the export headroom.
         for frame in chunk.chunks_exact(2) {
-            let mut mul = 1.0f32;
-            if fading_out && sample >= fadeout_start_sample {
-                let t = (sample - fadeout_start_sample) as f64 / sr;
-                mul = (1.0 - t / FADEOUT_LENGTH) as f32;
-                if mul <= 0.0 {
-                    break 'render;
-                }
-            }
-            out.push((frame[0] * 0.5 * mul, frame[1] * 0.5 * mul));
+            out.push((frame[0] * 0.5, frame[1] * 0.5));
             sample += 1;
+        }
+        // The fade reached silence at the end of this chunk: the song is done.
+        if controller
+            .take_messages()
+            .any(|m| m == PlaybackEvent::Finished)
+        {
+            break;
         }
     }
     out
@@ -122,7 +108,8 @@ fn bytes_to_i16(raw: &[u8]) -> Vec<i16> {
 /// The interleaved-i16 sub-slice of one track with leading and trailing near-silent frames removed.
 fn trim_silence(samples: &[i16]) -> &[i16] {
     let frames = samples.len() / 2;
-    let silent = |f: usize| samples[2 * f].abs() <= SILENCE_I16 && samples[2 * f + 1].abs() <= SILENCE_I16;
+    let silent =
+        |f: usize| samples[2 * f].abs() <= SILENCE_I16 && samples[2 * f + 1].abs() <= SILENCE_I16;
     let first = (0..frames).find(|&f| !silent(f));
     let Some(first) = first else { return &[] };
     let last = (0..frames).rev().find(|&f| !silent(f)).unwrap();
@@ -140,7 +127,10 @@ fn main() -> ExitCode {
         }
     };
     let Some(data) = SoundData::load_all(&bytes).into_iter().next() else {
-        eprintln!("No songs found in '{}' (not an SDAT, DSE, or GBA image).", args.archive.display());
+        eprintln!(
+            "No songs found in '{}' (not an SDAT, DSE, or GBA image).",
+            args.archive.display()
+        );
         return ExitCode::FAILURE;
     };
 
@@ -179,7 +169,10 @@ fn main() -> ExitCode {
         .take(args.limit.unwrap_or(usize::MAX))
         .collect();
     if album.is_empty() {
-        eprintln!("No playable songs from '{}' are present in the archive.", args.names_json.display());
+        eprintln!(
+            "No playable songs from '{}' are present in the archive.",
+            args.names_json.display()
+        );
         return ExitCode::FAILURE;
     }
 
@@ -228,7 +221,9 @@ fn main() -> ExitCode {
             scope.spawn(move || {
                 loop {
                     let i = cursor.fetch_add(1, Ordering::Relaxed);
-                    let Some((id, title)) = album.get(i) else { break };
+                    let Some((id, title)) = album.get(i) else {
+                        break;
+                    };
                     pb.set_message(format!("songId {id:<5} \"{title}\""));
                     let frames = render_song(data, *id, config);
                     let mut bytes = Vec::with_capacity(frames.len() * 4);
@@ -279,8 +274,8 @@ fn main() -> ExitCode {
     let nonempty = states.len() as u64;
     let total_frames =
         states.iter().map(|(_, n)| n).sum::<u64>() + nonempty.saturating_sub(1) * gap_frames as u64;
-    let loudness =
-        EbuR128::loudness_global_multiple(states.iter().map(|(s, _)| s)).expect("integrated loudness");
+    let loudness = EbuR128::loudness_global_multiple(states.iter().map(|(s, _)| s))
+        .expect("integrated loudness");
     let gain_db = TARGET_LUFS - loudness;
     let gain = (10f64).powf(gain_db / 20.0) as f32;
 
@@ -288,7 +283,8 @@ fn main() -> ExitCode {
     // `rayon` feature compresses the channels in parallel internally, so the per-track feed loop
     // stays sequential while the heavy compression is multithreaded. ---
     let _ = fs::remove_file(&args.out); // FlacSampleWriter::create refuses to overwrite
-    let mut writer = match FlacSampleWriter::create(&args.out, Options::default(), SR, 16, 2, None) {
+    let mut writer = match FlacSampleWriter::create(&args.out, Options::default(), SR, 16, 2, None)
+    {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Failed to create '{}': {e}", args.out.display());

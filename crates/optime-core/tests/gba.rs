@@ -2,7 +2,9 @@
 //! single DirectSound note. Exercises ROM parsing (heuristic song-table scan), the sequencer,
 //! the player's channel/envelope model, and the shared synthesis path.
 
-use optime_core::{PerDeviceSettings, SoundData, SynthController};
+use optime_core::{
+    LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, SynthController,
+};
 
 /// GBA ROM-space base address.
 const ROM_BASE: u32 = 0x0800_0000;
@@ -108,6 +110,14 @@ fn renders_audio_and_ends() {
     let data = SoundData::load_all(&rom).remove(0);
     let sr = 32768.0;
     let mut controller = SynthController::new(sr, &data, 0).expect("song 0 should load");
+    // Fade out when the sequence signals its end, so the end-of-song detection is observable as a
+    // pumped `TransitionStarted` message.
+    controller.set_loop_and_transition(LoopAndTransitionOptions {
+        loops_before_fade: None,
+        fade_on_end: true,
+        grace_seconds: 0.0,
+        fade_seconds: 1.0,
+    });
     let config = PerDeviceSettings::neutral();
 
     // The note is 24 steps at 1 step/frame ≈ 0.4 s; render 2 s so the song finishes.
@@ -116,9 +126,10 @@ fn renders_audio_and_ends() {
 
     let peak = out.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
     assert!(peak > 0.01, "the note should be audible, peak={peak}");
+    let msgs: Vec<_> = controller.take_messages().collect();
     assert!(
-        controller.fading_start,
-        "the song should report its end after FINE"
+        msgs.contains(&PlaybackEvent::TransitionStarted),
+        "the song should report its end (a fade transition) after FINE: {msgs:?}"
     );
 }
 

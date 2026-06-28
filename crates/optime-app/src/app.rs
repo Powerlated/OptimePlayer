@@ -854,8 +854,7 @@ impl OptimeApp {
         if start_track.source != self.current_source {
             // The chosen source isn't loaded — fetch it (demo) and resume on arrival.
             self.pending_play = Some(start_track.clone());
-            if let Some((label, stem)) = all_demos().find(|(_, stem)| *stem == start_track.source)
-            {
+            if let Some((label, stem)) = all_demos().find(|(_, stem)| *stem == start_track.source) {
                 let (label, stem) = (*label, *stem);
                 self.request_demo(stem, label);
             } else {

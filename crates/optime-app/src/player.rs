@@ -4,7 +4,9 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use optime_core::{PerDeviceSettings, SoundData, SynthController};
+use optime_core::{
+    LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, SynthController,
+};
 
 use crate::persisted::{RepeatMode, TrackRef};
 
@@ -61,8 +63,6 @@ pub struct Playback {
     pub index: usize,
     /// Repeat mode; set by the UI on toggle / SetPlaylist.
     pub repeat: RepeatMode,
-    /// Loop counter for the auto-fade trigger (moved off the UI thread).
-    pub loop_count: u32,
     /// UI → audio one-shots, drained by the callback each buffer.
     pub commands: VecDeque<PlaybackCommand>,
     /// Index awaiting a decode (set by a command or a resolved auto-advance); the callback
@@ -123,11 +123,13 @@ pub struct AudioState {
     pub volume: f32,
     /// The callback's smoothed volume state.
     pub volume_smooth: f32,
-    /// Per-song gain: ramps up quickly after a new controller is installed (click-free song
-    /// switches) and down per `fade_step` for the end-of-song fade.
+    /// Per-song fade-*in* gain: ramps up quickly after a new controller is installed for click-free
+    /// song switches. The end-of-song / manual fade-*out* now lives in the controller's transition
+    /// policy (see [`optime_core::LoopAndTransitionOptions`]).
     pub fade_gain: f32,
-    /// Per-sample gain decrement while fading out (0.0 = not fading; the gain then rises to 1).
-    pub fade_step: f32,
+    /// Whether we've already requested the controller's quick manual fade for a pending transition
+    /// (so it's requested exactly once per song switch, not re-armed every callback).
+    pub manual_fade_active: bool,
     /// Pause ramp: eases toward 0 when paused and back to 1 on resume (no pause pops).
     pub pause_gain: f32,
     /// Device sample rate, for converting render time into DSP load.
@@ -153,7 +155,7 @@ impl AudioState {
             volume: 1.0,
             volume_smooth: 1.0,
             fade_gain: 1.0,
-            fade_step: 0.0,
+            manual_fade_active: false,
             pause_gain: 1.0,
             sample_rate: 48_000.0,
             dsp_load: 0.0,
@@ -176,64 +178,44 @@ pub fn new_shared() -> Shared {
 pub const EXPORT_SAMPLE_RATE: u32 = 32768;
 
 /// Renders a song to interleaved stereo samples offline, looping twice then fading out, exactly
-/// like the legacy `renderAndDownloadSeq`.
+/// like the legacy `renderAndDownloadSeq`. The loop counting and the fade ramp live in the shared
+/// [`SynthController`] fade policy ([`LoopAndTransitionOptions::export`]); this just applies the
+/// 0.5 export headroom and stops when the controller reports the song finished.
 pub fn render_to_samples(
     data: &SoundData,
     song_id: u32,
     config: &PerDeviceSettings,
 ) -> Vec<(f32, f32)> {
-    const FADEOUT_LENGTH: f64 = 10.0;
-    const LOOP_COUNT: u32 = 2;
     let sr = EXPORT_SAMPLE_RATE as f64;
 
     let Some(mut controller) = SynthController::new(sr, data, song_id) else {
         return Vec::new();
     };
+    controller.set_loop_and_transition(LoopAndTransitionOptions::export());
 
     let mut out = Vec::new();
     let mut sample: u64 = 0;
-    let mut loop_count = 0u32;
-    let mut fading_out = false;
-    let mut fadeout_start_sample = 0u64;
     let max_samples = (sr * 480.0) as u64;
 
-    // Render through the block path in device-buffer-sized chunks. The loop/fade flags only
-    // change on sequencer ticks, so checking them once per chunk shifts the fade start by at
-    // most one chunk — negligible against the two-second pre-fade grace below.
+    // Render through the block path in device-buffer-sized chunks.
     const CHUNK_FRAMES: usize = 512;
     let mut buf = vec![0.0f32; 2 * CHUNK_FRAMES];
 
-    'render: while sample < max_samples {
+    while sample < max_samples {
         let n = CHUNK_FRAMES.min((max_samples - sample) as usize);
         let chunk = &mut buf[..2 * n];
         controller.fill(chunk, config);
 
-        if controller.jumps > 0 {
-            controller.jumps = 0;
-            loop_count += 1;
-            if loop_count == LOOP_COUNT {
-                controller.fading_start = true;
-            }
-        }
-
-        if controller.fading_start {
-            controller.fading_start = false;
-            fading_out = true;
-            fadeout_start_sample = sample + (sr * 2.0) as u64;
-        }
-
+        // The controller has already applied the fade gain; just add the export headroom.
         for frame in chunk.chunks_exact(2) {
-            let mut fadeout_mul = 1.0f32;
-            if fading_out && sample >= fadeout_start_sample {
-                let fadeout_time = (sample - fadeout_start_sample) as f64 / sr;
-                let ratio = fadeout_time / FADEOUT_LENGTH;
-                fadeout_mul = (1.0 - ratio) as f32;
-                if fadeout_mul <= 0.0 {
-                    break 'render;
-                }
-            }
-            out.push((frame[0] * 0.5 * fadeout_mul, frame[1] * 0.5 * fadeout_mul));
+            out.push((frame[0] * 0.5, frame[1] * 0.5));
             sample += 1;
+        }
+        if controller
+            .take_messages()
+            .any(|m| m == PlaybackEvent::Finished)
+        {
+            break;
         }
     }
 

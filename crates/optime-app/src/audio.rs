@@ -2,7 +2,7 @@
 //! native (ALSA/CoreAudio/WASAPI) and web (WebAudio) targets.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use optime_core::SynthController;
+use optime_core::{LoopAndTransitionOptions, PlaybackEvent, SynthController};
 
 use crate::player::{new_shared, AudioState, AutoAdvance, PlaybackCommand, Shared};
 
@@ -142,9 +142,8 @@ fn update_meters(st: &mut crate::player::AudioState, t0: f64, frames: usize) {
 /// repaint loop is frozen (e.g. a hidden browser tab). Decoding here is intentional: it only
 /// happens at a transition while the output is already silent, so the brief stall is inaudible.
 fn step_playback(st: &mut AudioState) {
-    let sr = st.sample_rate.max(1.0) as f32;
     // ~40 ms fade-out before a manual transition, so the lazy decode lands in silence.
-    let short_fade = 1.0 / (0.040 * sr);
+    const MANUAL_FADE_SECONDS: f64 = 0.040;
 
     // (a) Drain UI commands. Manual intents take precedence over a natural-end fade.
     while let Some(cmd) = st.playback.commands.pop_front() {
@@ -163,38 +162,35 @@ fn step_playback(st: &mut AudioState) {
             PlaybackCommand::Prev => st.playback.pending = st.playback.manual_step(-1),
         }
     }
-    // A manual transition interrupting a playing song does a quick fade-out first.
-    if st.playback.pending.is_some() && st.controller.is_some() && st.fade_gain > 0.0 {
-        st.fade_step = short_fade;
+    // A manual transition interrupting a playing song asks the controller for a quick fade-out —
+    // once per switch (it overrides any in-progress end-of-song fade with the faster ramp).
+    if st.playback.pending.is_some() && !st.manual_fade_active {
+        if let Some(controller) = &mut st.controller {
+            controller.request_transition(MANUAL_FADE_SECONDS);
+            st.manual_fade_active = true;
+        }
     }
 
-    // (b) End-of-song fade trigger (moved off the UI thread): count loops, and start the long
-    //     3 s auto-fade when the sequence has ended or looped twice.
-    if let Some(controller) = &mut st.controller {
-        if controller.jumps > 0 {
-            controller.jumps = 0;
-            st.playback.loop_count += 1;
-        }
-        let ended = std::mem::take(&mut controller.fading_start);
-        if st.fade_step == 0.0 && (ended || st.playback.loop_count >= 2) {
-            st.fade_step = 1.0 / (3.0 * sr);
-        }
-    }
+    // (b) The end-of-song fade (loop-count / FINE) and our requested manual fade both live in the
+    //     controller now; it reports `Finished` once it has faded to silence.
+    let finished = st
+        .controller
+        .as_mut()
+        .is_some_and(|c| c.take_messages().any(|m| m == PlaybackEvent::Finished));
 
     // (c) Perform a transition once we're silent (faded out, or nothing playing yet).
-    let silent = st.controller.is_none() || (st.fade_step > 0.0 && st.fade_gain <= 0.0);
+    let silent = st.controller.is_none() || finished;
     if !silent {
         return;
     }
-    // Resolve a natural-end advance if no manual target is queued and a song actually ended.
-    if st.playback.pending.is_none() && st.controller.is_some() && st.fade_step > 0.0 {
+    // Resolve a natural-end advance if no manual target is queued and a song actually finished.
+    if st.playback.pending.is_none() && st.controller.is_some() && finished {
         match st.playback.auto_advance() {
             AutoAdvance::Repeat => st.playback.pending = Some(st.playback.index),
             AutoAdvance::Play(i) => st.playback.pending = Some(i),
             AutoAdvance::Stop => {
                 st.controller = None;
-                st.fade_step = 0.0;
-                st.fade_gain = 0.0;
+                st.manual_fade_active = false;
                 st.playback.stopped = true;
                 st.playback.status_gen = st.playback.status_gen.wrapping_add(1);
                 return;
@@ -215,20 +211,19 @@ fn step_playback(st: &mut AudioState) {
         _ => None,
     };
     match decoded {
-        Some(controller) => {
+        Some(mut controller) => {
+            controller.set_loop_and_transition(LoopAndTransitionOptions::live());
             st.controller = Some(controller);
             st.playback.index = target;
-            st.playback.loop_count = 0;
+            st.manual_fade_active = false;
             st.fade_gain = 0.0; // fade the new song in
-            st.fade_step = 0.0;
             st.playback.stopped = false;
             st.playback.needs_ui = false;
         }
         None => {
             // Entry missing or its source isn't loaded (cross-source): go silent, ask the UI.
             st.controller = None;
-            st.fade_step = 0.0;
-            st.fade_gain = 0.0;
+            st.manual_fade_active = false;
             if target < st.playback.entries.len() {
                 st.playback.index = target;
                 st.playback.needs_ui = true;
@@ -238,16 +233,16 @@ fn step_playback(st: &mut AudioState) {
     st.playback.status_gen = st.playback.status_gen.wrapping_add(1);
 }
 
-/// The per-sample gain pipeline: smoothed master volume × song fade (in/out) × pause ramp.
-/// All transitions are ramped inside the callback so no UI action produces a click.
+/// The per-sample gain pipeline: smoothed master volume × song fade-in × pause ramp. The
+/// end-of-song / manual fade-*out* now lives in the controller (it has already been applied to the
+/// samples this multiplies). All transitions are ramped inside the callback so no UI action pops.
 struct GainRamp {
     volume: f32,
     volume_target: f32,
     /// One-pole smoothing fraction per sample (~10 ms time constant).
     volume_alpha: f32,
+    /// Song fade-*in* level (0 → 1 after a new controller is installed); never fades out here.
     song: f32,
-    /// Downward fade step (end-of-song); when 0 the song gain rises instead (fade-in).
-    song_down_step: f32,
     /// Upward fade-in step (~30 ms).
     song_up_step: f32,
     pause: f32,
@@ -264,7 +259,6 @@ impl GainRamp {
             volume_target: st.volume,
             volume_alpha: (1.0 / (0.010 * sr)).min(1.0),
             song: st.fade_gain,
-            song_down_step: st.fade_step,
             song_up_step: 1.0 / (0.030 * sr),
             pause: st.pause_gain,
             pause_target: if st.paused { 0.0 } else { 1.0 },
@@ -276,11 +270,7 @@ impl GainRamp {
     #[inline]
     fn next(&mut self) -> f32 {
         self.volume += (self.volume_target - self.volume) * self.volume_alpha;
-        self.song = if self.song_down_step > 0.0 {
-            (self.song - self.song_down_step).max(0.0)
-        } else {
-            (self.song + self.song_up_step).min(1.0)
-        };
+        self.song = (self.song + self.song_up_step).min(1.0);
         self.pause = if self.pause < self.pause_target {
             (self.pause + self.pause_step).min(self.pause_target)
         } else {
