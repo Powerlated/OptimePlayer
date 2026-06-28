@@ -28,6 +28,7 @@ use ebur128::{EbuR128, Mode};
 use flac_codec::encode::{FlacSampleWriter, Options};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use optime_core::{PerDeviceSettings, SoundData, SynthController};
+use rayon::prelude::*;
 use serde_json::Value;
 
 const SR: u32 = 32_768; // matches the app's EXPORT_SAMPLE_RATE
@@ -248,40 +249,44 @@ fn main() -> ExitCode {
     overall.finish();
 
     let gap_frames = (args.max_silence.max(0.0) * SR as f32) as usize;
-    let gap_i16 = vec![0i16; gap_frames * 2];
 
-    // --- Pass 1: measure album-wide integrated loudness (over the trimmed audio + gaps). ---
+    // --- Pass 1: measure each track's loudness in parallel (one EbuR128 state per track), then
+    // combine. Integrated loudness gates out the inter-song silence, so per-track measurement of the
+    // trimmed cores matches measuring the whole concatenated album. ---
     let measure = mp.add(ProgressBar::new(album.len() as u64));
     measure.set_style(
         ProgressStyle::with_template("  measure [{bar:32.yellow/blue}] {pos}/{len}")
             .unwrap()
             .progress_chars("=>-"),
     );
-    let mut meter = EbuR128::new(2, SR, Mode::I).expect("ebur128 init");
-    let mut total_frames: u64 = 0;
-    for i in 0..album.len() {
-        let raw = fs::read(track_path(&tmp_dir, i)).expect("read track pcm");
-        let samples = bytes_to_i16(&raw);
-        let core = trim_silence(&samples);
-        if core.is_empty() {
+    let states: Vec<(EbuR128, u64)> = (0..album.len())
+        .into_par_iter()
+        .filter_map(|i| {
+            let raw = fs::read(track_path(&tmp_dir, i)).expect("read track pcm");
+            let samples = bytes_to_i16(&raw);
+            let core = trim_silence(&samples);
             measure.inc(1);
-            continue;
-        }
-        if total_frames > 0 {
-            meter.add_frames_i16(&gap_i16).expect("meter gap");
-            total_frames += gap_frames as u64;
-        }
-        meter.add_frames_i16(core).expect("meter frames");
-        total_frames += (core.len() / 2) as u64;
-        measure.inc(1);
-    }
+            if core.is_empty() {
+                return None;
+            }
+            let mut state = EbuR128::new(2, SR, Mode::I).expect("ebur128 init");
+            state.add_frames_i16(core).expect("meter frames");
+            Some((state, (core.len() / 2) as u64))
+        })
+        .collect();
     measure.finish();
 
-    let loudness = meter.loudness_global().expect("integrated loudness");
+    let nonempty = states.len() as u64;
+    let total_frames =
+        states.iter().map(|(_, n)| n).sum::<u64>() + nonempty.saturating_sub(1) * gap_frames as u64;
+    let loudness =
+        EbuR128::loudness_global_multiple(states.iter().map(|(s, _)| s)).expect("integrated loudness");
     let gain_db = TARGET_LUFS - loudness;
     let gain = (10f64).powf(gain_db / 20.0) as f32;
 
-    // --- Pass 2: apply the gain and encode the FLAC. ---
+    // --- Pass 2: apply the gain and encode the FLAC. The FLAC bitstream is serial, but flac-codec's
+    // `rayon` feature compresses the channels in parallel internally, so the per-track feed loop
+    // stays sequential while the heavy compression is multithreaded. ---
     let _ = fs::remove_file(&args.out); // FlacSampleWriter::create refuses to overwrite
     let mut writer = match FlacSampleWriter::create(&args.out, Options::default(), SR, 16, 2, None) {
         Ok(w) => w,

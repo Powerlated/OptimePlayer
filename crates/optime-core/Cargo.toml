@@ -20,10 +20,12 @@ simd = []
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-# Used only by the `export_album_flac` example (offline soundtrack render): FLAC encoding,
-# EBU R128 loudness measurement, song-name JSON parsing, CLI args, and progress bars.
-flac-codec = "1.3"
+# Used only by the `export_album_flac` example (offline soundtrack render): FLAC encoding
+# (rayon = parallel channel compression), EBU R128 loudness measurement, song-name JSON parsing,
+# CLI args, progress bars, and rayon for the parallel analyze phase.
+flac-codec = { version = "1.3", features = ["rayon"] }
 ebur128 = "0.1"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
+rayon = "1"
