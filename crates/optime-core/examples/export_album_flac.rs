@@ -3,16 +3,19 @@
 //!
 //! Each track is rendered with the engine's high-quality preset for its console
 //! ([`PerDeviceSettings::high_quality_gba`] / [`PerDeviceSettings::high_quality_nintendo_ds`]),
-//! playing two loops then a 10-second fade — the same policy as the app's WAV export.
+//! playing two loops then a 10-second fade — the same policy as the app's WAV export. Leading and
+//! trailing near-silence is trimmed from every track and a fixed `--max-silence` gap is inserted
+//! between songs, so the dead air between tracks is capped at that length.
 //!
-//! Rendering is parallelized across CPUs into per-track temp PCM files; two cheap sequential passes
-//! then (1) measure the whole album's integrated loudness and (2) apply the single gain that lands
-//! it at -16 LUFS while encoding the FLAC, so memory stays bounded regardless of album length.
+//! Rendering is parallelized across CPUs into per-track temp PCM files (with one live progress bar
+//! per worker); two cheap sequential passes then (1) measure the whole album's integrated loudness
+//! and (2) apply the single gain that lands it at -16 LUFS while encoding the FLAC, so memory stays
+//! bounded regardless of album length.
 //!
 //! The input archive must already be decompressed (gunzip any `*.gbaaudio.gz` first). The JSON is
 //! the curated `[{ "songId", "title" }]` table (its array order is the album order).
 //!
-//! Usage: `cargo run -p optime-core --example export_album_flac -- <archive> <names.json> <out.flac> [limit]`
+//! Usage: `cargo run -p optime-core --example export_album_flac -- <archive> <names.json> <out.flac> [--max-silence S] [--limit N]`
 
 use std::collections::HashSet;
 use std::fs;
@@ -20,14 +23,35 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use clap::Parser;
 use ebur128::{EbuR128, Mode};
 use flac_codec::encode::{FlacSampleWriter, Options};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use optime_core::{PerDeviceSettings, SoundData, SynthController};
 use serde_json::Value;
 
 const SR: u32 = 32_768; // matches the app's EXPORT_SAMPLE_RATE
-const GAP_SECS: f32 = 0.8; // silence between tracks
 const TARGET_LUFS: f64 = -16.0;
+/// A frame counts as silence when both channels are within this magnitude (~-66 dBFS).
+const SILENCE_I16: i16 = 16;
+
+#[derive(Parser)]
+#[command(about = "Render an archive's songs into one -16 LUFS stereo FLAC, in song-name JSON order.")]
+struct Args {
+    /// Decompressed sound archive (DS SDAT, DSE, or GBA `.gbaaudio`).
+    archive: PathBuf,
+    /// Curated `[{ "songId", "title" }]` JSON; its array order is the album order.
+    names_json: PathBuf,
+    /// Output FLAC path.
+    out: PathBuf,
+    /// Trim each track's leading/trailing silence and insert at most this many seconds of silence
+    /// between songs.
+    #[arg(long, default_value_t = 0.8)]
+    max_silence: f32,
+    /// Only export the first N songs (for quick tests).
+    #[arg(long)]
+    limit: Option<usize>,
+}
 
 /// Renders one song to stereo frames: two loops then a 10-second fade, capped at 480s. Mirrors the
 /// app's `render_to_samples` (including its 0.5 headroom gain).
@@ -87,28 +111,35 @@ fn track_path(dir: &Path, i: usize) -> PathBuf {
     dir.join(format!("trk_{i:05}.pcm"))
 }
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let [archive, json_path, out_path] = match args.as_slice() {
-        [a, j, o, ..] => [a, j, o],
-        _ => {
-            eprintln!(
-                "Usage: export_album_flac <archive> <names.json> <out.flac> [limit]"
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-    let limit: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+/// Reinterprets a little-endian byte buffer as interleaved i16 samples.
+fn bytes_to_i16(raw: &[u8]) -> Vec<i16> {
+    raw.chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect()
+}
 
-    let bytes = match fs::read(archive) {
+/// The interleaved-i16 sub-slice of one track with leading and trailing near-silent frames removed.
+fn trim_silence(samples: &[i16]) -> &[i16] {
+    let frames = samples.len() / 2;
+    let silent = |f: usize| samples[2 * f].abs() <= SILENCE_I16 && samples[2 * f + 1].abs() <= SILENCE_I16;
+    let first = (0..frames).find(|&f| !silent(f));
+    let Some(first) = first else { return &[] };
+    let last = (0..frames).rev().find(|&f| !silent(f)).unwrap();
+    &samples[2 * first..2 * (last + 1)]
+}
+
+fn main() -> ExitCode {
+    let args = Args::parse();
+
+    let bytes = match fs::read(&args.archive) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("Failed to read '{archive}': {e}");
+            eprintln!("Failed to read '{}': {e}", args.archive.display());
             return ExitCode::FAILURE;
         }
     };
     let Some(data) = SoundData::load_all(&bytes).into_iter().next() else {
-        eprintln!("No songs found in '{archive}' (not an SDAT, DSE, or GBA image).");
+        eprintln!("No songs found in '{}' (not an SDAT, DSE, or GBA image).", args.archive.display());
         return ExitCode::FAILURE;
     };
 
@@ -119,21 +150,16 @@ fn main() -> ExitCode {
     } else {
         PerDeviceSettings::high_quality_nintendo_ds()
     };
-    eprintln!(
-        "Console: {} (using high-quality {} preset)",
-        if is_gba { "GBA" } else { "DS/other" },
-        if is_gba { "GBA" } else { "DS" }
-    );
 
     // Album order = the JSON array order, restricted to songs actually present in the archive.
-    let json: Value = match fs::read_to_string(json_path).map(|s| serde_json::from_str(&s)) {
+    let json: Value = match fs::read_to_string(&args.names_json).map(|s| serde_json::from_str(&s)) {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            eprintln!("Failed to parse '{json_path}': {e}");
+            eprintln!("Failed to parse '{}': {e}", args.names_json.display());
             return ExitCode::FAILURE;
         }
         Err(e) => {
-            eprintln!("Failed to read '{json_path}': {e}");
+            eprintln!("Failed to read '{}': {e}", args.names_json.display());
             return ExitCode::FAILURE;
         }
     };
@@ -149,12 +175,20 @@ fn main() -> ExitCode {
                 .contains(&id)
                 .then(|| (id, e["title"].as_str().unwrap_or("").to_string()))
         })
-        .take(limit)
+        .take(args.limit.unwrap_or(usize::MAX))
         .collect();
     if album.is_empty() {
-        eprintln!("No playable songs from '{json_path}' are present in the archive.");
+        eprintln!("No playable songs from '{}' are present in the archive.", args.names_json.display());
         return ExitCode::FAILURE;
     }
+
+    eprintln!(
+        "Console: {} (high-quality {} preset) — {} tracks, {:.1}s max silence between songs.",
+        if is_gba { "GBA" } else { "DS/other" },
+        if is_gba { "GBA" } else { "DS" },
+        album.len(),
+        args.max_silence
+    );
 
     let tmp_dir = std::env::temp_dir().join(format!("album_export_{}", std::process::id()));
     if let Err(e) = fs::create_dir_all(&tmp_dir) {
@@ -167,75 +201,117 @@ fn main() -> ExitCode {
         .map(|n| n.get())
         .unwrap_or(4)
         .min(album.len());
-    eprintln!("Rendering {} tracks on {threads} threads...", album.len());
+
+    let mp = MultiProgress::new();
+    let overall = mp.add(ProgressBar::new(album.len() as u64));
+    overall.set_style(
+        ProgressStyle::with_template("  render [{bar:32.cyan/blue}] {pos}/{len} ({elapsed})")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    let worker_style = ProgressStyle::with_template("    {spinner:.green} {wide_msg}").unwrap();
+    let worker_bars: Vec<ProgressBar> = (0..threads)
+        .map(|_| {
+            let pb = mp.add(ProgressBar::new_spinner());
+            pb.set_style(worker_style.clone());
+            pb.enable_steady_tick(std::time::Duration::from_millis(100));
+            pb
+        })
+        .collect();
+
     let cursor = AtomicUsize::new(0);
-    let done = AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        for _ in 0..threads {
-            scope.spawn(|| loop {
-                let i = cursor.fetch_add(1, Ordering::Relaxed);
-                let Some((id, title)) = album.get(i) else { break };
-                let frames = render_song(&data, *id, &config);
-                let mut bytes = Vec::with_capacity(frames.len() * 4);
-                for &(l, r) in &frames {
-                    for s in [l, r] {
-                        bytes.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes());
+        for pb in &worker_bars {
+            let (overall, cursor, album, data, config, tmp_dir) =
+                (&overall, &cursor, &album, &data, &config, &tmp_dir);
+            scope.spawn(move || {
+                loop {
+                    let i = cursor.fetch_add(1, Ordering::Relaxed);
+                    let Some((id, title)) = album.get(i) else { break };
+                    pb.set_message(format!("songId {id:<5} \"{title}\""));
+                    let frames = render_song(data, *id, config);
+                    let mut bytes = Vec::with_capacity(frames.len() * 4);
+                    for &(l, r) in &frames {
+                        for s in [l, r] {
+                            bytes.extend_from_slice(
+                                &((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes(),
+                            );
+                        }
                     }
+                    fs::write(track_path(tmp_dir, i), &bytes).expect("write track pcm");
+                    overall.inc(1);
                 }
-                fs::write(track_path(&tmp_dir, i), &bytes).expect("write track pcm");
-                let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-                eprintln!(
-                    "  [{d:3}/{}] songId {id:<5} {:6.1}s  \"{title}\"",
-                    album.len(),
-                    frames.len() as f32 / SR as f32
-                );
+                pb.finish_and_clear();
             });
         }
     });
+    overall.finish();
 
-    let gap_frames = (GAP_SECS * SR as f32) as usize;
-    let gap = vec![0i16; gap_frames * 2];
+    let gap_frames = (args.max_silence.max(0.0) * SR as f32) as usize;
+    let gap_i16 = vec![0i16; gap_frames * 2];
 
-    // --- Pass 1: measure album-wide integrated loudness. ---
+    // --- Pass 1: measure album-wide integrated loudness (over the trimmed audio + gaps). ---
+    let measure = mp.add(ProgressBar::new(album.len() as u64));
+    measure.set_style(
+        ProgressStyle::with_template("  measure [{bar:32.yellow/blue}] {pos}/{len}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
     let mut meter = EbuR128::new(2, SR, Mode::I).expect("ebur128 init");
     let mut total_frames: u64 = 0;
     for i in 0..album.len() {
-        if i > 0 {
-            meter.add_frames_i16(&gap).expect("meter gap");
-            total_frames += gap_frames as u64;
-        }
         let raw = fs::read(track_path(&tmp_dir, i)).expect("read track pcm");
         let samples = bytes_to_i16(&raw);
-        meter.add_frames_i16(&samples).expect("meter frames");
-        total_frames += (samples.len() / 2) as u64;
+        let core = trim_silence(&samples);
+        if core.is_empty() {
+            measure.inc(1);
+            continue;
+        }
+        if total_frames > 0 {
+            meter.add_frames_i16(&gap_i16).expect("meter gap");
+            total_frames += gap_frames as u64;
+        }
+        meter.add_frames_i16(core).expect("meter frames");
+        total_frames += (core.len() / 2) as u64;
+        measure.inc(1);
     }
+    measure.finish();
+
     let loudness = meter.loudness_global().expect("integrated loudness");
     let gain_db = TARGET_LUFS - loudness;
     let gain = (10f64).powf(gain_db / 20.0) as f32;
-    eprintln!(
-        "\nAlbum: {} tracks, {:.1} min.\nIntegrated loudness {loudness:.2} LUFS -> gain {gain_db:+.2} dB to reach {TARGET_LUFS:.0} LUFS",
-        album.len(),
-        total_frames as f32 / SR as f32 / 60.0
-    );
 
     // --- Pass 2: apply the gain and encode the FLAC. ---
-    let _ = fs::remove_file(out_path); // FlacSampleWriter::create refuses to overwrite
-    let mut writer = match FlacSampleWriter::create(out_path, Options::default(), SR, 16, 2, None) {
+    let _ = fs::remove_file(&args.out); // FlacSampleWriter::create refuses to overwrite
+    let mut writer = match FlacSampleWriter::create(&args.out, Options::default(), SR, 16, 2, None) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("Failed to create '{out_path}': {e}");
+            eprintln!("Failed to create '{}': {e}", args.out.display());
             return ExitCode::FAILURE;
         }
     };
+    let encode = mp.add(ProgressBar::new(album.len() as u64));
+    encode.set_style(
+        ProgressStyle::with_template("  encode  [{bar:32.magenta/blue}] {pos}/{len}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
     let gap_i32 = vec![0i32; gap_frames * 2];
     let mut peak = 0f32;
     let mut clipped: u64 = 0;
+    let mut wrote_any = false;
     for i in 0..album.len() {
-        if i > 0 {
+        let raw = fs::read(track_path(&tmp_dir, i)).expect("read track pcm");
+        let samples = bytes_to_i16(&raw);
+        let core = trim_silence(&samples);
+        if core.is_empty() {
+            encode.inc(1);
+            continue;
+        }
+        if wrote_any {
             writer.write(&gap_i32).expect("write gap");
         }
-        let raw = fs::read(track_path(&tmp_dir, i)).expect("read track pcm");
-        let out: Vec<i32> = bytes_to_i16(&raw)
+        let out: Vec<i32> = core
             .iter()
             .map(|&s| {
                 let g = (f32::from(s) / 32767.0) * gain;
@@ -247,22 +323,21 @@ fn main() -> ExitCode {
             })
             .collect();
         writer.write(&out).expect("write samples");
+        wrote_any = true;
+        encode.inc(1);
     }
     writer.finalize().expect("finalize flac");
+    encode.finish();
     let _ = fs::remove_dir_all(&tmp_dir);
 
-    let size = fs::metadata(out_path).map(|m| m.len()).unwrap_or(0);
+    let size = fs::metadata(&args.out).map(|m| m.len()).unwrap_or(0);
     eprintln!(
-        "Post-gain peak {peak:.3} ({:+.2} dBFS); {clipped} samples hard-limited.\nWrote {out_path} ({:.1} MB).",
+        "\nAlbum: {} tracks, {:.1} min.\nIntegrated loudness {loudness:.2} LUFS -> gain {gain_db:+.2} dB to reach {TARGET_LUFS:.0} LUFS.\nPost-gain peak {peak:.3} ({:+.2} dBFS); {clipped} samples hard-limited.\nWrote {} ({:.1} MB).",
+        album.len(),
+        total_frames as f32 / SR as f32 / 60.0,
         20.0 * peak.max(1e-9).log10(),
+        args.out.display(),
         size as f64 / 1.0e6
     );
     ExitCode::SUCCESS
-}
-
-/// Reinterprets a little-endian byte buffer as interleaved i16 samples.
-fn bytes_to_i16(raw: &[u8]) -> Vec<i16> {
-    raw.chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]))
-        .collect()
 }
