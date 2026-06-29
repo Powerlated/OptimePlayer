@@ -195,6 +195,10 @@ impl Bank {
 pub struct LoopAndTransitionOptions {
     /// Begin the end-of-song fade after the sequence has looped this many times (`None` = never).
     pub loops_before_fade: Option<u32>,
+    /// At a loop point, also begin the fade if playback has by then run past this many seconds
+    /// (`None` = no cap). Evaluated only on a loop, so the fade still starts at a musical boundary;
+    /// it bounds songs whose loop is long enough to outlast [`Self::loops_before_fade`] iterations.
+    pub too_long_after_loop_threshold_seconds: Option<f64>,
     /// Also begin the fade when the sequence signals it has ended (a `FINE`/end-of-song event).
     pub fade_on_end: bool,
     /// Hold full gain this long (seconds) after the fade is triggered before the ramp starts.
@@ -208,19 +212,23 @@ impl LoopAndTransitionOptions {
     pub const fn none() -> Self {
         Self {
             loops_before_fade: None,
+            too_long_after_loop_threshold_seconds: None,
             fade_on_end: false,
             grace_seconds: 0.0,
             fade_seconds: 0.0,
         }
     }
 
-    /// The offline-export policy: two loops, a 2 s grace, then a 10 s fade.
+    /// The offline-export policy: fade after one loop, a 2 s grace, then a 3 s fade. A 90 s
+    /// after-loop cap is also set so that, if `loops_before_fade` is raised, an overlong track
+    /// still fades at the first loop past 90 s.
     pub const fn export() -> Self {
         Self {
-            loops_before_fade: Some(2),
+            loops_before_fade: Some(0),
+            too_long_after_loop_threshold_seconds: Some(90.0),
             fade_on_end: true,
             grace_seconds: 2.0,
-            fade_seconds: 10.0,
+            fade_seconds: 3.0,
         }
     }
 
@@ -228,6 +236,7 @@ impl LoopAndTransitionOptions {
     pub const fn live() -> Self {
         Self {
             loops_before_fade: Some(2),
+            too_long_after_loop_threshold_seconds: None,
             fade_on_end: true,
             grace_seconds: 0.0,
             fade_seconds: 3.0,
@@ -260,6 +269,9 @@ struct Transition {
     opts: LoopAndTransitionOptions,
     sample_rate: f64,
     loops_seen: u32,
+    /// Output samples rendered since the song started, advanced once per sample in [`Self::advance`].
+    /// Backs the `too_long_after_loop_threshold_seconds` length cap.
+    total_samples: u64,
     /// `None` until the fade is triggered; then counts output samples since the trigger.
     elapsed: Option<u64>,
     /// Output samples of full-gain grace before the ramp starts.
@@ -276,6 +288,7 @@ impl Transition {
             opts,
             sample_rate,
             loops_seen: 0,
+            total_samples: 0,
             elapsed: None,
             grace_samples: (sample_rate * opts.grace_seconds) as u64,
             fade_seconds: opts.fade_seconds,
@@ -306,14 +319,21 @@ impl Transition {
         messages.push(PlaybackEvent::TransitionStarted);
     }
 
-    /// A sequence loop occurred: count it, pump `Looped`, and trip the fade if the policy is met.
+    /// A sequence loop occurred: count it, pump `Looped`, and trip the fade if the policy is met —
+    /// either the loop count or the playback-length cap has been reached.
     fn on_loop(&mut self, messages: &mut Vec<PlaybackEvent>) {
         self.loops_seen += 1;
         messages.push(PlaybackEvent::Looped);
-        if let Some(n) = self.opts.loops_before_fade {
-            if self.loops_seen >= n {
-                self.trip(messages);
-            }
+        let loops_met = self
+            .opts
+            .loops_before_fade
+            .is_some_and(|n| self.loops_seen >= n);
+        let too_long = self
+            .opts
+            .too_long_after_loop_threshold_seconds
+            .is_some_and(|s| self.total_samples as f64 / self.sample_rate > s);
+        if loops_met || too_long {
+            self.trip(messages);
         }
     }
 
@@ -343,6 +363,7 @@ impl Transition {
     /// Returns the gain for this output sample and advances by one, emitting `Finished` the first
     /// time the ramp reaches silence (then holding at zero).
     fn advance(&mut self, messages: &mut Vec<PlaybackEvent>) -> f32 {
+        self.total_samples += 1;
         match self.elapsed {
             None => 1.0,
             Some(n) => {
@@ -851,21 +872,16 @@ mod transition_tests {
         let mut t = Transition::new(SR, opts);
         let mut msgs = Vec::new();
 
-        // Two loops trip the fade: `Looped`, `Looped`, then `TransitionStarted`.
-        t.on_loop(&mut msgs);
+        // Export fades after a single loop: `Looped`, then `TransitionStarted`.
         t.on_loop(&mut msgs);
         assert_eq!(
             msgs,
-            [
-                PlaybackEvent::Looped,
-                PlaybackEvent::Looped,
-                PlaybackEvent::TransitionStarted
-            ]
+            [PlaybackEvent::Looped, PlaybackEvent::TransitionStarted]
         );
         msgs.clear();
 
         let grace = (SR * opts.grace_seconds) as u64; // 65_536
-        let fade = (SR * opts.fade_seconds) as u64; // 327_680
+        let fade = (SR * opts.fade_seconds) as u64; // 98_304
         let mut finished_at = None;
         for n in 0..(grace + fade + 4) {
             let g = t.advance(&mut msgs);
@@ -885,6 +901,35 @@ mod transition_tests {
             msgs,
             [PlaybackEvent::Finished],
             "exactly one Finished is pumped"
+        );
+    }
+
+    /// The `too_long_after_loop_threshold_seconds` cap trips the fade at the next loop once playback
+    /// has run past the threshold, even before `loops_before_fade` loops have elapsed.
+    #[test]
+    fn too_long_after_loop_threshold_trips_before_loop_count() {
+        let opts = LoopAndTransitionOptions {
+            loops_before_fade: Some(4),
+            too_long_after_loop_threshold_seconds: Some(1.0),
+            ..LoopAndTransitionOptions::none()
+        };
+        let mut t = Transition::new(SR, opts);
+        let mut msgs = Vec::new();
+
+        // A loop under the threshold: counted, but no fade (1 of 4 loops, < 1 s elapsed).
+        t.on_loop(&mut msgs);
+        assert_eq!(msgs, [PlaybackEvent::Looped]);
+        msgs.clear();
+
+        // Render just over one second of output, then loop again: the length cap trips the fade
+        // even though only two of four loops have elapsed.
+        for _ in 0..=(SR as u64) {
+            t.advance(&mut Vec::new());
+        }
+        t.on_loop(&mut msgs);
+        assert_eq!(
+            msgs,
+            [PlaybackEvent::Looped, PlaybackEvent::TransitionStarted]
         );
     }
 

@@ -118,10 +118,9 @@ fn renders_audio_and_ends() {
     // Fade out when the sequence signals its end, so the end-of-song detection is observable as a
     // pumped `TransitionStarted` message.
     controller.set_loop_and_transition(LoopAndTransitionOptions {
-        loops_before_fade: None,
         fade_on_end: true,
-        grace_seconds: 0.0,
         fade_seconds: 1.0,
+        ..LoopAndTransitionOptions::none()
     });
     let config = PerDeviceSettings::neutral();
 

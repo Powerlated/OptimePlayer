@@ -3,7 +3,7 @@
 //!
 //! Each track is rendered with the engine's high-quality preset for its console
 //! ([`PerDeviceSettings::high_quality_gba`] / [`PerDeviceSettings::high_quality_nintendo_ds`]),
-//! playing two loops then a 10-second fade — the same policy as the app's WAV export. Leading and
+//! playing one loop then a 3-second fade — the same policy as the app's WAV export. Leading and
 //! trailing near-silence is trimmed from every track and a fixed `--max-silence` gap is inserted
 //! between songs, so the dead air between tracks is capped at that length.
 //!
@@ -60,8 +60,8 @@ struct Args {
     limit: Option<usize>,
 }
 
-/// Renders one song to stereo frames using the shared controller fade policy (two loops then a
-/// 10-second fade, capped at 480s), applying the same 0.5 headroom gain as the app's WAV export.
+/// Renders one song to stereo frames using the shared controller fade policy (one loop then a
+/// 3-second fade, capped at 480s), applying the same 0.5 headroom gain as the app's WAV export.
 fn render_song(data: &dyn SoundData, song_id: u32, config: &PerDeviceSettings) -> Vec<(f32, f32)> {
     let sr = f64::from(SR);
     let Some(mut controller) = SynthController::new(sr, data, song_id) else {
