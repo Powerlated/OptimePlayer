@@ -1,10 +1,10 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/optime-core", "crates/optime-app"]
 
 [workspace.package]
 version = "1.0.0"
-edition = "2021"
+edition = "2024"
 license = "ISC"
 repository = "https://github.com/Powerlated/OptimePlayer"
 
