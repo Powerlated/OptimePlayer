@@ -14,7 +14,7 @@ use crate::persisted::{RepeatMode, TrackRef};
 pub struct PlaylistEntry {
     /// The decoded-on-demand source archive. `None` means the source isn't loaded yet (a
     /// cross-source queue track): the audio thread can't decode it and asks the UI to fetch.
-    pub archive: Option<Arc<SoundData>>,
+    pub archive: Option<Arc<dyn SoundData>>,
     /// Identity for UI reconcile (highlight / recents / media session / share URL) and the song id.
     pub track: TrackRef,
 }
@@ -182,7 +182,7 @@ pub const EXPORT_SAMPLE_RATE: u32 = 32768;
 /// [`SynthController`] fade policy ([`LoopAndTransitionOptions::export`]); this just applies the
 /// 0.5 export headroom and stops when the controller reports the song finished.
 pub fn render_to_samples(
-    data: &SoundData,
+    data: &dyn SoundData,
     song_id: u32,
     config: &PerDeviceSettings,
 ) -> Vec<(f32, f32)> {

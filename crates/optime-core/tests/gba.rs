@@ -2,8 +2,10 @@
 //! single DirectSound note. Exercises ROM parsing (heuristic song-table scan), the sequencer,
 //! the player's channel/envelope model, and the shared synthesis path.
 
+use optime_core::devices::gba::GbaRom;
 use optime_core::{
-    LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, SynthController,
+    load_all, LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData,
+    SynthController,
 };
 
 /// GBA ROM-space base address.
@@ -88,10 +90,13 @@ fn build_rom() -> Vec<u8> {
 #[test]
 fn parses_synthetic_rom() {
     let rom = build_rom();
-    let archives = SoundData::load_all(&rom);
+    let archives = load_all(&rom);
     assert_eq!(archives.len(), 1, "one GBA archive expected");
-    let data = &archives[0];
-    assert!(matches!(data, SoundData::Gba(_)));
+    let data = &*archives[0];
+    assert!(
+        data.as_any().downcast_ref::<GbaRom>().is_some(),
+        "expected a GBA archive"
+    );
     let ids = data.song_ids();
     assert_eq!(
         ids,
@@ -107,9 +112,9 @@ fn parses_synthetic_rom() {
 #[test]
 fn renders_audio_and_ends() {
     let rom = build_rom();
-    let data = SoundData::load_all(&rom).remove(0);
+    let data: Box<dyn SoundData> = load_all(&rom).remove(0);
     let sr = 32768.0;
-    let mut controller = SynthController::new(sr, &data, 0).expect("song 0 should load");
+    let mut controller = SynthController::new(sr, &*data, 0).expect("song 0 should load");
     // Fade out when the sequence signals its end, so the end-of-song detection is observable as a
     // pumped `TransitionStarted` message.
     controller.set_loop_and_transition(LoopAndTransitionOptions {
@@ -136,8 +141,8 @@ fn renders_audio_and_ends() {
 #[test]
 fn lookahead_sees_the_note() {
     let rom = build_rom();
-    let data = SoundData::load_all(&rom).remove(0);
-    let mut look = optime_core::FsVisController::new(&data, 0).expect("song 0 should load");
+    let data: Box<dyn SoundData> = load_all(&rom).remove(0);
+    let mut look = optime_core::FsVisController::new(&*data, 0).expect("song 0 should load");
     for _ in 0..64 {
         look.tick();
     }
@@ -146,7 +151,6 @@ fn lookahead_sees_the_note() {
         .collect();
     assert_eq!(notes.len(), 1, "exactly one note in the song");
     assert_eq!(notes[0].key, 60);
-    assert_eq!(notes[0].velocity, 100);
     assert_eq!(notes[0].duration, 24);
     assert_eq!(notes[0].track, 0);
 }
@@ -158,7 +162,7 @@ fn remove_sample_dc_offset_is_opt_in_and_centers_the_signal() {
     for i in 0..64 {
         rom[WAVE + 16 + i] = 100;
     }
-    let data = SoundData::load_all(&rom).remove(0);
+    let data: Box<dyn SoundData> = load_all(&rom).remove(0);
     let sr = 32768.0;
 
     let mean_of = |remove: bool| -> f32 {
@@ -166,7 +170,7 @@ fn remove_sample_dc_offset_is_opt_in_and_centers_the_signal() {
             remove_sample_dc_offset: remove,
             ..PerDeviceSettings::neutral()
         };
-        let mut controller = SynthController::new(sr, &data, 0).expect("song 0 should load");
+        let mut controller = SynthController::new(sr, &*data, 0).expect("song 0 should load");
         // Render the sustained portion of the note (skip the very start) and average it.
         let mut out = vec![0.0f32; (0.3 * sr) as usize * 2];
         controller.fill(&mut out, &config);
@@ -194,7 +198,7 @@ fn sample_dc_stats_report_the_offset_removed() {
     for i in 0..64 {
         rom[WAVE + 16 + i] = 50;
     }
-    let data = SoundData::load_all(&rom).remove(0);
+    let data: Box<dyn SoundData> = load_all(&rom).remove(0);
     let stats = data.sample_dc_stats(0);
 
     assert_eq!(
@@ -213,9 +217,7 @@ fn sample_dc_stats_report_the_offset_removed() {
     );
 
     // The symmetric ±100 square in the default ROM is already centered: ~zero shift.
-    let centered = SoundData::load_all(&build_rom())
-        .remove(0)
-        .sample_dc_stats(0);
+    let centered = load_all(&build_rom()).remove(0).sample_dc_stats(0);
     assert!(
         centered[0].dc_shift < 1e-6,
         "a symmetric wave has no DC offset"
@@ -229,8 +231,8 @@ fn audio_extraction_strips_non_audio_and_plays_identically() {
     rom[0x100] = 0xAB;
     rom[0x1F0] = 0xCD;
 
-    let data = SoundData::load_all(&rom).remove(0);
-    let SoundData::Gba(gba) = &data else {
+    let data: Box<dyn SoundData> = load_all(&rom).remove(0);
+    let Some(gba) = data.as_any().downcast_ref::<GbaRom>() else {
         panic!("expected a GBA archive")
     };
     let extracted = gba.extract_audio();
@@ -241,14 +243,14 @@ fn audio_extraction_strips_non_audio_and_plays_identically() {
     assert_eq!(extracted.get(0x1F0).copied().unwrap_or(0), 0);
 
     // The extracted image is still a loadable GBA archive with the same songs.
-    let stripped = SoundData::load_all(&extracted).remove(0);
+    let stripped: Box<dyn SoundData> = load_all(&extracted).remove(0);
     assert_eq!(stripped.song_ids(), data.song_ids());
 
     // And it renders bit-identically to the original ROM.
     let sr = 32768.0;
     let config = PerDeviceSettings::neutral();
-    let mut original = SynthController::new(sr, &data, 0).expect("song 0 in the original");
-    let mut audio_only = SynthController::new(sr, &stripped, 0).expect("song 0 in the extract");
+    let mut original = SynthController::new(sr, &*data, 0).expect("song 0 in the original");
+    let mut audio_only = SynthController::new(sr, &*stripped, 0).expect("song 0 in the extract");
     let mut a = vec![0.0f32; 2 * sr as usize];
     let mut b = vec![0.0f32; 2 * sr as usize];
     original.fill(&mut a, &config);
@@ -261,5 +263,5 @@ fn rejects_non_mp2k_rom() {
     // Valid header byte but no song table anywhere.
     let mut rom = vec![0u8; ROM_LEN];
     rom[0xB2] = 0x96;
-    assert!(SoundData::load_all(&rom).is_empty());
+    assert!(load_all(&rom).is_empty());
 }

@@ -43,69 +43,34 @@ pub struct SampleDcStat {
 }
 
 /// A loaded, parsed sound archive for some device — everything needed to list and start songs.
-pub enum SoundData {
-    /// A Nintendo DS SDAT sound archive.
-    NintendoDs(Box<nintendo_ds::Sdat>),
-    /// A GBA ROM with a located MP2K song table.
-    Gba(gba::GbaRom),
-    /// A DSE (Procyon Studios) archive — PMD: Explorers of Sky's SMDL/SWDL music.
-    Dse(Box<dse::DseSoundData>),
-}
-
-impl SoundData {
-    /// Parses every sound archive found in `bytes` (`.nds`/`.sdat` containers, a DSE ROM, or a
-    /// GBA ROM). DSE is probed before GBA: a PMD `.nds` has no SDAT, so the SDAT scan comes up
-    /// empty and the `swdl`/`smdl` scan identifies it.
-    pub fn load_all(bytes: &[u8]) -> Vec<SoundData> {
-        let sdats = nintendo_ds::Sdat::load_all(bytes);
-        if !sdats.is_empty() {
-            return sdats
-                .into_iter()
-                .map(|sdat| SoundData::NintendoDs(Box::new(sdat)))
-                .collect();
-        }
-        if let Some(dse) = dse::DseSoundData::load_all(bytes) {
-            return vec![SoundData::Dse(Box::new(dse))];
-        }
-        match gba::GbaRom::parse(bytes) {
-            Some(rom) => vec![SoundData::Gba(rom)],
-            None => Vec::new(),
-        }
-    }
-
+///
+/// Each console backend implements this trait; use [`load_all`] to parse bytes into archives.
+/// The trait object is `Send + Sync` so it can be shared across threads via `Arc<dyn SoundData>`.
+pub trait SoundData: Send + Sync {
     /// Ids of the playable songs, in listing order. Only songs that will actually start when
     /// selected are listed: GBA song tables are full of empty placeholders and the odd
     /// malformed entry, which are filtered with the same header validation
     /// [`Self::make_player`] performs.
-    pub fn song_ids(&self) -> Vec<u32> {
-        match self {
-            SoundData::NintendoDs(sdat) => sdat.sseq_list.clone(),
-            SoundData::Gba(rom) => (0..rom.song_count() as u32)
-                .filter(|&id| rom.song_header(id).is_some())
-                .collect(),
-            SoundData::Dse(dse) => dse.song_ids(),
-        }
+    fn song_ids(&self) -> Vec<u32>;
+
+    /// Creates a player for song `id`, or `None` if the song is missing / malformed.
+    fn make_player(&self, id: u32) -> Option<Box<dyn DevicePlayer>>;
+
+    /// Display name for song `id`, if the archive carries one. Defaults to `None` when the
+    /// archive carries no embedded names (the app may supply curated titles separately).
+    fn song_name(&self, _id: u32) -> Option<String> {
+        None
     }
 
-    /// Display name for song `id`, if the archive carries one. GBA ROMs have no embedded song
-    /// names (the table is numbered); the app supplies curated titles keyed by
-    /// [`Self::gba_game_code`].
-    pub fn song_name(&self, id: u32) -> Option<String> {
-        match self {
-            SoundData::NintendoDs(sdat) => sdat.sseq_id_to_name.get(&id).cloned(),
-            SoundData::Gba(_) => None,
-            SoundData::Dse(dse) => dse.song_name(id),
-        }
+    /// DC-offset stats for every PCM sample reachable from song `id`, sorted by the amount of DC
+    /// shift (most shifted first). Returns an empty list for archives that don't analyse samples.
+    fn sample_dc_stats(&self, _id: u32) -> Vec<SampleDcStat> {
+        Vec::new()
     }
 
-    /// The GBA ROM's 4-character game code (header offset 0xAC), e.g. `"BPEE"` for Pokémon Emerald.
-    /// `None` for DS archives. The app uses it to pick curated song-name tables.
-    pub fn gba_game_code(&self) -> Option<String> {
-        match self {
-            SoundData::Gba(rom) => rom.game_code(),
-            SoundData::NintendoDs(_) | SoundData::Dse(_) => None,
-        }
-    }
+    /// Returns this archive as `&dyn Any`, enabling downcasts to the concrete type in tests,
+    /// examples, and app code that needs console-specific fields (e.g. `GbaRom::game_code()`).
+    fn as_any(&self) -> &dyn std::any::Any;
 
     /// Playback length of song `id` in seconds, or `None` if the song is missing/malformed.
     ///
@@ -117,7 +82,7 @@ impl SoundData {
     /// Computed by running the device sequencer headlessly (no audio) and timing how many
     /// fixed-rate device ticks elapse before the second [`SynthEvent::Looped`] or the
     /// [`SynthEvent::Ended`]. A song that neither loops nor ends is capped at 15 minutes.
-    pub fn song_length_seconds(&self, id: u32) -> Option<f64> {
+    fn song_length_seconds(&self, id: u32) -> Option<f64> {
         let mut player = self.make_player(id)?;
         let tick_rate = player.tick_rate();
         let config = PerDeviceSettings::neutral();
@@ -149,104 +114,60 @@ impl SoundData {
         }
         Some(end_ticks.unwrap_or(ticks) as f64 / tick_rate)
     }
-
-    /// DC-offset stats for every PCM sample reachable from song `id`, sorted by the amount of DC
-    /// shift (most shifted first). Currently only GBA DirectSound samples are analyzed; other
-    /// archives return an empty list.
-    pub fn sample_dc_stats(&self, id: u32) -> Vec<SampleDcStat> {
-        match self {
-            SoundData::Gba(rom) => gba::sample_dc_stats(rom, id),
-            SoundData::NintendoDs(_) | SoundData::Dse(_) => Vec::new(),
-        }
-    }
-
-    /// Creates a player for song `id`.
-    pub fn make_player(&self, id: u32) -> Option<DevicePlayer> {
-        match self {
-            SoundData::NintendoDs(sdat) => Some(DevicePlayer::NintendoDs(Box::new(
-                nintendo_ds::NdsPlayer::new(sdat, id)?,
-            ))),
-            SoundData::Gba(rom) => Some(DevicePlayer::Gba(Box::new(gba::GbaPlayer::new(rom, id)?))),
-            SoundData::Dse(dse) => Some(DevicePlayer::Dse(Box::new(dse.make_player(id)?))),
-        }
-    }
 }
 
 /// A running device player: the sequencer + envelope model of one console, generating
 /// [`SynthEvent`]s for the [`SynthController`](crate::SynthController).
-pub enum DevicePlayer {
-    NintendoDs(Box<nintendo_ds::NdsPlayer>),
-    Gba(Box<gba::GbaPlayer>),
-    Dse(Box<dse::DsePlayer>),
-}
-
-impl DevicePlayer {
+pub trait DevicePlayer: Send {
     /// The device master-clock rate in Hz (cycles per second).
-    pub fn clock_rate(&self) -> f64 {
-        match self {
-            // The DSE driver runs off the same DS system clock as the SSEQ engine.
-            DevicePlayer::NintendoDs(_) | DevicePlayer::Dse(_) => crate::DS_CLOCK_RATE as f64,
-            DevicePlayer::Gba(_) => gba::GBA_CLOCK_RATE as f64,
-        }
-    }
+    fn clock_rate(&self) -> f64;
 
     /// Device clock cycles between ticks (DS: sequencer timer period; GBA: one VBlank frame).
-    pub fn cycles_per_tick(&self) -> f64 {
-        match self {
-            DevicePlayer::NintendoDs(_) => crate::CYCLES_PER_TICK as f64,
-            DevicePlayer::Gba(_) => gba::CYCLES_PER_FRAME as f64,
-            DevicePlayer::Dse(_) => dse::DSE_CYCLES_PER_TICK as f64,
-        }
-    }
-
-    /// Device ticks per second.
-    pub fn tick_rate(&self) -> f64 {
-        self.clock_rate() / self.cycles_per_tick()
-    }
+    fn cycles_per_tick(&self) -> f64;
 
     /// Sequencer steps executed so far — the note-timeline position for visualizers
     /// (DS: SSEQ ticks; GBA: MP2K tempo steps).
-    pub fn steps_elapsed(&self) -> u32 {
-        match self {
-            DevicePlayer::NintendoDs(p) => p.steps_elapsed(),
-            DevicePlayer::Gba(p) => p.steps_elapsed(),
-            DevicePlayer::Dse(p) => p.steps_elapsed(),
-        }
-    }
+    fn steps_elapsed(&self) -> u32;
 
     /// The current *sequencer* step rate in steps per second (tempo-dependent), used by
     /// visualizers to convert note timestamps to wall time.
-    pub fn step_rate(&self) -> f64 {
-        match self {
-            DevicePlayer::NintendoDs(p) => p.step_rate(),
-            DevicePlayer::Gba(p) => p.step_rate(),
-            DevicePlayer::Dse(p) => p.step_rate(),
-        }
-    }
+    fn step_rate(&self) -> f64;
 
     /// Sequencer steps per quarter-note beat (DS SSEQ: 48 ticks; GBA MP2K: 24 steps). Lets a
     /// visualizer convert the tempo-dependent [`Self::step_rate`] into a musical BPM:
     /// `bpm = step_rate * 60 / steps_per_beat`.
-    pub fn steps_per_beat(&self) -> f64 {
-        match self {
-            DevicePlayer::NintendoDs(_) => 48.0,
-            DevicePlayer::Gba(_) => 24.0,
-            // DSE TPQN is per-song (read from the SMDL); 48 is the universal Explorers value.
-            DevicePlayer::Dse(_) => 48.0,
-        }
-    }
+    fn steps_per_beat(&self) -> f64;
 
     /// Advances the device by one tick, draining `feedback` and appending events to `events`.
-    pub fn tick(
+    fn tick(
         &mut self,
         feedback: &mut TickFeedback,
         config: &PerDeviceSettings,
         events: &mut Vec<SynthEvent>,
-    ) {
-        match self {
-            DevicePlayer::NintendoDs(p) => p.tick(feedback, config, events),
-            DevicePlayer::Gba(p) => p.tick(feedback, config, events),
-            DevicePlayer::Dse(p) => p.tick(feedback, config, events),
-        }
+    );
+
+    /// Device ticks per second.
+    fn tick_rate(&self) -> f64 {
+        self.clock_rate() / self.cycles_per_tick()
+    }
+}
+
+/// Parses every sound archive found in `bytes` (`.nds`/`.sdat` containers, a DSE ROM, or a
+/// GBA ROM). DSE is probed before GBA: a PMD `.nds` has no SDAT, so the SDAT scan comes up
+/// empty and the `swdl`/`smdl` scan identifies it.
+pub fn load_all(bytes: &[u8]) -> Vec<Box<dyn SoundData>> {
+    let sdats = nintendo_ds::Sdat::load_all(bytes);
+    if !sdats.is_empty() {
+        return sdats
+            .into_iter()
+            .map(|sdat| -> Box<dyn SoundData> { Box::new(sdat) })
+            .collect();
+    }
+    if let Some(dse) = dse::DseSoundData::load_all(bytes) {
+        return vec![Box::new(dse)];
+    }
+    match gba::GbaRom::parse(bytes) {
+        Some(rom) => vec![Box::new(rom)],
+        None => Vec::new(),
     }
 }

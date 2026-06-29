@@ -365,7 +365,7 @@ impl Transition {
 pub struct SynthController {
     sample_rate: f64,
     /// The device player generating the event stream.
-    pub player: DevicePlayer,
+    pub player: Box<dyn DevicePlayer>,
     /// The output-rate synthesizers (PSG voices, and every voice when the mixer is off).
     synths: Vec<SampleSynthesizer>,
     slot_owner: SlotOwners,
@@ -400,7 +400,7 @@ impl SynthController {
     /// Binds song `song_id` from `data` for playback at `sample_rate`.
     ///
     /// Returns `None` if the song is missing or malformed.
-    pub fn new(sample_rate: f64, data: &SoundData, song_id: u32) -> Option<SynthController> {
+    pub fn new(sample_rate: f64, data: &dyn SoundData, song_id: u32) -> Option<SynthController> {
         let player = data.make_player(song_id)?;
         let mixer_rate = 48_000.0;
         let (synths, slot_owner) = new_synth_set(sample_rate);

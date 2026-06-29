@@ -2,12 +2,12 @@
 //! carry no song names of their own — GBA MP2K song tables are just numbered.
 //!
 //! This is **presentation metadata**, deliberately kept in the app rather than `optime-core` (which
-//! stays free of UI/cosmetic, game-specific data). Song data is loaded from JSON files in this
-//! directory (`[{ "songId", "title" }]`, embedded via `include_str!`), selected here by the GBA
-//! game code from the ROM header (`SoundData::gba_game_code`) or, for games with no game code (e.g.
-//! DS), by the loaded source filename. A song's **index in that array** is its listing order, used
-//! as the "Default" sort position, so the OST plays back in album order with everything else
-//! following.
+//! stays free of UI/cosmetic, game-specific data). Each table is a JSON file in this directory
+//! (`[{ "songId", "title" }]`, embedded via `include_str!`). [`lookup`] selects one by the loaded
+//! source filename ([`JSONS_BY_GAME_FILENAME`], for DS / game-code-less games) or, failing that, by
+//! the GBA game code from the ROM header ([`JSONS_BY_GBA_GAME_CODE`]). A song's **index in that
+//! array** is its listing order, used as the "Default" sort position, so the OST plays back in album
+//! order with everything else following.
 //!
 //! The desktop app's "Edit song names" mode round-trips these files: [`source_json_dir`] and
 //! [`target_filename`] tell it which on-disk JSON to write a game's edited titles + order back to.

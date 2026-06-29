@@ -18,7 +18,7 @@
 use std::io::Write as _;
 
 use optime_core::{
-    InstrumentResampleMode, PerDeviceSettings, SoundData, StreamResampler, SynthController,
+    load_all, InstrumentResampleMode, PerDeviceSettings, StreamResampler, SynthController,
 };
 
 /// Mixer-bus (DirectSound) rate — deliberately below the output rate so nearest-neighbour ZOH
@@ -80,7 +80,7 @@ fn main() {
         "/../../demos/pokemon-emerald.gbaaudio"
     );
     let bytes = std::fs::read(path).expect("read pokemon-emerald.gbaaudio");
-    let archives = SoundData::load_all(&bytes);
+    let archives = load_all(&bytes);
 
     let crunch = InstrumentResampleMode::SincOutputNyquist {
         half_taps: HALF_TAPS,
@@ -96,13 +96,13 @@ fn main() {
     for &song in SONGS {
         let Some(data) = archives
             .iter()
-            .find(|s| SynthController::new(OUT_RATE, s, song).is_some())
+            .find(|s| SynthController::new(OUT_RATE, &***s, song).is_some())
         else {
             eprintln!("song {song}: not found, skipping");
             continue;
         };
         let mut controller =
-            SynthController::new(OUT_RATE, data, song).expect("controller for song");
+            SynthController::new(OUT_RATE, &**data, song).expect("controller for song");
 
         // Capture the isolated DirectSound bus at the mixer rate.
         let cfg = mixer_config(); // capture is mode-independent; reuse one config

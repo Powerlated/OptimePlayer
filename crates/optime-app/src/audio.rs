@@ -207,7 +207,7 @@ fn step_playback(st: &mut AudioState) {
         .get(target)
         .map(|e| (e.archive.clone(), e.track.song_id));
     let decoded = match to_decode {
-        Some((Some(arc), song_id)) => SynthController::new(st.sample_rate, &arc, song_id),
+        Some((Some(arc), song_id)) => SynthController::new(st.sample_rate, &*arc, song_id),
         _ => None,
     };
     match decoded {

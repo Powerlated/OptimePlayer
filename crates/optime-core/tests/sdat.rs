@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use optime_core::{Sdat, SoundData};
+use optime_core::{load_all, Sdat};
 
 fn demo_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -72,8 +72,8 @@ fn parses_multiple_demos() {
 #[test]
 fn computes_song_lengths() {
     let bytes = std::fs::read(demo_path("super-mario-64-ds.sdat")).unwrap();
-    let archives = SoundData::load_all(&bytes);
-    let data = &archives[0];
+    let archives = load_all(&bytes);
+    let data = &*archives[0];
     let ids = data.song_ids();
     assert!(!ids.is_empty());
 
@@ -86,6 +86,32 @@ fn computes_song_lengths() {
         assert!(
             len > 0.0 && len.is_finite() && len < 15.0 * 60.0,
             "song {id}: implausible length {len}s"
+        );
+    }
+}
+
+#[test]
+fn lookahead_overview_collects_notes() {
+    // The look-ahead now runs the real device player and reads its `SynthEvent` stream; the
+    // whole-song `overview` should yield a non-empty note timeline with sane durations.
+    let bytes = std::fs::read(demo_path("super-mario-64-ds.sdat")).unwrap();
+    let archives = load_all(&bytes);
+    let data = &*archives[0];
+    let id = data.song_ids()[0];
+
+    let overview =
+        optime_core::FsVisController::overview(data, id).expect("overview for the first song");
+    assert!(!overview.notes.is_empty(), "the song should contain notes");
+    assert!(overview.total_steps > 0);
+    assert!(!overview.tempos.is_empty(), "at least the starting tempo");
+    // Every resolved note bar must fit inside the timeline.
+    for n in &overview.notes {
+        assert!(
+            n.timestamp + n.duration <= overview.total_steps,
+            "note runs past the timeline: ts={} dur={} total={}",
+            n.timestamp,
+            n.duration,
+            overview.total_steps
         );
     }
 }

@@ -2,7 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use optime_core::{FsVisController, InstrumentResampleMode, SoundData};
+use optime_core::devices::gba::GbaRom;
+use optime_core::{load_all, FsVisController, InstrumentResampleMode, SoundData};
 
 #[cfg(target_arch = "wasm32")]
 use crate::web::get_track_ref_from_query_string;
@@ -264,7 +265,7 @@ pub struct OptimeApp {
     audio_failed: bool,
     sample_rate: f64,
 
-    archives: Vec<Arc<SoundData>>,
+    archives: Vec<Arc<dyn SoundData>>,
     songs: Vec<Song>,
     current_song: Option<usize>,
 
@@ -464,7 +465,7 @@ impl OptimeApp {
     fn current_is_gba(&self) -> bool {
         self.current_song
             .and_then(|i| self.songs.get(i))
-            .is_some_and(|s| matches!(*self.archives[s.archive_index], SoundData::Gba(_)))
+            .is_some_and(|s| self.archives[s.archive_index].as_any().is::<GbaRom>())
     }
 
     /// Human-readable name of the current song's console.
@@ -616,16 +617,19 @@ impl OptimeApp {
         } else {
             bytes
         };
-        let archives = SoundData::load_all(bytes);
+        let archives = load_all(bytes);
         if archives.is_empty() {
             self.status = format!("No songs found in {source} (not an SDAT, NDS, or GBA ROM).");
             return;
         }
-        self.archives = archives.into_iter().map(Arc::new).collect();
+        self.archives = archives.into_iter().map(Arc::from).collect();
         self.songs.clear();
         for (i, data) in self.archives.iter().enumerate() {
             // GBA ROMs carry no song names; supply curated titles + OST order by game code.
-            let game_code = data.gba_game_code();
+            let game_code = data
+                .as_any()
+                .downcast_ref::<GbaRom>()
+                .and_then(GbaRom::game_code);
             for id in data.song_ids() {
                 let meta = song_names::lookup(Some(key), game_code.as_deref(), id);
                 // A curated title (the editor's output) wins over the ROM's embedded name.
@@ -914,7 +918,7 @@ impl OptimeApp {
     }
 
     /// The loaded source archive for `t`, or `None` if `t` belongs to a source that isn't loaded.
-    fn resolve_archive(&self, t: &TrackRef) -> Option<Arc<SoundData>> {
+    fn resolve_archive(&self, t: &TrackRef) -> Option<Arc<dyn SoundData>> {
         if t.source != self.current_source {
             return None;
         }
@@ -1049,7 +1053,7 @@ impl OptimeApp {
         };
         let mut roll = PianoRoll::default();
         let look = resolved.and_then(|(archive_index, song_id)| {
-            let mut look = FsVisController::new(&self.archives[archive_index], song_id)?;
+            let mut look = FsVisController::new(&*self.archives[archive_index], song_id)?;
             // Pre-buffer the opening notes (bounded like the live look-ahead drive).
             let mut guard = 0u32;
             while look.steps_elapsed() < crate::piano_roll::RUN_AHEAD_TICKS && guard < 200_000 {
@@ -1135,9 +1139,9 @@ impl OptimeApp {
                 let s = &self.songs[i];
                 (s.archive_index, s.song_id, s.label.clone())
             };
-            self.look_ahead = FsVisController::new(&self.archives[archive_index], song_id);
+            self.look_ahead = FsVisController::new(&*self.archives[archive_index], song_id);
             self.status = format!("Playing: {label}");
-            self.overview = FsVisController::overview(&self.archives[archive_index], song_id);
+            self.overview = FsVisController::overview(&*self.archives[archive_index], song_id);
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1202,7 +1206,7 @@ impl OptimeApp {
             return;
         };
         let song = &self.songs[i];
-        let data = &self.archives[song.archive_index];
+        let data = &*self.archives[song.archive_index];
         let samples = player::render_to_samples(data, song.song_id, &self.config());
         let wav = crate::wav::encode_stereo_i16(&samples, player::EXPORT_SAMPLE_RATE);
         let name = song.label.replace([' ', '#', '(', ')', '/'], "_");
@@ -1212,19 +1216,18 @@ impl OptimeApp {
 
     /// Whether a GBA ROM is currently loaded (enables the audio-data export button).
     fn gba_loaded(&self) -> bool {
-        self.archives
-            .iter()
-            .any(|a| matches!(**a, SoundData::Gba(_)))
+        self.archives.iter().any(|a| a.as_any().is::<GbaRom>())
     }
 
     /// Exports the loaded GBA ROM's audio data as an audio-only `.gba` image: everything the
     /// MP2K engine can't reach from the song table is stripped, so the file can be shipped
     /// (e.g. in `demos/`) without bundling the game's code or art.
     fn export_gba_audio(&mut self) {
-        let Some(rom) = self.archives.iter().find_map(|a| match &**a {
-            SoundData::Gba(rom) => Some(rom),
-            _ => None,
-        }) else {
+        let Some(rom) = self
+            .archives
+            .iter()
+            .find_map(|a| a.as_any().downcast_ref::<GbaRom>())
+        else {
             self.status = "No GBA ROM loaded.".to_owned();
             return;
         };
@@ -1520,7 +1523,11 @@ impl OptimeApp {
         // Seed the (adjustable) target filename from the loaded game's table the first time, and
         // again whenever a different game is loaded — but keep the user's edits in between.
         if self.song_edit_filename_for != self.current_source {
-            let game_code = self.archives.first().and_then(|a| a.gba_game_code());
+            let game_code = self
+                .archives
+                .first()
+                .and_then(|a| a.as_any().downcast_ref::<GbaRom>())
+                .and_then(GbaRom::game_code);
             let (file, _) =
                 song_names::target_filename(Some(&self.current_source), game_code.as_deref());
             self.song_edit_filename = file;

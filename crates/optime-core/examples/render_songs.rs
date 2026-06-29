@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use optime_core::{PerDeviceSettings, SoundData, SynthController};
+use optime_core::{load_all, PerDeviceSettings, SynthController};
 
 const SAMPLE_RATE: u32 = 32_768;
 
@@ -35,7 +35,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let Some(data) = SoundData::load_all(&bytes).into_iter().next() else {
+    let Some(data) = load_all(&bytes).into_iter().next() else {
         eprintln!("No songs found in '{in_path}' (not an SDAT, DSE, or GBA image).");
         return ExitCode::FAILURE;
     };
@@ -57,7 +57,7 @@ fn main() -> ExitCode {
 
     for (index, &id) in song_ids.iter().enumerate() {
         let wav_name = format!("{index:04}_{id}.wav");
-        let Some(mut controller) = SynthController::new(SAMPLE_RATE as f64, &data, id) else {
+        let Some(mut controller) = SynthController::new(SAMPLE_RATE as f64, &*data, id) else {
             eprintln!("song {id}: failed to start, skipping");
             continue;
         };

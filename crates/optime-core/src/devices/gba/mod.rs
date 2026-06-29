@@ -32,3 +32,23 @@ pub const CYCLES_PER_FRAME: u64 = 280_896;
 /// The software mixer rate (`SOUND_MODE_FREQ_13379`) — the playback rate of fixed-frequency
 /// voices and the rate every DirectSound voice is mixed at on hardware.
 pub const ENGINE_RATE: f64 = 13379.0;
+
+impl crate::devices::SoundData for GbaRom {
+    fn song_ids(&self) -> Vec<u32> {
+        (0..self.song_count() as u32)
+            .filter(|&id| self.song_header(id).is_some())
+            .collect()
+    }
+
+    fn make_player(&self, id: u32) -> Option<Box<dyn crate::devices::DevicePlayer>> {
+        Some(Box::new(GbaPlayer::new(self, id)?))
+    }
+
+    fn sample_dc_stats(&self, id: u32) -> Vec<crate::devices::SampleDcStat> {
+        sample_dc_stats(self, id)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}

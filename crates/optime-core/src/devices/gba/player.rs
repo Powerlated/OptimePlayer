@@ -139,20 +139,9 @@ impl GbaPlayer {
         })
     }
 
-    /// Sequencer steps executed (the visualizer timeline).
-    pub fn steps_elapsed(&self) -> u32 {
-        self.seq.steps
-    }
-
-    /// Sequencer steps per second at the current tempo.
-    pub fn step_rate(&self) -> f64 {
-        let frame_rate = super::GBA_CLOCK_RATE as f64 / super::CYCLES_PER_FRAME as f64;
-        frame_rate * self.seq.steps_per_frame()
-    }
-
     /// One VBlank frame: sequencer steps → channel ops → track volume/pitch refresh →
     /// envelope frame (mirroring the hardware's MPlayMain-then-SoundMain order).
-    pub fn tick(
+    fn tick_impl(
         &mut self,
         feedback: &mut TickFeedback,
         config: &PerDeviceSettings,
@@ -895,6 +884,39 @@ fn build_noise_samples() -> [Arc<Sample>; 2] {
         Arc::new(s)
     };
     [generate(false), generate(true)]
+}
+
+impl crate::devices::DevicePlayer for GbaPlayer {
+    fn clock_rate(&self) -> f64 {
+        super::GBA_CLOCK_RATE as f64
+    }
+
+    fn cycles_per_tick(&self) -> f64 {
+        super::CYCLES_PER_FRAME as f64
+    }
+
+    fn steps_elapsed(&self) -> u32 {
+        self.seq.steps
+    }
+
+    /// Sequencer steps per second at the current tempo.
+    fn step_rate(&self) -> f64 {
+        let frame_rate = super::GBA_CLOCK_RATE as f64 / super::CYCLES_PER_FRAME as f64;
+        frame_rate * self.seq.steps_per_frame()
+    }
+
+    fn steps_per_beat(&self) -> f64 {
+        24.0
+    }
+
+    fn tick(
+        &mut self,
+        feedback: &mut TickFeedback,
+        config: &PerDeviceSettings,
+        events: &mut Vec<SynthEvent>,
+    ) {
+        self.tick_impl(feedback, config, events);
+    }
 }
 
 #[cfg(test)]

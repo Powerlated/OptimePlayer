@@ -7,7 +7,7 @@
 //! baseline for the scalar gather; the SIMD and scalar builds hash differently by design).
 
 use optime_core::{
-    InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
+    load_all, InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
     PerDeviceSettings, SoundData, SynthController,
 };
 
@@ -23,7 +23,7 @@ fn fnv1a(hash: &mut u64, bytes: &[u8]) {
 
 /// Renders `FRAMES` stereo frames of song 0 from `data` under `config`, folding every output
 /// f32's raw bits into `hash`.
-fn render_into(hash: &mut u64, data: &SoundData, config: &PerDeviceSettings) {
+fn render_into(hash: &mut u64, data: &dyn SoundData, config: &PerDeviceSettings) {
     let Some(mut ctrl) = SynthController::new(SAMPLE_RATE, data, 0) else {
         fnv1a(hash, b"<no-controller>");
         return;
@@ -87,12 +87,12 @@ fn main() {
 
     for path in demos {
         let bytes = std::fs::read(&path).expect("read demo");
-        let archives = SoundData::load_all(&bytes);
+        let archives = load_all(&bytes);
         let name = path.file_name().unwrap().to_string_lossy();
         for (cfg_name, cfg) in configs() {
             let mut hash = 0xcbf2_9ce4_8422_2325u64;
             for data in &archives {
-                render_into(&mut hash, data, &cfg);
+                render_into(&mut hash, &**data, &cfg);
             }
             println!("{name:32} {cfg_name:14} {hash:016x}");
         }

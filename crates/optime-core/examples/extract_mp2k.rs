@@ -7,7 +7,8 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use optime_core::{PerDeviceSettings, SoundData, SynthController};
+use optime_core::devices::gba::GbaRom;
+use optime_core::{load_all, PerDeviceSettings, SynthController};
 
 fn main() -> ExitCode {
     let Some(path) = std::env::args().nth(1) else {
@@ -22,13 +23,14 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut archives = SoundData::load_all(&bytes);
-    let Some(data @ SoundData::Gba(_)) = archives.pop() else {
+    let mut archives = load_all(&bytes);
+    let Some(data) = archives.pop() else {
         eprintln!("No MP2K song table found in '{path}'.");
         return ExitCode::FAILURE;
     };
-    let SoundData::Gba(gba) = &data else {
-        unreachable!()
+    let Some(gba) = data.as_any().downcast_ref::<GbaRom>() else {
+        eprintln!("No MP2K song table found in '{path}'.");
+        return ExitCode::FAILURE;
     };
 
     let song_ids = data.song_ids();
@@ -49,7 +51,7 @@ fn main() -> ExitCode {
     );
 
     // Verify: same song list, and a sample of songs renders bit-identically.
-    let Some(stripped) = SoundData::load_all(&extracted).pop() else {
+    let Some(stripped) = load_all(&extracted).pop() else {
         eprintln!("BUG: the extracted image no longer parses.");
         return ExitCode::FAILURE;
     };
@@ -66,8 +68,8 @@ fn main() -> ExitCode {
     let step = (song_ids.len() / 8).max(1);
     for &id in song_ids.iter().step_by(step) {
         let (Some(mut a), Some(mut b)) = (
-            SynthController::new(sr, &data, id),
-            SynthController::new(sr, &stripped, id),
+            SynthController::new(sr, &*data, id),
+            SynthController::new(sr, &*stripped, id),
         ) else {
             eprintln!("BUG: song {id} no longer starts.");
             return ExitCode::FAILURE;

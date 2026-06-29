@@ -128,8 +128,7 @@ impl DseSoundData {
         self.songs.get(id as usize).map(|s| s.name.clone())
     }
 
-    /// Builds a player for song `id`.
-    pub fn make_player(&self, id: u32) -> Option<DsePlayer> {
+    fn make_dse_player(&self, id: u32) -> Option<DsePlayer> {
         let song = self.songs.get(id as usize)?;
         Some(DsePlayer::new(
             &song.smdl,
@@ -137,9 +136,22 @@ impl DseSoundData {
             self.main_bank.clone(),
         ))
     }
+}
 
-    /// Builds a bare sequencer for song `id` (no sample decoding), for the look-ahead visualizer.
-    pub fn make_sequencer(&self, id: u32) -> Option<DseSequencer> {
-        Some(DseSequencer::new(&self.songs.get(id as usize)?.smdl))
+impl crate::devices::SoundData for DseSoundData {
+    fn song_ids(&self) -> Vec<u32> {
+        (0..self.songs.len() as u32).collect()
+    }
+
+    fn song_name(&self, id: u32) -> Option<String> {
+        self.songs.get(id as usize).map(|s| s.name.clone())
+    }
+
+    fn make_player(&self, id: u32) -> Option<Box<dyn crate::devices::DevicePlayer>> {
+        Some(Box::new(self.make_dse_player(id)?))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

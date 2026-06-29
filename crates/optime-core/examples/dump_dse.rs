@@ -13,7 +13,7 @@
 use optime_core::devices::dse::{decode_track, DseEvent, Smdl, Swdl};
 use optime_core::sample::Sample;
 use optime_core::synth_controller::messages::TickFeedback;
-use optime_core::{FsVisController, PerDeviceSettings, SoundData, SynthController, SynthEvent};
+use optime_core::{load_all, FsVisController, PerDeviceSettings, SynthController, SynthEvent};
 use std::path::Path;
 
 fn main() {
@@ -158,6 +158,7 @@ fn main() {
     if let Some(bytes) = &song_bank {
         if let Some(bank) = Swdl::parse(bytes) {
             use optime_core::devices::dse::DsePlayer;
+            use optime_core::DevicePlayer as _;
             use std::sync::Arc;
             let mut player = DsePlayer::new(&song, Arc::new(bank), Arc::new(main.clone()));
             let mut feedback = TickFeedback::default();
@@ -223,7 +224,7 @@ fn main() {
 /// `song_id`, reporting the standardized synth events the audio layer would consume.
 fn rom_mode(path: &str, song_id: u32) {
     let bytes = std::fs::read(path).expect("read ROM");
-    let archives = SoundData::load_all(&bytes);
+    let archives = load_all(&bytes);
     let Some(data) = archives.first() else {
         eprintln!("No DSE/SDAT/GBA archive found in {path}");
         std::process::exit(1);
@@ -290,7 +291,7 @@ fn rom_mode(path: &str, song_id: u32) {
     );
 
     // The look-ahead visualizer path: render the whole-song overview the piano roll uses.
-    if let Some(overview) = FsVisController::overview(data, song_id) {
+    if let Some(overview) = FsVisController::overview(&**data, song_id) {
         let dur: u32 = overview.notes.iter().map(|n| n.duration).sum();
         println!("== look-ahead overview ==");
         println!(
@@ -304,7 +305,7 @@ fn rom_mode(path: &str, song_id: u32) {
 
     // Render ~10s of real mixed audio through the SynthController and report the output level,
     // to check the per-voice volume calibration doesn't drive the mix into hard clipping.
-    if let Some(mut ctrl) = SynthController::new(32_768.0, data, song_id) {
+    if let Some(mut ctrl) = SynthController::new(32_768.0, &**data, song_id) {
         let mut buf = vec![0f32; 32_768 * 2 * 10];
         ctrl.fill(&mut buf, &config);
         let peak = buf.iter().fold(0f32, |m, &s| m.max(s.abs()));

@@ -263,12 +263,6 @@ impl Mp2kSequencer {
         f64::from(self.tempo_i) / f64::from(TEMPO_STEP)
     }
 
-    /// The current tempo register. MP2K writes `tempoI = bpm`, so this is the musical BPM
-    /// (there are 24 sequencer steps per quarter note).
-    pub(crate) fn tempo_i(&self) -> u16 {
-        self.tempo_i
-    }
-
     /// Advances one frame (VBlank): runs `tempo_i / 150` sequencer steps, appending ops.
     pub fn tick_frame(&mut self, ops: &mut Vec<Mp2kOp>) {
         if self.finished {

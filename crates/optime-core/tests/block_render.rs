@@ -6,14 +6,14 @@
 use std::path::PathBuf;
 
 use optime_core::{
-    InstrumentResampleChoice, InstrumentResampleSettings, MixerResampleSettings, PerDeviceSettings,
-    SoundData, SynthController,
+    load_all, InstrumentResampleChoice, InstrumentResampleSettings, MixerResampleSettings,
+    PerDeviceSettings, SoundData, SynthController,
 };
 
-fn load_demo() -> SoundData {
+fn load_demo() -> Box<dyn SoundData> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../demos/super-mario-64-ds.sdat");
     let bytes = std::fs::read(path).expect("demo file should exist");
-    SoundData::load_all(&bytes).remove(0)
+    load_all(&bytes).remove(0)
 }
 
 /// An instrument-resample settings block, spelled out so the tests can vary the algorithm, tap
@@ -40,8 +40,8 @@ fn instrument(
 fn assert_fill_matches_next_sample(config: &PerDeviceSettings, label: &str) {
     let data = load_demo();
     let sr = 32768.0;
-    let mut per_sample = SynthController::new(sr, &data, 0).expect("SSEQ 0");
-    let mut blocked = SynthController::new(sr, &data, 0).expect("SSEQ 0");
+    let mut per_sample = SynthController::new(sr, &*data, 0).expect("SSEQ 0");
+    let mut blocked = SynthController::new(sr, &*data, 0).expect("SSEQ 0");
 
     // Uneven chunk sizes so blocks split at chunk boundaries as well as tick boundaries,
     // including a chunk with an odd f32 count (a trailing half frame).

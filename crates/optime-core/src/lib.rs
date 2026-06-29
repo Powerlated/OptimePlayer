@@ -33,7 +33,9 @@ pub use devices::nintendo_ds::{
     calc_channel_volume, BankInfo, InstrumentBank, InstrumentRecord, InstrumentType, Message,
     MessageType, Sdat, Sequence, SequenceTrack, SseqInfo, SwarInfo,
 };
-pub use devices::{DevicePlayer, SampleDcStat, SoundData, SynthEvent, VoiceId, VoicePitch};
+pub use devices::{
+    load_all, DevicePlayer, SampleDcStat, SoundData, SynthEvent, VoiceId, VoicePitch,
+};
 pub use dsp::biquad_filter;
 pub use dsp::resample::{ResampleTables, StreamResampler};
 pub use sample::{

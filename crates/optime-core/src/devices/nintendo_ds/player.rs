@@ -137,20 +137,9 @@ impl NdsPlayer {
         })
     }
 
-    /// Sequencer steps executed (SSEQ ticks; the visualizer timeline).
-    pub fn steps_elapsed(&self) -> u32 {
-        self.sequence.ticks_elapsed
-    }
-
-    /// Current sequencer step rate in Hz: the ≈192 Hz hardware timer scaled by track 0's BPM.
-    pub fn step_rate(&self) -> f64 {
-        let base = crate::DS_CLOCK_RATE as f64 / crate::CYCLES_PER_TICK as f64;
-        base * f64::from(self.sequence.tracks[0].bpm.max(1)) / 240.0
-    }
-
     /// Advances note envelopes/LFOs, then runs any due sequencer steps and converts their
     /// messages into [`SynthEvent`]s.
-    pub fn tick(
+    fn tick_impl(
         &mut self,
         feedback: &mut TickFeedback,
         config: &PerDeviceSettings,
@@ -457,5 +446,38 @@ impl NdsPlayer {
                 }
             }
         }
+    }
+}
+
+impl crate::devices::DevicePlayer for NdsPlayer {
+    fn clock_rate(&self) -> f64 {
+        crate::DS_CLOCK_RATE as f64
+    }
+
+    fn cycles_per_tick(&self) -> f64 {
+        crate::CYCLES_PER_TICK as f64
+    }
+
+    fn steps_elapsed(&self) -> u32 {
+        self.sequence.ticks_elapsed
+    }
+
+    /// Current sequencer step rate in Hz: the ≈192 Hz hardware timer scaled by track 0's BPM.
+    fn step_rate(&self) -> f64 {
+        let base = crate::DS_CLOCK_RATE as f64 / crate::CYCLES_PER_TICK as f64;
+        base * f64::from(self.sequence.tracks[0].bpm.max(1)) / 240.0
+    }
+
+    fn steps_per_beat(&self) -> f64 {
+        48.0
+    }
+
+    fn tick(
+        &mut self,
+        feedback: &mut TickFeedback,
+        config: &PerDeviceSettings,
+        events: &mut Vec<SynthEvent>,
+    ) {
+        self.tick_impl(feedback, config, events);
     }
 }

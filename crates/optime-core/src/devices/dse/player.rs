@@ -214,16 +214,6 @@ impl DsePlayer {
         }
     }
 
-    /// Sequencer ticks executed (the visualizer timeline).
-    pub fn steps_elapsed(&self) -> u32 {
-        self.seq.ticks_elapsed
-    }
-
-    /// Current sequencer step rate in Hz: `bpm * tpqn / 60`.
-    pub fn step_rate(&self) -> f64 {
-        f64::from(self.seq.bpm.max(1)) * f64::from(self.seq.tpqn) / 60.0
-    }
-
     /// Microseconds per sequencer tick at the current tempo.
     fn seq_tick_us(&self) -> i64 {
         let denom = i64::from(self.seq.bpm.max(1)) * i64::from(self.seq.tpqn);
@@ -231,12 +221,7 @@ impl DsePlayer {
     }
 
     /// Advances one driver tick: updates envelopes, then runs any sequencer ticks now due.
-    pub fn tick(
-        &mut self,
-        feedback: &mut TickFeedback,
-        _config: &PerDeviceSettings,
-        events: &mut Vec<SynthEvent>,
-    ) {
+    fn tick_impl(&mut self, feedback: &mut TickFeedback, events: &mut Vec<SynthEvent>) {
         self.update_voices(feedback, events);
         feedback.ended_voices.clear();
 
@@ -683,6 +668,39 @@ fn lfo_set_parameter(t: &mut DseTrack, param: u8, value: u8) {
         9 => slot.delay = (slot.delay & 0x00ff) | (u16::from(value) << 8),
         10 => slot.fade = (v * 20) as u16,
         _ => {}
+    }
+}
+
+impl crate::devices::DevicePlayer for DsePlayer {
+    fn clock_rate(&self) -> f64 {
+        crate::DS_CLOCK_RATE as f64
+    }
+
+    fn cycles_per_tick(&self) -> f64 {
+        DSE_CYCLES_PER_TICK as f64
+    }
+
+    fn steps_elapsed(&self) -> u32 {
+        self.seq.ticks_elapsed
+    }
+
+    /// Current sequencer step rate in Hz: `bpm * tpqn / 60`.
+    fn step_rate(&self) -> f64 {
+        f64::from(self.seq.bpm.max(1)) * f64::from(self.seq.tpqn) / 60.0
+    }
+
+    fn steps_per_beat(&self) -> f64 {
+        // DSE TPQN is per-song (read from the SMDL); 48 is the universal Explorers value.
+        48.0
+    }
+
+    fn tick(
+        &mut self,
+        feedback: &mut TickFeedback,
+        _config: &PerDeviceSettings,
+        events: &mut Vec<SynthEvent>,
+    ) {
+        self.tick_impl(feedback, events);
     }
 }
 

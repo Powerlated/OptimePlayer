@@ -27,8 +27,10 @@ use clap::Parser;
 use ebur128::{EbuR128, Mode};
 use flac_codec::encode::{FlacSampleWriter, Options};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use optime_core::devices::gba::GbaRom;
 use optime_core::{
-    LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, SynthController,
+    load_all, LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData,
+    SynthController,
 };
 use rayon::prelude::*;
 use serde_json::Value;
@@ -60,7 +62,7 @@ struct Args {
 
 /// Renders one song to stereo frames using the shared controller fade policy (two loops then a
 /// 10-second fade, capped at 480s), applying the same 0.5 headroom gain as the app's WAV export.
-fn render_song(data: &SoundData, song_id: u32, config: &PerDeviceSettings) -> Vec<(f32, f32)> {
+fn render_song(data: &dyn SoundData, song_id: u32, config: &PerDeviceSettings) -> Vec<(f32, f32)> {
     let sr = f64::from(SR);
     let Some(mut controller) = SynthController::new(sr, data, song_id) else {
         return Vec::new();
@@ -126,7 +128,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let Some(data) = SoundData::load_all(&bytes).into_iter().next() else {
+    let Some(data) = load_all(&bytes).into_iter().next() else {
         eprintln!(
             "No songs found in '{}' (not an SDAT, DSE, or GBA image).",
             args.archive.display()
@@ -135,7 +137,7 @@ fn main() -> ExitCode {
     };
 
     // High-quality preset for the archive's console.
-    let is_gba = data.gba_game_code().is_some();
+    let is_gba = data.as_any().downcast_ref::<GbaRom>().is_some();
     let config = if is_gba {
         PerDeviceSettings::high_quality_gba()
     } else {
@@ -225,7 +227,7 @@ fn main() -> ExitCode {
                         break;
                     };
                     pb.set_message(format!("songId {id:<5} \"{title}\""));
-                    let frames = render_song(data, *id, config);
+                    let frames = render_song(&**data, *id, config);
                     let mut bytes = Vec::with_capacity(frames.len() * 4);
                     for &(l, r) in &frames {
                         for s in [l, r] {
