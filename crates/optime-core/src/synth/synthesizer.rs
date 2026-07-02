@@ -1,10 +1,10 @@
-//! [`SampleSynthesizer`]: a polyphonic synthesizer for one sequence track — a round-robin voice
+//! [`WaveformSynthesizer`]: a polyphonic synthesizer for one sequence track — a round-robin voice
 //! pool mixed to stereo through pan, optional Haas widening, and the bass-mono crossover.
 
 use std::sync::Arc;
 
 use super::delay_line::DelayLine;
-use super::instrument::SampleInstrument;
+use super::instrument::WaveformInstrument;
 use super::{CROSSOVER_Q, MAX_BLOCK};
 use crate::devices::VoicePitch;
 use crate::dsp::biquad_filter::BiquadFilter;
@@ -21,9 +21,9 @@ const PAN_SLEW_SECONDS: f64 = 0.01;
 
 /// A polyphonic synthesizer for one sequence track. Holds a fixed pool of voices and mixes the
 /// active ones into a stereo sample, optionally widened by per-channel delay lines.
-pub struct SampleSynthesizer {
+pub struct WaveformSynthesizer {
     sample_rate: f64,
-    instrs: Vec<SampleInstrument>,
+    instrs: Vec<WaveformInstrument>,
     active_instrs: Vec<usize>,
     playing_index: usize,
     /// Last mixed left output.
@@ -54,12 +54,12 @@ pub struct SampleSynthesizer {
     resample_half_taps: usize,
 }
 
-impl SampleSynthesizer {
+impl WaveformSynthesizer {
     /// Creates a synthesizer with `instrs_available` voices at `sample_rate`.
     pub fn new(sample_rate: f64, instrs_available: usize) -> Self {
         let empty = Arc::new(Waveform::new(vec![0.0], 440.0, sample_rate, false, 0));
         let instrs = (0..instrs_available)
-            .map(|_| SampleInstrument::new(sample_rate, empty.clone()))
+            .map(|_| WaveformInstrument::new(sample_rate, empty.clone()))
             .collect();
         let delay_len = (sample_rate * 0.1).round() as usize;
         let crossover_freq = 200.0;
@@ -134,20 +134,20 @@ impl SampleSynthesizer {
 
     /// Immutable access to a voice.
     #[inline]
-    pub fn instr(&self, index: usize) -> &SampleInstrument {
+    pub fn instr(&self, index: usize) -> &WaveformInstrument {
         &self.instrs[index]
     }
 
     /// Mutable access to a voice (used by the controller for ADSR/LFO updates).
     #[inline]
-    pub fn instr_mut(&mut self, index: usize) -> &mut SampleInstrument {
+    pub fn instr_mut(&mut self, index: usize) -> &mut WaveformInstrument {
         &mut self.instrs[index]
     }
 
-    /// Starts `sample` at `pitch` on the next round-robin voice and returns its index.
+    /// Starts `waveform` at `pitch` on the next round-robin voice and returns its index.
     pub fn play(
         &mut self,
-        sample: Arc<Waveform>,
+        waveform: Arc<Waveform>,
         pitch: VoicePitch,
         volume: f64,
         config: &PerDeviceSettings,
@@ -160,7 +160,7 @@ impl SampleSynthesizer {
 
         {
             let instr = &mut self.instrs[index];
-            instr.sample = sample;
+            instr.waveform = waveform;
             instr.set_finetune_lfo(0.0, tuning);
             instr.set_finetune(self.finetune, tuning);
             instr.set_pitch(pitch, tuning);
@@ -179,7 +179,7 @@ impl SampleSynthesizer {
     /// for this voice's kind — via a short fade-out after which the voice stops itself.
     pub fn stop_instrument(&mut self, index: usize, pops: PopSmoothing) {
         let instr = &mut self.instrs[index];
-        if instr.playing && pops.enabled_for(instr.sample.is_psg_square) {
+        if instr.playing && pops.enabled_for(instr.waveform.is_psg_square) {
             instr.begin_fade_out();
         } else {
             self.cut_instrument(index);
@@ -235,7 +235,7 @@ impl SampleSynthesizer {
     /// [`SynthController::next_sample`] keeps disabled tracks running without mixing them.
     ///
     /// Equivalent to `n` calls of [`Self::next_sample`], but voices render the whole block in one
-    /// pass (see [`SampleInstrument::advance_block`]). `n` must be at most [`MAX_BLOCK`].
+    /// pass (see [`WaveformInstrument::advance_block`]). `n` must be at most [`MAX_BLOCK`].
     ///
     /// [`SynthController::next_sample`]: crate::synth_controller::SynthController::next_sample
     pub fn render_block(
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn set_sample_rate_resizes_delays_and_preserves_pool() {
-        let mut synth = SampleSynthesizer::new(44_100.0, 8);
+        let mut synth = WaveformSynthesizer::new(44_100.0, 8);
         let config = PerDeviceSettings {
             stereo_separation: true,
             ..PerDeviceSettings::neutral()
@@ -402,14 +402,14 @@ mod tests {
         assert_eq!(synth.delay_line_l.delay(), before);
     }
 
-    /// Plays a constant-amplitude looping sample hard-left, settles, and returns `(val_l, val_r)`.
+    /// Plays a constant-amplitude looping waveform hard-left, settles, and returns `(val_l, val_r)`.
     fn run_dc(config: &PerDeviceSettings) -> Frame {
         let sample_rate = 32768.0;
-        let mut synth = SampleSynthesizer::new(sample_rate, 16);
-        // DC sample so essentially all energy is in the low (bass) band.
-        let sample = Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
+        let mut synth = WaveformSynthesizer::new(sample_rate, 16);
+        // DC waveform so essentially all energy is in the low (bass) band.
+        let waveform = Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
         synth.play(
-            sample,
+            waveform,
             VoicePitch::Midi {
                 note: 69.0,
                 sample_pitch_hz: 440.0,
@@ -472,14 +472,14 @@ mod tests {
             smooth_pan: true,
             ..base.clone()
         };
-        let sample = Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
+        let waveform = Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
         let pitch = VoicePitch::Midi {
             note: 69.0,
             sample_pitch_hz: 440.0,
         };
 
-        let mut synth = SampleSynthesizer::new(sample_rate, 4);
-        synth.play(sample.clone(), pitch, 1.0, &smooth);
+        let mut synth = WaveformSynthesizer::new(sample_rate, 4);
+        synth.play(waveform.clone(), pitch, 1.0, &smooth);
         synth.next_sample(&smooth);
         // Centered: equal L/R.
         assert!((synth.val_l - synth.val_r).abs() < 1e-9);
@@ -503,8 +503,8 @@ mod tests {
         );
 
         // Smoothing off: the pan change is applied on the very next sample.
-        let mut synth2 = SampleSynthesizer::new(sample_rate, 4);
-        synth2.play(sample, pitch, 1.0, &base);
+        let mut synth2 = WaveformSynthesizer::new(sample_rate, 4);
+        synth2.play(waveform, pitch, 1.0, &base);
         synth2.next_sample(&base);
         synth2.set_pan(1.0, &base);
         synth2.next_sample(&base);
@@ -525,13 +525,13 @@ mod tests {
             delay_smoothing_choice: 1, // HoldDuringNotes
             ..PerDeviceSettings::neutral()
         };
-        let mut synth = SampleSynthesizer::new(sample_rate, 4);
+        let mut synth = WaveformSynthesizer::new(sample_rate, 4);
         synth.set_pan(0.0, &config); // hard left while silent: applies immediately
         let baseline_delay_r = synth.delay_line_r.delay();
 
-        let sample = Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
+        let waveform = Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
         let slot = synth.play(
-            sample,
+            waveform,
             VoicePitch::Midi {
                 note: 69.0,
                 sample_pitch_hz: 440.0,

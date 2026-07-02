@@ -198,7 +198,7 @@ fn sample_dc_stats_report_the_offset_removed() {
         rom[WAVE + 16 + i] = 50;
     }
     let data: Box<dyn SoundData> = load_all(&rom).remove(0);
-    let stats = data.sample_dc_stats(0);
+    let stats = data.waveform_dc_stats(0);
 
     assert_eq!(
         stats.len(),
@@ -216,7 +216,7 @@ fn sample_dc_stats_report_the_offset_removed() {
     );
 
     // The symmetric ±100 square in the default ROM is already centered: ~zero shift.
-    let centered = load_all(&build_rom()).remove(0).sample_dc_stats(0);
+    let centered = load_all(&build_rom()).remove(0).waveform_dc_stats(0);
     assert!(
         centered[0].dc_shift < 1e-6,
         "a symmetric wave has no DC offset"

@@ -64,7 +64,7 @@ pub struct PopSmoothing {
     /// Slew PSG (square/wave/noise) voices.
     pub psg: bool,
     /// Slew sampled (DirectSound/SWAR) voices.
-    pub sample: bool,
+    pub sampled: bool,
     /// Seconds the de-click ramp takes to cross the full gain range. `0` makes it instant.
     pub slew_seconds: f64,
 }
@@ -73,7 +73,7 @@ impl Default for PopSmoothing {
     fn default() -> Self {
         Self {
             psg: false,
-            sample: false,
+            sampled: false,
             slew_seconds: DEFAULT_POP_SLEW_SECONDS,
         }
     }
@@ -86,7 +86,7 @@ impl PopSmoothing {
         if is_psg {
             self.psg
         } else {
-            self.sample
+            self.sampled
         }
     }
 }

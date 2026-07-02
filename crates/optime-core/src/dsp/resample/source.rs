@@ -1,4 +1,4 @@
-//! The windowed-sinc gather that feeds [`SampleInstrument`](crate::synth::SampleInstrument): it
+//! The windowed-sinc gather that feeds [`WaveformInstrument`](crate::synth::WaveformInstrument): it
 //! stages the exact tap window for a fractional source position so the inner resampler reads a
 //! plain, loop-mapped slice.
 

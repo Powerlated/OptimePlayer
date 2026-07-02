@@ -37,7 +37,7 @@ pub use pitch::note_key_to_hz;
 pub use player::{DsePlayer, DSE_CYCLES_PER_TICK};
 pub use sequencer::{DseSequencer, SeqOp};
 pub use smdl::{Smdl, Track};
-pub use swdl::{Program, SampleFormat, SampleInfo, Split, Swdl};
+pub use swdl::{Program, SampleFormat, WaveformInfo, Split, Swdl};
 
 use std::sync::Arc;
 

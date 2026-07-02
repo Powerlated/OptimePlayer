@@ -16,7 +16,7 @@ use super::lfo::{Lfo, LfoConfig, LfoDest, LfoRng};
 use super::pitch::note_key_to_hz;
 use super::sequencer::{DseSequencer, SeqOp};
 use super::swdl::Swdl;
-use super::{volume, SampleInfo, Smdl};
+use super::{volume, WaveformInfo, Smdl};
 use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
 use crate::waveform::Waveform;
 use crate::PerDeviceSettings;
@@ -186,10 +186,10 @@ pub struct DsePlayer {
     seq: DseSequencer,
     /// Shared main bank (holds the `pcmd` sample data).
     main_bank: Arc<Swdl>,
-    /// Per-song bank (programs/splits; its WAVI is ignored — see [`Self::sample`]).
+    /// Per-song bank (programs/splits; its WAVI is ignored — see [`Self::waveform`]).
     song_bank: Arc<Swdl>,
     /// Decoded samples, keyed by a split's `wave_index` (resolved against the main bank's WAVI).
-    sample_cache: HashMap<i16, Option<Arc<Waveform>>>,
+    waveform_cache: HashMap<i16, Option<Arc<Waveform>>>,
     tracks: [DseTrack; TRACK_COUNT],
     voices: Vec<DseVoice>,
     accum_us: i64,
@@ -205,7 +205,7 @@ impl DsePlayer {
             seq: DseSequencer::new(smdl),
             main_bank,
             song_bank,
-            sample_cache: HashMap::new(),
+            waveform_cache: HashMap::new(),
             tracks: std::array::from_fn(|_| DseTrack::default()),
             voices: Vec::new(),
             accum_us: 0,
@@ -500,7 +500,7 @@ impl DsePlayer {
         }
     }
 
-    /// Resolves a note to a sample via the program/split tables and starts a voice.
+    /// Resolves a note to a waveform via the program/split tables and starts a voice.
     fn start_note(
         &mut self,
         track: usize,
@@ -531,7 +531,7 @@ impl DsePlayer {
         let note_key =
             i32::from(split.key_base) + (i32::from(split.note_delta) << 8) + (i32::from(key) << 8);
 
-        let Some(sample) = self.sample(wave_index) else {
+        let Some(waveform) = self.waveform(wave_index) else {
             return;
         };
 
@@ -579,7 +579,7 @@ impl DsePlayer {
             track,
             voice,
             key,
-            sample,
+            waveform,
             pitch,
             volume: initial,
             duration_ticks: Some(duration),
@@ -587,23 +587,23 @@ impl DsePlayer {
         self.voices.push(v);
     }
 
-    /// Returns the decoded sample for a split's `wave_index`, decoding + caching on first use.
+    /// Returns the decoded waveform for a split's `wave_index`, decoding + caching on first use.
     ///
     /// Sample data is resolved through the **main bank's** WAVI, not the per-song bank's. The
     /// per-song `bgm####.swd` carries its own sparse WAVI listing the slots the song uses, but
     /// with *local* `pcm_offset`s (as if its samples were packed from zero) — they do not index
     /// the shared `bgm.swd` `pcmd`. Only the main bank's global WAVI has the correct offsets
     /// (root key / rate / loop are identical in both), so we look the slot up there.
-    fn sample(&mut self, wave_index: i16) -> Option<Arc<Waveform>> {
-        if let Some(cached) = self.sample_cache.get(&wave_index) {
+    fn waveform(&mut self, wave_index: i16) -> Option<Arc<Waveform>> {
+        if let Some(cached) = self.waveform_cache.get(&wave_index) {
             return cached.clone();
         }
         let decoded = self
             .main_bank
-            .sample_for_wave(wave_index)
-            .and_then(|info: &SampleInfo| self.main_bank.decode_sample(info, &self.main_bank.pcmd))
+            .waveform_for_wave(wave_index)
+            .and_then(|info: &WaveformInfo| self.main_bank.decode_waveform(info, &self.main_bank.pcmd))
             .map(Arc::new);
-        self.sample_cache.insert(wave_index, decoded.clone());
+        self.waveform_cache.insert(wave_index, decoded.clone());
         decoded
     }
 }

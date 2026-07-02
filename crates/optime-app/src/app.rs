@@ -345,7 +345,7 @@ pub struct OptimeApp {
     stats_open: bool,
     /// Cached per-sample DC-offset stats for the current song, recomputed when the window opens
     /// or the song changes. The key is the `(archive_index, song_id)` they were computed for.
-    stats_cache: Option<((usize, u32), Vec<optime_core::SampleDcStat>)>,
+    stats_cache: Option<((usize, u32), Vec<optime_core::WaveformDcStat>)>,
 
     /// Session-only (never persisted) "Edit song names" mode: when on, the library list rows become
     /// editable (rename + reorder) and a Save button writes the curated titles + order back to the
@@ -2302,13 +2302,13 @@ impl OptimeApp {
 
     /// The DC-offset stats for the current song, computed (and cached) on demand. `None` when no
     /// song is loaded.
-    fn current_sample_stats(&mut self) -> Option<&[optime_core::SampleDcStat]> {
+    fn current_waveform_stats(&mut self) -> Option<&[optime_core::WaveformDcStat]> {
         let key = self
             .current_song
             .and_then(|i| self.songs.get(i))
             .map(|s| (s.archive_index, s.song_id))?;
         if self.stats_cache.as_ref().map(|(k, _)| *k) != Some(key) {
-            let stats = self.archives[key.0].sample_dc_stats(key.1);
+            let stats = self.archives[key.0].waveform_dc_stats(key.1);
             self.stats_cache = Some((key, stats));
         }
         self.stats_cache.as_ref().map(|(_, v)| v.as_slice())
@@ -2321,8 +2321,8 @@ impl OptimeApp {
             return;
         }
         let mut open = true;
-        let stats: Vec<optime_core::SampleDcStat> = self
-            .current_sample_stats()
+        let stats: Vec<optime_core::WaveformDcStat> = self
+            .current_waveform_stats()
             .map(|s| s.to_vec())
             .unwrap_or_default();
         egui::Window::new("📊 Stats for Nerds")

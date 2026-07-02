@@ -31,7 +31,7 @@ use crate::PerDeviceSettings;
 /// constant offset is filtered away on hardware. The engine removes it at decode time; this
 /// records how much had to be shifted.
 #[derive(Debug, Clone)]
-pub struct SampleDcStat {
+pub struct WaveformDcStat {
     /// Human label for the sample (GBA: the wave's ROM address).
     pub label: String,
     /// The DC offset that was removed, as a fraction of full scale (`|mean|`, 0.0..=1.0).
@@ -64,7 +64,7 @@ pub trait SoundData: Send + Sync {
 
     /// DC-offset stats for every PCM sample reachable from song `id`, sorted by the amount of DC
     /// shift (most shifted first). Returns an empty list for archives that don't analyse samples.
-    fn sample_dc_stats(&self, _id: u32) -> Vec<SampleDcStat> {
+    fn waveform_dc_stats(&self, _id: u32) -> Vec<WaveformDcStat> {
         Vec::new()
     }
 

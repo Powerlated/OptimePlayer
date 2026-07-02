@@ -54,7 +54,7 @@ pub struct NdsPlayer {
     /// The running SSEQ interpreter.
     pub sequence: Sequence,
     instrument_bank: super::InstrumentBank,
-    decoded_sample_archives: Vec<Option<Vec<Arc<Waveform>>>>,
+    decoded_waveform_archives: Vec<Option<Vec<Arc<Waveform>>>>,
     squares: Vec<Arc<Waveform>>,
     active_notes: Vec<ActiveNote>,
     bpm_timer: u32,
@@ -74,7 +74,7 @@ impl NdsPlayer {
         let sseq_arc: Arc<[u8]> = Arc::from(sseq_file.to_vec());
 
         // Decode the up-to-four linked sample archives.
-        let mut decoded_sample_archives: Vec<Option<Vec<Arc<Waveform>>>> = vec![None; 4];
+        let mut decoded_waveform_archives: Vec<Option<Vec<Arc<Waveform>>>> = vec![None; 4];
         for (i, &swar_id) in bank_info.swar_id.iter().enumerate() {
             let Some(Some(swar_info)) = sdat.swar_infos.get(swar_id as usize) else {
                 continue;
@@ -105,12 +105,12 @@ impl NdsPlayer {
                     _ => (Vec::new(), 0),
                 };
 
-                let mut sample =
+                let mut waveform =
                     Waveform::new(decoded, 440.0, sample_rate_hdr, loop_flag != 0, loop_point);
-                sample.sample_length = (swar_sample_length * 4) as usize;
-                archive.push(Arc::new(sample));
+                waveform.sample_length = (swar_sample_length * 4) as usize;
+                archive.push(Arc::new(waveform));
             }
-            decoded_sample_archives[i] = Some(archive);
+            decoded_waveform_archives[i] = Some(archive);
         }
 
         // Build the eight PSG square-wave samples.
@@ -129,7 +129,7 @@ impl NdsPlayer {
         Some(NdsPlayer {
             sequence,
             instrument_bank,
-            decoded_sample_archives,
+            decoded_waveform_archives,
             squares,
             active_notes: Vec::new(),
             bpm_timer: 0,
@@ -243,21 +243,21 @@ impl NdsPlayer {
         let archive_index = region.swar_info_id as usize;
         let sample_id = region.swav_info_id as usize;
 
-        // Pick the sample and the pitch it represents.
-        let (sample, sample_pitch_hz) = if is_psg_pulse {
+        // Pick the waveform and the pitch it represents.
+        let (waveform, sample_pitch_hz) = if is_psg_pulse {
             match self.squares.get(sample_id) {
                 Some(s) => (s.clone(), s.frequency),
                 None => return,
             }
         } else {
-            let Some(Some(archive)) = self.decoded_sample_archives.get(archive_index) else {
+            let Some(Some(archive)) = self.decoded_waveform_archives.get(archive_index) else {
                 return;
             };
-            let Some(sample) = archive.get(sample_id) else {
+            let Some(waveform) = archive.get(sample_id) else {
                 return;
             };
             (
-                sample.clone(),
+                waveform.clone(),
                 midi_note_to_hz(f64::from(region.note_number), config.tuning()),
             )
         };
@@ -275,7 +275,7 @@ impl NdsPlayer {
             track: t,
             voice,
             key: midi_note as u8,
-            sample,
+            waveform,
             pitch: VoicePitch::Midi {
                 note: f64::from(midi_note),
                 sample_pitch_hz,

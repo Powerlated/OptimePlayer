@@ -17,7 +17,7 @@ const HEADER_LEN: usize = 0x50;
 const CHUNK_HEADER_LEN: usize = 0x10;
 const SAMPLE_INFO_LEN: usize = 0x40;
 
-/// How a [`SampleInfo`]'s PCM is encoded.
+/// How a [`WaveformInfo`]'s PCM is encoded.
 ///
 /// The WAVI `smplfmt` u16 at +0x12 carries the value in its **high byte** (the DSE driver only
 /// reads `dse_sample.sample_format` = WAVI byte +0x13, then hands it straight to the NDS
@@ -49,7 +49,7 @@ impl SampleFormat {
 /// One WAVI sample-info entry (64 bytes). Offsets are relative to the entry start; derived from
 /// `bgm.swd` and confirmed against `dse.h`'s `sound_envelope_parameters` (the envelope at +0x30).
 #[derive(Debug, Clone)]
-pub struct SampleInfo {
+pub struct WaveformInfo {
     pub id: u16,
     /// Fine tune (cents, +0x04) and coarse tune (semitones, +0x05). DSE's classic ctune is -7.
     pub fine_tune: i8,
@@ -125,10 +125,10 @@ pub struct Swdl {
     pub name: String,
     pub version: u16,
     /// WAVI sample-info entries that have a non-empty pointer-table slot.
-    pub samples: Vec<SampleInfo>,
+    pub waveforms: Vec<WaveformInfo>,
     /// WAVI entries indexed by their original pointer-table slot (`wave_index` in a [`Split`]
     /// refers to this), or `None` for an empty slot.
-    pub wavi_by_slot: Vec<Option<SampleInfo>>,
+    pub wavi_by_slot: Vec<Option<WaveformInfo>>,
     /// The `pcmd` payload (sample data), if this bank carries one (main bank only).
     pub pcmd: Vec<u8>,
     /// PRGI programs (per-song banks only), in file order.
@@ -184,12 +184,12 @@ impl Swdl {
             _ => {}
         });
 
-        let samples = wavi_by_slot.iter().flatten().cloned().collect();
+        let waveforms = wavi_by_slot.iter().flatten().cloned().collect();
 
         Some(Swdl {
             name,
             version,
-            samples,
+            waveforms,
             wavi_by_slot,
             pcmd,
             programs,
@@ -202,16 +202,16 @@ impl Swdl {
     }
 
     /// The WAVI sample-info for a [`Split`]'s `wave_index`, if that slot is populated.
-    pub fn sample_for_wave(&self, wave_index: i16) -> Option<&SampleInfo> {
+    pub fn waveform_for_wave(&self, wave_index: i16) -> Option<&WaveformInfo> {
         usize::try_from(wave_index)
             .ok()
             .and_then(|i| self.wavi_by_slot.get(i))
             .and_then(|s| s.as_ref())
     }
 
-    /// Decodes one sample to a playable [`Waveform`], reading PCM from this bank's `pcmd` (for the
+    /// Decodes one waveform to a playable [`Waveform`], reading PCM from this bank's `pcmd` (for the
     /// main bank) or from `main_pcmd` (for a per-song bank referencing the main bank).
-    pub fn decode_sample(&self, info: &SampleInfo, main_pcmd: &[u8]) -> Option<Waveform> {
+    pub fn decode_waveform(&self, info: &WaveformInfo, main_pcmd: &[u8]) -> Option<Waveform> {
         let pcmd = if self.pcmd.is_empty() {
             main_pcmd
         } else {
@@ -243,22 +243,22 @@ impl Swdl {
             _ => 0,
         };
 
-        let mut sample = Waveform::new(
+        let mut waveform = Waveform::new(
             data,
             info.sample_rate as f64,
             info.sample_rate as f64,
             info.looping,
             loop_point,
         );
-        sample.sample_length = sample.data.len();
-        Some(sample)
+        waveform.sample_length = waveform.data.len();
+        Some(waveform)
     }
 }
 
 /// Parses the WAVI chunk: a `nb_slots`-entry u16 pointer table (offsets relative to the chunk
-/// payload start) followed by 64-byte [`SampleInfo`] entries. Returns one slot-indexed entry per
+/// payload start) followed by 64-byte [`WaveformInfo`] entries. Returns one slot-indexed entry per
 /// pointer (`None` for a zero/empty slot) so a [`Split`]'s `wave_index` can index it directly.
-fn parse_wavi(payload: &[u8], nb_slots: usize) -> Vec<Option<SampleInfo>> {
+fn parse_wavi(payload: &[u8], nb_slots: usize) -> Vec<Option<WaveformInfo>> {
     let mut out = Vec::with_capacity(nb_slots);
     for slot in 0..nb_slots {
         let ptr = read_u16(payload, slot * 2) as usize;
@@ -318,10 +318,10 @@ fn parse_prgi(payload: &[u8], nb_slots: usize) -> Vec<Program> {
     out
 }
 
-fn parse_sample_info(e: &[u8]) -> SampleInfo {
+fn parse_sample_info(e: &[u8]) -> WaveformInfo {
     let mut envelope = [0u8; 16];
     envelope.copy_from_slice(&e[0x30..0x40]);
-    SampleInfo {
+    WaveformInfo {
         id: read_u16(e, 0x02),
         fine_tune: e[0x04] as i8,
         coarse_tune: e[0x05] as i8,
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_synthetic_sample_info() {
+    fn parses_synthetic_waveform_info() {
         // A minimal 64-byte WAVI entry: id=1, ctune=-7, rootkey=60, format=PCM16, rate=22050.
         let mut e = [0u8; SAMPLE_INFO_LEN];
         e[0x02] = 1;

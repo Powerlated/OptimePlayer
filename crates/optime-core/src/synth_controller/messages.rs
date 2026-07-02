@@ -46,7 +46,7 @@ pub enum SynthEvent {
         /// The sounding MIDI key (drives the visualizer grid).
         key: u8,
         /// The waveform to play.
-        sample: Arc<Waveform>,
+        waveform: Arc<Waveform>,
         /// Initial pitch.
         pitch: VoicePitch,
         /// Initial linear volume (0..=1).

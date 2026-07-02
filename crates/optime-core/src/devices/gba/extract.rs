@@ -17,7 +17,7 @@ use std::collections::HashSet;
 
 use super::rom::{ptr_to_offset, GbaRom};
 use super::voice::{ToneData, WaveData};
-use crate::devices::SampleDcStat;
+use crate::devices::WaveformDcStat;
 use crate::util::{read_u32, read_u8};
 
 /// `TONEDATA_TYPE_*` bits (mirrors `voice.rs`).
@@ -318,7 +318,7 @@ fn follow_target(rom: &[u8], marks: &mut Marks, work: &mut Vec<(usize, u8)>, sta
 /// deduped by wave address and sorted by DC shift (most shifted first). Mirrors playback: each
 /// sample is decoded the same way [`super::player`] does, and the DC shift recorded is exactly
 /// what the player subtracts.
-pub fn sample_dc_stats(rom: &GbaRom, song_id: u32) -> Vec<SampleDcStat> {
+pub fn waveform_dc_stats(rom: &GbaRom, song_id: u32) -> Vec<WaveformDcStat> {
     let data: &[u8] = &rom.data;
     let Some(header) = rom.song_header(song_id) else {
         return Vec::new();
@@ -342,7 +342,7 @@ pub fn sample_dc_stats(rom: &GbaRom, song_id: u32) -> Vec<SampleDcStat> {
             continue;
         }
         let mean = pcm.iter().map(|&v| f64::from(v)).sum::<f64>() / pcm.len() as f64;
-        stats.push(SampleDcStat {
+        stats.push(WaveformDcStat {
             label: format!("0x{wav_addr:08X}"),
             dc_shift: mean.abs() as f32,
             length: pcm.len(),

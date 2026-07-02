@@ -50,10 +50,10 @@ fn main() {
     println!("== MAIN BANK  '{}'  (v{:#06x}) ==", main.name, main.version);
     println!(
         "   {} samples, pcmd payload {} bytes",
-        main.samples.len(),
+        main.waveforms.len(),
         main.pcmd.len()
     );
-    let rates: Vec<u32> = main.samples.iter().take(8).map(|s| s.sample_rate).collect();
+    let rates: Vec<u32> = main.waveforms.iter().take(8).map(|s| s.sample_rate).collect();
     println!("   first sample rates (Hz): {rates:?}");
     println!();
 
@@ -63,7 +63,7 @@ fn main() {
             println!(
                 "== SONG BANK  '{}'  ({} wavi refs, {} programs) ==",
                 bank.name,
-                bank.samples.len(),
+                bank.waveforms.len(),
                 bank.programs.len()
             );
             for prog in bank.programs.iter().take(4) {
@@ -195,18 +195,18 @@ fn main() {
     println!("== decoding samples to WAV in '{out_dir}' ==");
     std::fs::create_dir_all(&out_dir).expect("create out_dir");
     let mut written = 0;
-    for info in main.samples.iter().take(6) {
-        match main.decode_sample(info, &main.pcmd) {
-            Some(sample) => {
+    for info in main.waveforms.iter().take(6) {
+        match main.decode_waveform(info, &main.pcmd) {
+            Some(waveform) => {
                 let path = format!("{out_dir}/dse_sample_{:03}.wav", info.id);
-                write_wav(&path, &sample);
+                write_wav(&path, &waveform);
                 println!(
                     "   sample {:>3}: {:?}, {} Hz, root {}, {} samples -> {}",
                     info.id,
                     info.format,
-                    sample.sample_rate as u32,
+                    waveform.sample_rate as u32,
                     info.root_key,
-                    sample.data.len(),
+                    waveform.data.len(),
                     Path::new(&path).file_name().unwrap().to_string_lossy(),
                 );
                 written += 1;
@@ -349,9 +349,9 @@ fn print_event(ev: &DseEvent) {
 }
 
 /// Writes a mono 16-bit PCM WAV from a normalized [`Waveform`].
-fn write_wav(path: &str, sample: &Waveform) {
-    let rate = sample.sample_rate as u32;
-    let n = sample.data.len();
+fn write_wav(path: &str, waveform: &Waveform) {
+    let rate = waveform.sample_rate as u32;
+    let n = waveform.data.len();
     let data_bytes = (n * 2) as u32;
     let mut out = Vec::with_capacity(44 + data_bytes as usize);
     out.extend_from_slice(b"RIFF");
@@ -367,7 +367,7 @@ fn write_wav(path: &str, sample: &Waveform) {
     out.extend_from_slice(&16u16.to_le_bytes()); // bits
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_bytes.to_le_bytes());
-    for &s in &sample.data {
+    for &s in &waveform.data {
         out.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
     }
     std::fs::write(path, out).expect("write wav");

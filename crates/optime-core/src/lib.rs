@@ -34,7 +34,7 @@ pub use devices::nintendo_ds::{
     MessageType, Sdat, Sequence, SequenceTrack, SseqInfo, SwarInfo,
 };
 pub use devices::{
-    load_all, DevicePlayer, SampleDcStat, SoundData, SynthEvent, VoiceId, VoicePitch,
+    load_all, DevicePlayer, WaveformDcStat, SoundData, SynthEvent, VoiceId, VoicePitch,
 };
 pub use dsp::biquad_filter;
 pub use dsp::resample::{ResampleTables, StreamResampler};
@@ -42,7 +42,7 @@ pub use waveform::{
     decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, Frame, InstrumentResampleMode, Sample,
     Waveform,
 };
-pub use synth::{DelayLine, SampleInstrument, SampleSynthesizer, CROSSOVER_Q};
+pub use synth::{DelayLine, WaveformInstrument, WaveformSynthesizer, CROSSOVER_Q};
 pub use synth_controller::{
     DelaySmoothing, FsVisController, HighShelf, LoopAndTransitionOptions, PlaybackEvent,
     PopSmoothing, SongOverview, SynthController, VisNote,

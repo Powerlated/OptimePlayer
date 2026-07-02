@@ -19,7 +19,7 @@ pub mod tables;
 mod voice;
 
 pub use extract::extract_audio;
-pub use extract::sample_dc_stats;
+pub use extract::waveform_dc_stats;
 pub use player::GbaPlayer;
 pub use rom::GbaRom;
 
@@ -44,8 +44,8 @@ impl crate::devices::SoundData for GbaRom {
         Some(Box::new(GbaPlayer::new(self, id)?))
     }
 
-    fn sample_dc_stats(&self, id: u32) -> Vec<crate::devices::SampleDcStat> {
-        sample_dc_stats(self, id)
+    fn waveform_dc_stats(&self, id: u32) -> Vec<crate::devices::WaveformDcStat> {
+        waveform_dc_stats(self, id)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

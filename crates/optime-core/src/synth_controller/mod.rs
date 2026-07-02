@@ -32,7 +32,7 @@ use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::resample::StreamResampler;
 use crate::waveform::{Frame, InstrumentResampleMode, Sample};
 use crate::synth::MAX_BLOCK;
-use crate::{PerDeviceSettings, SampleSynthesizer, TRACK_COUNT};
+use crate::{PerDeviceSettings, WaveformSynthesizer, TRACK_COUNT};
 
 /// PSG crunch-compensation low-pass — a cascade of identical RBJ low-pass biquad sections fit
 /// (MATLAB, `scripts/fit_compensation.m`, fed by `examples/mixer_resample_response.rs`) to the
@@ -75,9 +75,9 @@ struct SlotOwner {
 type SlotOwners = Vec<Vec<Option<SlotOwner>>>;
 
 /// Builds an idle set of per-track synthesizers at `sample_rate` and its empty slot bookkeeping.
-fn new_synth_set(sample_rate: f64) -> (Vec<SampleSynthesizer>, SlotOwners) {
+fn new_synth_set(sample_rate: f64) -> (Vec<WaveformSynthesizer>, SlotOwners) {
     let synths: Vec<_> = (0..TRACK_COUNT)
-        .map(|_| SampleSynthesizer::new(sample_rate, 16))
+        .map(|_| WaveformSynthesizer::new(sample_rate, 16))
         .collect();
     let slot_owner = synths.iter().map(|s| vec![None; s.voice_count()]).collect();
     (synths, slot_owner)
@@ -92,7 +92,7 @@ fn find_slot(slot_owner: &SlotOwners, track: usize, voice: VoiceId) -> Option<us
 
 /// Advances every voice in a set by one sample and returns the enabled-track stereo sum.
 fn render_set(
-    synths: &mut [SampleSynthesizer],
+    synths: &mut [WaveformSynthesizer],
     enables: &[bool],
     config: &PerDeviceSettings,
 ) -> Frame {
@@ -110,7 +110,7 @@ fn render_set(
 /// Cuts one-shot samples in a set that ran out (only the synthesizer knows their playback
 /// position), clearing their note-grid cells and reporting each ending to the device as feedback.
 fn cut_finished(
-    synths: &mut [SampleSynthesizer],
+    synths: &mut [WaveformSynthesizer],
     slot_owner: &mut SlotOwners,
     notes_on: &mut [[u8; 128]],
     feedback: &mut TickFeedback,
@@ -121,7 +121,8 @@ fn cut_finished(
                 continue;
             };
             let instr = synth.instr(slot);
-            let ran_out = !instr.sample.looping && instr.sample_t > instr.sample.data.len() as f64;
+            let ran_out =
+                !instr.waveform.looping && instr.sample_t > instr.waveform.data.len() as f64;
             if ran_out || !instr.playing {
                 synth.cut_instrument(slot);
                 slot_owner[t][slot] = None;
@@ -388,10 +389,10 @@ pub struct SynthController {
     /// The device player generating the event stream.
     pub player: Box<dyn DevicePlayer>,
     /// The output-rate synthesizers (PSG voices, and every voice when the mixer is off).
-    synths: Vec<SampleSynthesizer>,
+    synths: Vec<WaveformSynthesizer>,
     slot_owner: SlotOwners,
     /// The mixer-rate synthesizers (sampled voices when the config's `use_mixer` is set).
-    mixer_synths: Vec<SampleSynthesizer>,
+    mixer_synths: Vec<WaveformSynthesizer>,
     mixer_slot_owner: SlotOwners,
     /// The mixer bus the mixer set's audio is routed into (owns the resampler, not the synths).
     bank: Bank,
@@ -511,7 +512,7 @@ impl SynthController {
 
     /// Total voices sounding across both synthesizer sets (drives the app's DSP-load / voice stats).
     pub fn active_voice_count(&self) -> usize {
-        let count = |synths: &[SampleSynthesizer]| -> usize {
+        let count = |synths: &[WaveformSynthesizer]| -> usize {
             synths.iter().map(|s| s.active_voice_count()).sum()
         };
         count(&self.synths) + count(&self.mixer_synths)
@@ -767,7 +768,7 @@ impl SynthController {
     /// Mutable access to one synthesizer set and its slot bookkeeping: `true` ⇒ mixer, `false` ⇒
     /// output.
     #[inline]
-    fn set_mut(&mut self, mixer: bool) -> (&mut Vec<SampleSynthesizer>, &mut SlotOwners) {
+    fn set_mut(&mut self, mixer: bool) -> (&mut Vec<WaveformSynthesizer>, &mut SlotOwners) {
         if mixer {
             (&mut self.mixer_synths, &mut self.mixer_slot_owner)
         } else {
@@ -782,16 +783,16 @@ impl SynthController {
                 track,
                 voice,
                 key,
-                sample,
+                waveform,
                 pitch,
                 volume,
                 duration_ticks: _,
             } => {
                 // Sampled (non-PSG) voices play on the mixer set when it's engaged; PSG voices and
                 // everything in direct mode play on the output set.
-                let mixer = config.use_mixer && !sample.is_psg_square;
+                let mixer = config.use_mixer && !waveform.is_psg_square;
                 let (synths, slot_owner) = self.set_mut(mixer);
-                let slot = synths[track].play(sample, pitch, volume, config);
+                let slot = synths[track].play(waveform, pitch, volume, config);
                 if let Some(old) = slot_owner[track][slot].replace(SlotOwner { voice, key }) {
                     // Round-robin steal: the previous occupant is gone; tell the device.
                     self.notes_on[track][old.key as usize] = 0;

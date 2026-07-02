@@ -1,4 +1,4 @@
-//! [`SampleInstrument`]: a single playing voice — pitch-shifted sample playback with the
+//! [`WaveformInstrument`]: a single playing voice — pitch-shifted sample playback with the
 //! resampling modes (nearest / linear / the two windowed-sinc gathers).
 
 use std::sync::Arc;
@@ -14,11 +14,11 @@ use crate::tuning::{midi_note_to_hz, TuningSystem};
 
 /// A single playing voice.
 #[derive(Clone)]
-pub struct SampleInstrument {
+pub struct WaveformInstrument {
     inv_sample_rate: f64,
-    /// The sample this voice is playing.
-    pub sample: Arc<Waveform>,
-    /// The voice's base pitch (a MIDI note relative to the sample's pitch, or an absolute
+    /// The waveform this voice is playing.
+    pub waveform: Arc<Waveform>,
+    /// The voice's base pitch (a MIDI note relative to the waveform's pitch, or an absolute
     /// data rate — see [`VoicePitch`]).
     pub pitch: VoicePitch,
     /// Current playback gain.
@@ -48,16 +48,16 @@ pub struct SampleInstrument {
     pub output: Sample,
 }
 
-impl SampleInstrument {
-    /// Creates an idle voice bound to `sample_rate` playing `sample`.
-    pub fn new(sample_rate: f64, sample: Arc<Waveform>) -> Self {
+impl WaveformInstrument {
+    /// Creates an idle voice bound to `sample_rate` playing `waveform`.
+    pub fn new(sample_rate: f64, waveform: Arc<Waveform>) -> Self {
         let pitch = VoicePitch::Midi {
             note: 0.0,
-            sample_pitch_hz: sample.frequency,
+            sample_pitch_hz: waveform.frequency,
         };
         Self {
             inv_sample_rate: 1.0 / sample_rate,
-            sample,
+            waveform,
             pitch,
             volume: 1.0,
             playing: false,
@@ -81,7 +81,7 @@ impl SampleInstrument {
         self.pop_slew_seconds = pops.slew_seconds;
         self.refresh_pop_step();
         self.gain
-            .set(if pops.enabled_for(self.sample.is_psg_square) {
+            .set(if pops.enabled_for(self.waveform.is_psg_square) {
                 0.0
             } else {
                 volume
@@ -128,12 +128,12 @@ impl SampleInstrument {
         pops: PopSmoothing,
     ) {
         // r = source samples advanced per output sample (pitch-shifted playback speed).
-        let r = self.freq_ratio * self.sample.sample_rate * self.inv_sample_rate;
+        let r = self.freq_ratio * self.waveform.sample_rate * self.inv_sample_rate;
         self.sample_t += r;
 
-        let data = &self.sample.data;
-        let looping = self.sample.looping;
-        let loop_point = self.sample.loop_point;
+        let data = &self.waveform.data;
+        let looping = self.waveform.looping;
+        let loop_point = self.waveform.loop_point;
         let data_len = data.len() as i64;
         let loop_len = data_len - loop_point;
 
@@ -153,7 +153,7 @@ impl SampleInstrument {
         // Resolve this sample's applied gain: pop-smoothed voices slew toward the target,
         // everything else applies the envelope volume exactly.
         let target = if self.fading_out { 0.0 } else { self.volume };
-        let gain = if pops.enabled_for(self.sample.is_psg_square) {
+        let gain = if pops.enabled_for(self.waveform.is_psg_square) {
             self.gain.advance(target)
         } else {
             self.gain.set(target);
@@ -170,7 +170,7 @@ impl SampleInstrument {
             return;
         }
 
-        let effective = effective_gather(mode, self.sample.is_psg_square);
+        let effective = effective_gather(mode, self.waveform.is_psg_square);
 
         // Loop-aware sample accessor for the cheap 1–2 tap modes (and the no-tables fallback).
         let get = |mut t: i64| -> Sample {
@@ -234,7 +234,7 @@ impl SampleInstrument {
     ) {
         // Only the sinc modes are worth hoisting; the 1–2 tap modes (and the missing-tables
         // fallback) just take the per-sample path.
-        let effective = effective_gather(mode, self.sample.is_psg_square);
+        let effective = effective_gather(mode, self.waveform.is_psg_square);
         let (
             EffectiveGather::Sinc {
                 step_mode,
@@ -250,10 +250,10 @@ impl SampleInstrument {
             return;
         };
 
-        let r = self.freq_ratio * self.sample.sample_rate * self.inv_sample_rate;
-        let data = &self.sample.data;
-        let looping = self.sample.looping;
-        let loop_point = self.sample.loop_point;
+        let r = self.freq_ratio * self.waveform.sample_rate * self.inv_sample_rate;
+        let data = &self.waveform.data;
+        let looping = self.waveform.looping;
+        let loop_point = self.waveform.loop_point;
         let data_len = data.len() as i64;
         let data_len_f = data_len as f64;
         let loop_len = data_len - loop_point;
@@ -264,7 +264,7 @@ impl SampleInstrument {
         let mut wrapped = self.wrapped;
         // The same per-sample gain resolution as `advance` (kept bit-identical): the target is
         // constant within a block, but a pop-smoothed gain still slews sample by sample.
-        let smooth = pops.enabled_for(self.sample.is_psg_square);
+        let smooth = pops.enabled_for(self.waveform.is_psg_square);
         let target = if self.fading_out { 0.0 } else { self.volume };
         let mut gain = self.gain;
 
@@ -335,7 +335,7 @@ impl SampleInstrument {
             } => midi_note_to_hz(note + tune, tuning) / sample_pitch_hz,
             // Absolute data rate: the ratio that makes the data step at `hz` samples/second,
             // with any (rare) detune applied as an equal-tempered factor.
-            VoicePitch::DataRateHz(hz) => hz / self.sample.sample_rate * (tune / 12.0).exp2(),
+            VoicePitch::DataRateHz(hz) => hz / self.waveform.sample_rate * (tune / 12.0).exp2(),
         };
     }
 
@@ -362,7 +362,7 @@ impl SampleInstrument {
 /// position (and its fractional precision) bounded over arbitrarily long notes and letting the
 /// sinc gather read taps without a per-tap loop-mapping division. Returns the (possibly folded)
 /// position and whether it wrapped. `fold` must be `looping && loop_len > 0`; all lengths are in
-/// source samples. Shared by [`SampleInstrument::advance`] and [`SampleInstrument::advance_block`]
+/// source samples. Shared by [`WaveformInstrument::advance`] and [`WaveformInstrument::advance_block`]
 /// so the two paths fold bit-identically.
 #[inline]
 fn fold_pos(pos: f64, fold: bool, data_len: f64, loop_point: f64, loop_len: f64) -> (f64, bool) {
@@ -380,7 +380,7 @@ mod tests {
 
     // ── Resampling fixtures ───────────────────────────────────────────────────────────────
     //
-    // The resampling tests exercise [`SampleInstrument::advance`] directly (rather than the
+    // The resampling tests exercise [`WaveformInstrument::advance`] directly (rather than the
     // full synthesizer) so the pitch ratio `r` is controlled exactly:
     //
     //   r = freq_ratio · sample.sample_rate / out_rate,  freq_ratio = midi_note_to_hz(note) / sample_frequency
@@ -401,7 +401,7 @@ mod tests {
 
     /// A looping source sample holding a pure sine of `period` samples per cycle (frequency
     /// `1/period` cycles per source-sample), recorded at `src_rate`.
-    fn sine_sample(period: usize, periods: usize, src_rate: f64) -> Arc<Waveform> {
+    fn sine_waveform(period: usize, periods: usize, src_rate: f64) -> Arc<Waveform> {
         let len = period * periods;
         let data: Vec<f32> = (0..len)
             .map(|k| (2.0 * PI * k as f64 / period as f64).sin() as f32)
@@ -413,8 +413,8 @@ mod tests {
     fn set_sample_rate_rescales_playback_step() {
         // A `DataRateHz` voice steps the source at `r = data_rate / out_rate` per output sample.
         // A long non-looping sample avoids any loop fold so the step is read straight off sample_t.
-        let sample = Arc::new(Waveform::new(vec![0.0; 4096], 440.0, 22_050.0, false, 0));
-        let mut instr = SampleInstrument::new(44_100.0, sample);
+        let waveform = Arc::new(Waveform::new(vec![0.0; 4096], 440.0, 22_050.0, false, 0));
+        let mut instr = WaveformInstrument::new(44_100.0, waveform);
         instr.set_pitch(VoicePitch::DataRateHz(22_050.0), TuningSystem::Equal);
 
         // 22050 / 44100 = 0.5 source samples per output sample.
@@ -447,12 +447,12 @@ mod tests {
     /// (so the playback speed `r = sample.sample_rate / out_rate`).
     fn render(
         out_rate: f64,
-        sample: Arc<Waveform>,
+        waveform: Arc<Waveform>,
         mode: InstrumentResampleMode,
         tables: Option<&ResampleTables>,
         n: usize,
     ) -> Vec<Sample> {
-        let mut instr = SampleInstrument::new(out_rate, sample);
+        let mut instr = WaveformInstrument::new(out_rate, waveform);
         // 440 Hz over a 440 Hz sample pitch ⇒ freq_ratio = 1
         instr.set_pitch(
             VoicePitch::Midi {
@@ -491,7 +491,7 @@ mod tests {
         // (4096 Hz) but below the output Nyquist (16384 Hz).
         let out_rate = 32768.0;
         let src_rate = 8192.0;
-        let sample = sine_sample(16, 8, src_rate); // f0 = 8192/16 = 512 Hz
+        let waveform = sine_waveform(16, 8, src_rate); // f0 = 8192/16 = 512 Hz
         let fund_hz = 512.0;
         let image_hz = 7680.0; // 8192 − 512
         let warmup = 256;
@@ -502,7 +502,7 @@ mod tests {
         // images that sit below output Nyquist (7680 < 16384) — the crunchy colour.
         let crunch = render(
             out_rate,
-            sample.clone(),
+            waveform.clone(),
             crunch(16),
             Some(&tables),
             warmup + n,
@@ -510,7 +510,7 @@ mod tests {
         // SampleNyquist ("clean"): low-passes at the source Nyquist, removing the images.
         let clean = render(
             out_rate,
-            sample,
+            waveform,
             InstrumentResampleMode::SincSampleNyquist { half_taps: 16 },
             Some(&tables),
             warmup + n,
@@ -555,7 +555,7 @@ mod tests {
         //     20480 − 15872 = 4608 Hz; band-limited stairsteps must remove it before it folds.
         let out_rate = 20480.0;
         let src_rate = 8192.0; // r = 0.4
-        let sample = sine_sample(16, 8, src_rate);
+        let waveform = sine_waveform(16, 8, src_rate);
         let image_hz = 7680.0; // 8192 − 512 (below output Nyquist → crunch image)
         let alias_hz = 4608.0; // fold of the 15872 Hz image (above output Nyquist)
         let warmup = 256;
@@ -564,12 +564,12 @@ mod tests {
 
         let nearest = render(
             out_rate,
-            sample.clone(),
+            waveform.clone(),
             InstrumentResampleMode::NearestNeighbor,
             None,
             warmup + n,
         );
-        let crunch = render(out_rate, sample, crunch(16), Some(&tables), warmup + n);
+        let crunch = render(out_rate, waveform, crunch(16), Some(&tables), warmup + n);
 
         let nearest_image = amp_at(&nearest[warmup..], image_hz, out_rate);
         let nearest_alias = amp_at(&nearest[warmup..], alias_hz, out_rate);
@@ -614,15 +614,15 @@ mod tests {
         // Verify the effective-mode override fires: clean mode on a PSG voice must match the
         // crunch mode with the cutoff sliders parked at "off".
         let out_rate = 32768.0;
-        let mut sample = Waveform::new(vec![1.0, 1.0, -1.0, -1.0], 440.0, 16384.0, true, 0);
-        sample.is_psg_square = true;
-        let sample = Arc::new(sample);
+        let mut waveform = Waveform::new(vec![1.0, 1.0, -1.0, -1.0], 440.0, 16384.0, true, 0);
+        waveform.is_psg_square = true;
+        let waveform = Arc::new(waveform);
         let tables = ResampleTables::new(16);
         let n = 512;
-        let crunch_mode = render(out_rate, sample.clone(), crunch(16), Some(&tables), n);
+        let crunch_mode = render(out_rate, waveform.clone(), crunch(16), Some(&tables), n);
         let clean_mode = render(
             out_rate,
-            sample,
+            waveform,
             InstrumentResampleMode::SincSampleNyquist { half_taps: 16 },
             Some(&tables),
             n,
@@ -644,7 +644,7 @@ mod tests {
         let n = 2048;
         let tables = ResampleTables::new(32);
         for is_psg in [false, true] {
-            let mut s = sine_sample(4, 64, src_rate); // 16384/4 = 4096 Hz
+            let mut s = sine_waveform(4, 64, src_rate); // 16384/4 = 4096 Hz
             if is_psg {
                 Arc::get_mut(&mut s).unwrap().is_psg_square = true;
             }
@@ -713,20 +713,20 @@ mod tests {
         // fade-out must land at exactly zero and stop the voice. With smoothing off the gain
         // steps instantly (the preserved hardware pop).
         let out_rate = 48_000.0;
-        let mut sample = Waveform::new(vec![1.0; 64], 440.0, out_rate, true, 0); // DC source
-        sample.is_psg_square = true;
-        let sample = Arc::new(sample);
+        let mut waveform = Waveform::new(vec![1.0; 64], 440.0, out_rate, true, 0); // DC source
+        waveform.is_psg_square = true;
+        let waveform = Arc::new(waveform);
         let pitch = VoicePitch::Midi {
             note: 69.0,
             sample_pitch_hz: 440.0,
         };
 
-        let mut instr = SampleInstrument::new(out_rate, sample.clone());
+        let mut instr = WaveformInstrument::new(out_rate, waveform.clone());
         instr.set_pitch(pitch, TuningSystem::Equal);
         instr.playing = true;
         let psg_on = PopSmoothing {
             psg: true,
-            sample: false,
+            sampled: false,
             ..PopSmoothing::default()
         };
         instr.begin_note(1.0, psg_on);
@@ -761,7 +761,7 @@ mod tests {
         assert!(!instr.playing, "fade-out must stop the voice");
         assert_eq!(instr.output, 0.0);
 
-        let mut hard = SampleInstrument::new(out_rate, sample);
+        let mut hard = WaveformInstrument::new(out_rate, waveform);
         hard.set_pitch(pitch, TuningSystem::Equal);
         hard.playing = true;
         hard.begin_note(1.0, PopSmoothing::default());
@@ -787,13 +787,13 @@ mod tests {
         let out_rate = 8192.0;
         let src_rate = 20480.0; // r = 2.5
         let alias_hz = 3072.0;
-        let sample = sine_sample(4, 64, src_rate);
+        let waveform = sine_waveform(4, 64, src_rate);
         let tables = ResampleTables::new(half_taps);
         let warmup = 256;
         let n = 2048; // 3072 Hz lands on a bin (rate/n = 4 Hz)
         let out = render(
             out_rate,
-            sample,
+            waveform,
             InstrumentResampleMode::SincSampleNyquist { half_taps },
             Some(&tables),
             warmup + n,

@@ -192,7 +192,7 @@ impl PerDeviceSettings {
     pub fn pop_smoothing(&self) -> PopSmoothing {
         PopSmoothing {
             psg: self.instrument_resample.smooth_psg_pops,
-            sample: self.instrument_resample.smooth_sample_pops,
+            sampled: self.instrument_resample.smooth_sample_pops,
             slew_seconds: f64::from(self.instrument_resample.pop_slew_ms.max(0.0)) / 1000.0,
         }
     }
