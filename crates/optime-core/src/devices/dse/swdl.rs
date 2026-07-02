@@ -10,7 +10,7 @@
 //! the global `wavi` table; each `bgm####.swd` is a **per-song bank** carrying only `prgi`
 //! programs + `kgrp` keygroups whose splits reference the main bank's samples by index.
 
-use crate::sample::{decode_adpcm, decode_pcm16, decode_pcm8, Sample};
+use crate::waveform::{decode_adpcm, decode_pcm16, decode_pcm8, Waveform};
 use crate::util::{read_u16, read_u32};
 
 const HEADER_LEN: usize = 0x50;
@@ -209,9 +209,9 @@ impl Swdl {
             .and_then(|s| s.as_ref())
     }
 
-    /// Decodes one sample to a playable [`Sample`], reading PCM from this bank's `pcmd` (for the
+    /// Decodes one sample to a playable [`Waveform`], reading PCM from this bank's `pcmd` (for the
     /// main bank) or from `main_pcmd` (for a per-song bank referencing the main bank).
-    pub fn decode_sample(&self, info: &SampleInfo, main_pcmd: &[u8]) -> Option<Sample> {
+    pub fn decode_sample(&self, info: &SampleInfo, main_pcmd: &[u8]) -> Option<Waveform> {
         let pcmd = if self.pcmd.is_empty() {
             main_pcmd
         } else {
@@ -243,7 +243,7 @@ impl Swdl {
             _ => 0,
         };
 
-        let mut sample = Sample::new(
+        let mut sample = Waveform::new(
             data,
             info.sample_rate as f64,
             info.sample_rate as f64,

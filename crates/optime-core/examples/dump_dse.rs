@@ -11,7 +11,7 @@
 //! `.swd` is parsed for program info. Decoded WAVs are written to `out_dir` (default: cwd).
 
 use optime_core::devices::dse::{decode_track, DseEvent, Smdl, Swdl};
-use optime_core::sample::Sample;
+use optime_core::waveform::Waveform;
 use optime_core::synth_controller::messages::TickFeedback;
 use optime_core::{load_all, FsVisController, PerDeviceSettings, SynthController, SynthEvent};
 use std::path::Path;
@@ -348,8 +348,8 @@ fn print_event(ev: &DseEvent) {
     }
 }
 
-/// Writes a mono 16-bit PCM WAV from a normalized [`Sample`].
-fn write_wav(path: &str, sample: &Sample) {
+/// Writes a mono 16-bit PCM WAV from a normalized [`Waveform`].
+fn write_wav(path: &str, sample: &Waveform) {
     let rate = sample.sample_rate as u32;
     let n = sample.data.len();
     let data_bytes = (n * 2) as u32;

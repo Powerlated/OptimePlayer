@@ -10,7 +10,7 @@ use crate::devices::VoicePitch;
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::resample::{mode_half_taps, ResampleTables};
 use crate::dsp::slewer::Slewer;
-use crate::sample::Sample;
+use crate::waveform::{Sample, Waveform};
 use crate::synth_controller::{DelaySmoothing, PopSmoothing};
 use crate::tuning::TuningSystem;
 use crate::PerDeviceSettings;
@@ -27,9 +27,9 @@ pub struct SampleSynthesizer {
     active_instrs: Vec<usize>,
     playing_index: usize,
     /// Last mixed left output.
-    pub val_l: f64,
+    pub val_l: Sample,
     /// Last mixed right output.
-    pub val_r: f64,
+    pub val_r: Sample,
     /// Track volume (0..1).
     pub volume: f64,
     /// The pan target most recently requested (0 = left, 1 = right). The applied pan in
@@ -57,7 +57,7 @@ pub struct SampleSynthesizer {
 impl SampleSynthesizer {
     /// Creates a synthesizer with `instrs_available` voices at `sample_rate`.
     pub fn new(sample_rate: f64, instrs_available: usize) -> Self {
-        let empty = Arc::new(Sample::new(vec![0.0], 440.0, sample_rate, false, 0));
+        let empty = Arc::new(Waveform::new(vec![0.0], 440.0, sample_rate, false, 0));
         let instrs = (0..instrs_available)
             .map(|_| SampleInstrument::new(sample_rate, empty.clone()))
             .collect();
@@ -147,7 +147,7 @@ impl SampleSynthesizer {
     /// Starts `sample` at `pitch` on the next round-robin voice and returns its index.
     pub fn play(
         &mut self,
-        sample: Arc<Sample>,
+        sample: Arc<Waveform>,
         pitch: VoicePitch,
         volume: f64,
         config: &PerDeviceSettings,
@@ -242,8 +242,8 @@ impl SampleSynthesizer {
         &mut self,
         config: &PerDeviceSettings,
         n: usize,
-        acc_l: &mut [f64],
-        acc_r: &mut [f64],
+        acc_l: &mut [Sample],
+        acc_r: &mut [Sample],
         mix: bool,
     ) {
         assert!(n <= MAX_BLOCK && acc_l.len() >= n && acc_r.len() >= n);
@@ -270,7 +270,7 @@ impl SampleSynthesizer {
 
     /// The per-sample stereo stage: pan, optional Haas widening, and the bass-mono crossover.
     /// Consumes the voice-mixed `mono` sample and sets `val_l`/`val_r`.
-    fn apply_stereo(&mut self, mono: f64, config: &PerDeviceSettings) {
+    fn apply_stereo(&mut self, mono: Sample, config: &PerDeviceSettings) {
         // Resolve this sample's pan gain split: slew toward the target when smoothing is on,
         // otherwise jump straight to it (keeping the slewer in sync for a later toggle).
         let pan = if config.smooth_pan {
@@ -373,6 +373,7 @@ impl SampleSynthesizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::waveform::Frame;
 
     #[test]
     fn set_sample_rate_resizes_delays_and_preserves_pool() {
@@ -402,11 +403,11 @@ mod tests {
     }
 
     /// Plays a constant-amplitude looping sample hard-left, settles, and returns `(val_l, val_r)`.
-    fn run_dc(config: &PerDeviceSettings) -> (f64, f64) {
+    fn run_dc(config: &PerDeviceSettings) -> Frame {
         let sample_rate = 32768.0;
         let mut synth = SampleSynthesizer::new(sample_rate, 16);
         // DC sample so essentially all energy is in the low (bass) band.
-        let sample = Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
+        let sample = Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
         synth.play(
             sample,
             VoicePitch::Midi {
@@ -471,7 +472,7 @@ mod tests {
             smooth_pan: true,
             ..base.clone()
         };
-        let sample = Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
+        let sample = Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
         let pitch = VoicePitch::Midi {
             note: 69.0,
             sample_pitch_hz: 440.0,
@@ -528,7 +529,7 @@ mod tests {
         synth.set_pan(0.0, &config); // hard left while silent: applies immediately
         let baseline_delay_r = synth.delay_line_r.delay();
 
-        let sample = Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
+        let sample = Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
         let slot = synth.play(
             sample,
             VoicePitch::Midi {
@@ -565,7 +566,7 @@ mod tests {
             ..PerDeviceSettings::neutral()
         };
         synth.play(
-            Arc::new(Sample::new(vec![1.0; 64], 440.0, sample_rate, true, 0)),
+            Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0)),
             VoicePitch::Midi {
                 note: 69.0,
                 sample_pitch_hz: 440.0,

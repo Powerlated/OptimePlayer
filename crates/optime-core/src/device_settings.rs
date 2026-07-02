@@ -5,7 +5,7 @@
 //! into the synthesis layer. Defaults are intentionally *not* defined here; the app owns the
 //! out-of-the-box values.
 
-use crate::sample::InstrumentResampleMode;
+use crate::waveform::InstrumentResampleMode;
 use crate::synth_controller::{DelaySmoothing, HighShelf, PopSmoothing};
 use crate::tuning::TuningSystem;
 use crate::TRACK_COUNT;

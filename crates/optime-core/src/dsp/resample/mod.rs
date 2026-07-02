@@ -33,7 +33,7 @@
 //! - [`source`] — the loop-aware source-staging gather ([`gather_sinc`]) that feeds a voice.
 //! - [`stream`] — the streaming, fixed-ratio [`StreamResampler`] for the mixer-bus → output stage.
 //!
-//! Resolving an [`InstrumentResampleMode`](crate::sample::InstrumentResampleMode) into the concrete
+//! Resolving an [`InstrumentResampleMode`](crate::waveform::InstrumentResampleMode) into the concrete
 //! gather + cutoff ([`effective_gather`] / [`sinc_fc`] / [`mode_half_taps`]) lives here too, shared
 //! by the voice gather and the stream resampler.
 
@@ -51,7 +51,7 @@ pub use kernels::MAX_HALF_TAPS;
 pub use source::{gather_sinc, GatherSource};
 pub use stream::StreamResampler;
 
-use crate::sample::InstrumentResampleMode;
+use crate::waveform::{InstrumentResampleMode, Sample};
 use kernels::{kernels, OVERSAMPLE, WIN_OVERSAMPLE};
 
 /// The gather a read actually runs after resolving the global [`InstrumentResampleMode`] against
@@ -182,7 +182,7 @@ pub fn resample_sinc(
     pos: f64,
     fc: f64,
     step_mode: bool,
-) -> f64 {
+) -> Sample {
     let k = kernels();
     // Fixed source-sample support: |pos − k| ≤ P, i.e. ≈ 2P taps regardless of fc.
     let (k_lo, k_hi) = tap_window(tables, pos);

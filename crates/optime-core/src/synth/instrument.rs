@@ -8,7 +8,7 @@ use crate::dsp::resample::{
     effective_gather, gather_sinc, sinc_fc, EffectiveGather, GatherSource, ResampleTables,
 };
 use crate::dsp::slewer::Slewer;
-use crate::sample::{InstrumentResampleMode, Sample};
+use crate::waveform::{InstrumentResampleMode, Sample, Waveform};
 use crate::synth_controller::{PopSmoothing, DEFAULT_POP_SLEW_SECONDS};
 use crate::tuning::{midi_note_to_hz, TuningSystem};
 
@@ -17,7 +17,7 @@ use crate::tuning::{midi_note_to_hz, TuningSystem};
 pub struct SampleInstrument {
     inv_sample_rate: f64,
     /// The sample this voice is playing.
-    pub sample: Arc<Sample>,
+    pub sample: Arc<Waveform>,
     /// The voice's base pitch (a MIDI note relative to the sample's pitch, or an absolute
     /// data rate — see [`VoicePitch`]).
     pub pitch: VoicePitch,
@@ -45,12 +45,12 @@ pub struct SampleInstrument {
     finetune_lfo: f64,
     freq_ratio: f64,
     /// Last computed output sample.
-    pub output: f64,
+    pub output: Sample,
 }
 
 impl SampleInstrument {
     /// Creates an idle voice bound to `sample_rate` playing `sample`.
-    pub fn new(sample_rate: f64, sample: Arc<Sample>) -> Self {
+    pub fn new(sample_rate: f64, sample: Arc<Waveform>) -> Self {
         let pitch = VoicePitch::Midi {
             note: 0.0,
             sample_pitch_hz: sample.frequency,
@@ -173,7 +173,7 @@ impl SampleInstrument {
         let effective = effective_gather(mode, self.sample.is_psg_square);
 
         // Loop-aware sample accessor for the cheap 1–2 tap modes (and the no-tables fallback).
-        let get = |mut t: i64| -> f64 {
+        let get = |mut t: i64| -> Sample {
             if t >= data_len && looping {
                 if loop_len <= 0 {
                     return 0.0;
@@ -230,7 +230,7 @@ impl SampleInstrument {
         mode: InstrumentResampleMode,
         tables: Option<&ResampleTables>,
         pops: PopSmoothing,
-        out: &mut [f64],
+        out: &mut [Sample],
     ) {
         // Only the sinc modes are worth hoisting; the 1–2 tap modes (and the missing-tables
         // fallback) just take the per-sample path.
@@ -401,19 +401,19 @@ mod tests {
 
     /// A looping source sample holding a pure sine of `period` samples per cycle (frequency
     /// `1/period` cycles per source-sample), recorded at `src_rate`.
-    fn sine_sample(period: usize, periods: usize, src_rate: f64) -> Arc<Sample> {
+    fn sine_sample(period: usize, periods: usize, src_rate: f64) -> Arc<Waveform> {
         let len = period * periods;
         let data: Vec<f32> = (0..len)
             .map(|k| (2.0 * PI * k as f64 / period as f64).sin() as f32)
             .collect();
-        Arc::new(Sample::new(data, 440.0, src_rate, true, 0))
+        Arc::new(Waveform::new(data, 440.0, src_rate, true, 0))
     }
 
     #[test]
     fn set_sample_rate_rescales_playback_step() {
         // A `DataRateHz` voice steps the source at `r = data_rate / out_rate` per output sample.
         // A long non-looping sample avoids any loop fold so the step is read straight off sample_t.
-        let sample = Arc::new(Sample::new(vec![0.0; 4096], 440.0, 22_050.0, false, 0));
+        let sample = Arc::new(Waveform::new(vec![0.0; 4096], 440.0, 22_050.0, false, 0));
         let mut instr = SampleInstrument::new(44_100.0, sample);
         instr.set_pitch(VoicePitch::DataRateHz(22_050.0), TuningSystem::Equal);
 
@@ -447,11 +447,11 @@ mod tests {
     /// (so the playback speed `r = sample.sample_rate / out_rate`).
     fn render(
         out_rate: f64,
-        sample: Arc<Sample>,
+        sample: Arc<Waveform>,
         mode: InstrumentResampleMode,
         tables: Option<&ResampleTables>,
         n: usize,
-    ) -> Vec<f64> {
+    ) -> Vec<Sample> {
         let mut instr = SampleInstrument::new(out_rate, sample);
         // 440 Hz over a 440 Hz sample pitch ⇒ freq_ratio = 1
         instr.set_pitch(
@@ -473,7 +473,7 @@ mod tests {
 
     /// Single-bin DFT magnitude expressed as the peak amplitude of a sinusoid at `freq_hz`.
     /// Accurate when `freq_hz` lands on a DFT bin (an integer number of cycles over the window).
-    fn amp_at(signal: &[f64], freq_hz: f64, rate: f64) -> f64 {
+    fn amp_at(signal: &[Sample], freq_hz: f64, rate: f64) -> Sample {
         let w = 2.0 * PI * freq_hz / rate;
         let (mut re, mut im) = (0.0, 0.0);
         for (n, &x) in signal.iter().enumerate() {
@@ -614,7 +614,7 @@ mod tests {
         // Verify the effective-mode override fires: clean mode on a PSG voice must match the
         // crunch mode with the cutoff sliders parked at "off".
         let out_rate = 32768.0;
-        let mut sample = Sample::new(vec![1.0, 1.0, -1.0, -1.0], 440.0, 16384.0, true, 0);
+        let mut sample = Waveform::new(vec![1.0, 1.0, -1.0, -1.0], 440.0, 16384.0, true, 0);
         sample.is_psg_square = true;
         let sample = Arc::new(sample);
         let tables = ResampleTables::new(16);
@@ -713,7 +713,7 @@ mod tests {
         // fade-out must land at exactly zero and stop the voice. With smoothing off the gain
         // steps instantly (the preserved hardware pop).
         let out_rate = 48_000.0;
-        let mut sample = Sample::new(vec![1.0; 64], 440.0, out_rate, true, 0); // DC source
+        let mut sample = Waveform::new(vec![1.0; 64], 440.0, out_rate, true, 0); // DC source
         sample.is_psg_square = true;
         let sample = Arc::new(sample);
         let pitch = VoicePitch::Midi {
@@ -780,7 +780,7 @@ mod tests {
     /// Renders a stopband source sine downsampled by 2.5× through the clean (SampleNyquist)
     /// low-pass and returns the residual (aliased) amplitude that survives in the output band
     /// for a sinc kernel of `half_taps` zero-crossings.
-    fn alias_residual(half_taps: usize) -> f64 {
+    fn alias_residual(half_taps: usize) -> Sample {
         // Downsample 2.5× (20480 → 8192): r = 2.5, anti-alias cutoff fc = 0.5/r = 0.2
         // cycles/source-sample. A period-4 source sine sits at f0 = 0.25 (1.25× fc, in the
         // stopband). Its energy folds to |0.25·2.5 − 1|·8192 = 3072 Hz in the output.
@@ -811,7 +811,7 @@ mod tests {
         // deliberately retains the ZOH staircase colour, so a stopband tone does not fall
         // monotonically with tap count — that intentional grit is the point of the mode.
         let taps = [2usize, 4, 8, 16, 32];
-        let residuals: Vec<f64> = taps.iter().map(|&t| alias_residual(t)).collect();
+        let residuals: Vec<Sample> = taps.iter().map(|&t| alias_residual(t)).collect();
         for w in residuals.windows(2) {
             assert!(
                 w[1] < w[0],

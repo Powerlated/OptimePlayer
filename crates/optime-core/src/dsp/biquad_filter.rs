@@ -2,6 +2,8 @@
 
 use core::f64::consts::PI;
 
+use crate::waveform::Sample;
+
 /// A cascade of identical second-order (biquad) filter sections.
 ///
 /// `order` must be even; the cascade contains `order / 2` sections.
@@ -64,7 +66,7 @@ impl BiquadFilter {
     }
 
     /// Processes one sample through the whole cascade.
-    pub fn transform(&mut self, mut in_sample: f64) -> f64 {
+    pub fn transform(&mut self, mut in_sample: Sample) -> Sample {
         for i in 0..self.num_cascade() {
             let result = self.a0 * in_sample + self.a1 * self.x1[i] + self.a2 * self.x2[i]
                 - self.a3 * self.y1[i]

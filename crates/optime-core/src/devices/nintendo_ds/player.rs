@@ -9,7 +9,7 @@ use super::tables::SQUARE_WAVES;
 use super::volume::{calc_channel_volume, decibel_db};
 use super::{InstrumentType, Sdat};
 use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
-use crate::sample::{decode_adpcm, decode_pcm16, decode_pcm8, Sample};
+use crate::waveform::{decode_adpcm, decode_pcm16, decode_pcm8, Waveform};
 use crate::tuning::midi_note_to_hz;
 use crate::util::{read_u16, read_u32, read_u8};
 use crate::PerDeviceSettings;
@@ -54,8 +54,8 @@ pub struct NdsPlayer {
     /// The running SSEQ interpreter.
     pub sequence: Sequence,
     instrument_bank: super::InstrumentBank,
-    decoded_sample_archives: Vec<Option<Vec<Arc<Sample>>>>,
-    squares: Vec<Arc<Sample>>,
+    decoded_sample_archives: Vec<Option<Vec<Arc<Waveform>>>>,
+    squares: Vec<Arc<Waveform>>,
     active_notes: Vec<ActiveNote>,
     bpm_timer: u32,
     next_voice: VoiceId,
@@ -74,7 +74,7 @@ impl NdsPlayer {
         let sseq_arc: Arc<[u8]> = Arc::from(sseq_file.to_vec());
 
         // Decode the up-to-four linked sample archives.
-        let mut decoded_sample_archives: Vec<Option<Vec<Arc<Sample>>>> = vec![None; 4];
+        let mut decoded_sample_archives: Vec<Option<Vec<Arc<Waveform>>>> = vec![None; 4];
         for (i, &swar_id) in bank_info.swar_id.iter().enumerate() {
             let Some(Some(swar_info)) = sdat.swar_infos.get(swar_id as usize) else {
                 continue;
@@ -106,7 +106,7 @@ impl NdsPlayer {
                 };
 
                 let mut sample =
-                    Sample::new(decoded, 440.0, sample_rate_hdr, loop_flag != 0, loop_point);
+                    Waveform::new(decoded, 440.0, sample_rate_hdr, loop_flag != 0, loop_point);
                 sample.sample_length = (swar_sample_length * 4) as usize;
                 archive.push(Arc::new(sample));
             }
@@ -117,7 +117,7 @@ impl NdsPlayer {
         let squares = SQUARE_WAVES
             .iter()
             .map(|wave| {
-                let mut s = Sample::new(wave.to_vec(), 1.0, 8.0, true, 0);
+                let mut s = Waveform::new(wave.to_vec(), 1.0, 8.0, true, 0);
                 s.is_psg_square = true;
                 Arc::new(s)
             })

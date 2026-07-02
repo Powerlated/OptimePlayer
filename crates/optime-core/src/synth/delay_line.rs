@@ -1,9 +1,11 @@
 //! A fixed-length delay line used to widen the stereo image (Haas effect).
 
+use crate::waveform::Sample;
+
 /// A fixed-length delay line used to widen the stereo image (Haas effect).
 #[derive(Debug, Clone)]
 pub struct DelayLine {
-    buffer: Vec<f64>,
+    buffer: Vec<Sample>,
     pos_out: usize,
     delay: usize,
     /// Output gain.
@@ -22,7 +24,7 @@ impl DelayLine {
     }
 
     /// Pushes `val` and returns the delayed (and gain-scaled) output sample.
-    pub fn process(&mut self, val: f64) -> f64 {
+    pub fn process(&mut self, val: Sample) -> Sample {
         let len = self.buffer.len();
         self.buffer[(self.pos_out + self.delay) % len] = val;
         let out_val = self.buffer[self.pos_out];

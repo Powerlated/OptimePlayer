@@ -11,7 +11,7 @@ use super::tables::{midi_key_to_cgb_freq, midi_key_to_freq};
 use super::voice::{CgbKind, ToneKind, WaveData};
 use super::ENGINE_RATE;
 use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
-use crate::sample::Sample;
+use crate::waveform::Waveform;
 use crate::PerDeviceSettings;
 
 /// `MAX_DIRECTSOUND_CHANNELS` — we run the full hardware-struct count rather than the
@@ -105,13 +105,13 @@ pub struct GbaPlayer {
     /// DirectSound sample cache: (wave address, DC-removed?) → decoded sample (`None` caches
     /// failures). Keyed by the DC flag so toggling the setting re-decodes rather than serving a
     /// stale variant.
-    sample_cache: HashMap<(u32, bool), Option<Arc<Sample>>>,
+    sample_cache: HashMap<(u32, bool), Option<Arc<Waveform>>>,
     /// Whether to subtract each DirectSound sample's DC offset, refreshed from the config each tick.
     remove_dc: bool,
     /// CGB programmable-wave cache.
-    wave_cache: HashMap<u32, Arc<Sample>>,
-    square_samples: [Arc<Sample>; 4],
-    noise_samples: [Arc<Sample>; 2],
+    wave_cache: HashMap<u32, Arc<Waveform>>,
+    square_samples: [Arc<Waveform>; 4],
+    noise_samples: [Arc<Waveform>; 2],
     ops: Vec<Mp2kOp>,
     next_voice: VoiceId,
     /// `SoundInfo::c15`: every 15th frame the CGB envelope steps twice.
@@ -520,7 +520,7 @@ impl GbaPlayer {
     }
 
     /// Decodes (and caches) the DirectSound wave at `wav_addr`.
-    fn direct_sound_sample(&mut self, wav_addr: u32) -> Option<Arc<Sample>> {
+    fn direct_sound_sample(&mut self, wav_addr: u32) -> Option<Arc<Waveform>> {
         let key = (wav_addr, self.remove_dc);
         if let Some(cached) = self.sample_cache.get(&key) {
             return cached.clone();
@@ -528,7 +528,7 @@ impl GbaPlayer {
         let remove_dc = self.remove_dc;
         let sample = WaveData::read(&self.rom, wav_addr).map(|wav| {
             let raw = &self.rom[wav.data_offset..wav.data_offset + wav.size as usize];
-            let mut data = crate::sample::decode_pcm8(raw);
+            let mut data = crate::waveform::decode_pcm8(raw);
             // Real DirectSound output is AC-coupled, so a sample's DC offset is filtered away on
             // hardware; removing it stops the voice thumping by its offset each time the envelope
             // opens or closes (a pop the hardware never makes). Opt-in (it edits the raw sample
@@ -537,7 +537,7 @@ impl GbaPlayer {
             if remove_dc {
                 dc_center(&mut data);
             }
-            let mut sample = Sample::new(
+            let mut sample = Waveform::new(
                 data,
                 440.0,
                 f64::from(wav.freq) / 1024.0,
@@ -552,7 +552,7 @@ impl GbaPlayer {
     }
 
     /// Fetches the waveform for a CGB voice.
-    fn cgb_sample(&mut self, kind: CgbKind) -> Option<Arc<Sample>> {
+    fn cgb_sample(&mut self, kind: CgbKind) -> Option<Arc<Waveform>> {
         match kind {
             CgbKind::Square1 { duty, .. } | CgbKind::Square2 { duty } => {
                 Some(self.square_samples[(duty & 3) as usize].clone())
@@ -571,7 +571,7 @@ impl GbaPlayer {
                     }
                 }
                 dc_center(&mut data);
-                let mut sample = Sample::new(data, 440.0, 1.0, true, 0);
+                let mut sample = Waveform::new(data, 440.0, 1.0, true, 0);
                 sample.is_psg_square = true;
                 let sample = Arc::new(sample);
                 self.wave_cache.insert(wave_addr, sample.clone());
@@ -846,7 +846,7 @@ fn dc_center(data: &mut [f32]) {
 }
 
 /// The four GB square duty cycles as 8-sample loops.
-fn build_square_samples() -> [Arc<Sample>; 4] {
+fn build_square_samples() -> [Arc<Waveform>; 4] {
     const DUTIES: [[f32; 8]; 4] = [
         [-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5], // 12.5%
         [0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5],  // 25%
@@ -856,14 +856,14 @@ fn build_square_samples() -> [Arc<Sample>; 4] {
     DUTIES.map(|duty| {
         let mut data = duty.to_vec();
         dc_center(&mut data);
-        let mut s = Sample::new(data, 1.0, 1.0, true, 0);
+        let mut s = Waveform::new(data, 1.0, 1.0, true, 0);
         s.is_psg_square = true;
         Arc::new(s)
     })
 }
 
 /// The 15-bit and 7-bit LFSR noise sequences as looping ±0.5 sample data.
-fn build_noise_samples() -> [Arc<Sample>; 2] {
+fn build_noise_samples() -> [Arc<Waveform>; 2] {
     let generate = |seven_bit: bool| {
         let len = if seven_bit { 127 } else { 32767 };
         let mut lfsr: u16 = if seven_bit { 0x7F } else { 0x7FFF };
@@ -879,7 +879,7 @@ fn build_noise_samples() -> [Arc<Sample>; 2] {
             data.push(if lfsr & 1 != 0 { -0.5 } else { 0.5 });
         }
         dc_center(&mut data);
-        let mut s = Sample::new(data, 1.0, 1.0, true, 0);
+        let mut s = Waveform::new(data, 1.0, 1.0, true, 0);
         s.is_psg_square = true;
         Arc::new(s)
     };

@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::sample::Sample;
+use crate::waveform::Waveform;
 
 /// Device-chosen identifier for one sounding voice. Unique for the lifetime of a player
 /// (a simple monotonic counter); never reused, so stale references are unrepresentable.
@@ -46,7 +46,7 @@ pub enum SynthEvent {
         /// The sounding MIDI key (drives the visualizer grid).
         key: u8,
         /// The waveform to play.
-        sample: Arc<Sample>,
+        sample: Arc<Waveform>,
         /// Initial pitch.
         pitch: VoicePitch,
         /// Initial linear volume (0..=1).

@@ -337,7 +337,7 @@ pub fn sample_dc_stats(rom: &GbaRom, song_id: u32) -> Vec<SampleDcStat> {
             continue;
         };
         let raw = &data[wav.data_offset..wav.data_offset + wav.size as usize];
-        let pcm = crate::sample::decode_pcm8(raw);
+        let pcm = crate::waveform::decode_pcm8(raw);
         if pcm.is_empty() {
             continue;
         }

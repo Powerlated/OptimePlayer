@@ -3,6 +3,7 @@
 //! plain, loop-mapped slice.
 
 use super::{resample_sinc, tap_window, ResampleTables, GATHER_BUF_LEN};
+use crate::waveform::Sample;
 
 /// Maps a source index past the loop end back into the loop body `[loop_point, data_len)`.
 /// Callers guarantee `loop_len > 0`.
@@ -35,7 +36,7 @@ pub fn gather_sinc(
     pos: f64,
     fc: f64,
     step_mode: bool,
-) -> f64 {
+) -> Sample {
     let &GatherSource {
         data,
         looping,

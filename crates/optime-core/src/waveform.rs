@@ -1,7 +1,17 @@
-//! Decoded audio samples and the PCM8/PCM16/IMA-ADPCM/WAV decoders.
+//! The [`Waveform`] type (a decoded waveform + playback metadata), the [`Sample`]/[`Frame`]
+//! signal-path aliases, and the PCM8/PCM16/IMA-ADPCM/WAV decoders.
 
 use crate::devices::nintendo_ds::tables::{ADPCM_INDEX_TABLE, ADPCM_STEP_TABLE};
 use crate::util::{read_u16, read_u32, read_u8};
+
+/// A single audio sample value (amplitude) in the synthesis signal path.
+///
+/// The mixing/resampling pipeline runs in `f64`; decoded waveform storage
+/// ([`Waveform::data`]) stays `f32`, and the final output is narrowed to `f32` at the very edge.
+pub type Sample = f64;
+
+/// A stereo pair of [`Sample`]s, ordered `(left, right)`.
+pub type Frame = (Sample, Sample);
 
 /// How a sample is interpolated during pitch-shifting / resampling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +37,7 @@ pub enum InstrumentResampleMode {
     SincOutputNyquist {
         /// Half-width of the Blackman-windowed sinc kernel in zero-crossings (≥ 1).
         half_taps: usize,
-        /// Low-pass cutoff (Hz) for PSG waveform voices ([`Sample::is_psg_square`]).
+        /// Low-pass cutoff (Hz) for PSG waveform voices ([`Waveform::is_psg_square`]).
         psg_cutoff_hz: u32,
         /// Low-pass cutoff (Hz) for sampled (DirectSound) voices.
         sampler_cutoff_hz: u32,
@@ -44,7 +54,7 @@ impl InstrumentResampleMode {
 
 /// A decoded waveform plus the metadata needed to play it back at the correct pitch.
 #[derive(Debug, Clone)]
-pub struct Sample {
+pub struct Waveform {
     /// Normalized sample data in roughly `[-1.0, 1.0]`.
     pub data: Vec<f32>,
     /// The frequency (Hz) this waveform represents when played at `sample_rate`.
@@ -62,7 +72,7 @@ pub struct Sample {
     pub sample_length: usize,
 }
 
-impl Sample {
+impl Waveform {
     /// Builds a sample from decoded data and playback metadata.
     pub fn new(
         data: Vec<f32>,
@@ -144,10 +154,10 @@ pub fn decode_adpcm(data: &[u8]) -> Vec<f32> {
     out
 }
 
-/// Decodes a (8- or 16-bit PCM) RIFF/WAV file into a [`Sample`] at `sample_frequency`.
+/// Decodes a (8- or 16-bit PCM) RIFF/WAV file into a [`Waveform`] at `sample_frequency`.
 ///
 /// Returns `None` for unsupported bit depths.
-pub fn decode_wav(data: &[u8], sample_frequency: f64) -> Option<Sample> {
+pub fn decode_wav(data: &[u8], sample_frequency: f64) -> Option<Waveform> {
     let num_channels = read_u16(data, 22) as usize;
     let sample_rate = read_u32(data, 24) as f64;
     let bits_per_sample = read_u16(data, 34) as usize;
@@ -170,7 +180,7 @@ pub fn decode_wav(data: &[u8], sample_frequency: f64) -> Option<Sample> {
         i += stride;
     }
 
-    Some(Sample::new(
+    Some(Waveform::new(
         sample_data,
         sample_frequency,
         sample_rate,

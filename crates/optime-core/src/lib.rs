@@ -20,7 +20,7 @@
 pub mod device_settings;
 pub mod devices;
 mod dsp;
-pub mod sample;
+pub mod waveform;
 pub mod synth;
 pub mod synth_controller;
 pub mod tuning;
@@ -38,8 +38,9 @@ pub use devices::{
 };
 pub use dsp::biquad_filter;
 pub use dsp::resample::{ResampleTables, StreamResampler};
-pub use sample::{
-    decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, InstrumentResampleMode, Sample,
+pub use waveform::{
+    decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, Frame, InstrumentResampleMode, Sample,
+    Waveform,
 };
 pub use synth::{DelayLine, SampleInstrument, SampleSynthesizer, CROSSOVER_Q};
 pub use synth_controller::{

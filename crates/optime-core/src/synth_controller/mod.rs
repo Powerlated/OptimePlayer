@@ -30,7 +30,7 @@ pub use vis::{FsVisController, SongOverview, VisNote};
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::resample::StreamResampler;
-use crate::sample::InstrumentResampleMode;
+use crate::waveform::{Frame, InstrumentResampleMode, Sample};
 use crate::synth::MAX_BLOCK;
 use crate::{PerDeviceSettings, SampleSynthesizer, TRACK_COUNT};
 
@@ -95,8 +95,8 @@ fn render_set(
     synths: &mut [SampleSynthesizer],
     enables: &[bool],
     config: &PerDeviceSettings,
-) -> (f64, f64) {
-    let (mut l, mut r) = (0.0, 0.0);
+) -> Frame {
+    let (mut l, mut r): Frame = (0.0, 0.0);
     for (synth, &enabled) in synths.iter_mut().zip(enables) {
         synth.next_sample(config);
         if enabled {
@@ -178,7 +178,7 @@ impl Bank {
     }
 
     /// One upsampled stereo sample, pulling the mixer-rate bus from `render` on demand.
-    fn route(&mut self, render: &mut impl FnMut() -> (f64, f64)) -> (f64, f64) {
+    fn route(&mut self, render: &mut impl FnMut() -> Frame) -> Frame {
         self.resampler.next(render)
     }
 }
@@ -452,7 +452,7 @@ impl SynthController {
     /// Applies the master high-shelf EQ to one final stereo sample (a transparent pass when the
     /// shelf is disabled / 0 dB), reconfiguring the biquads when the parameters change.
     #[inline]
-    fn master_filter(&mut self, l: f64, r: f64, config: &PerDeviceSettings) -> (f64, f64) {
+    fn master_filter(&mut self, l: Sample, r: Sample, config: &PerDeviceSettings) -> Frame {
         let hs = config.shelf;
         if !hs.is_active() {
             return (l, r);
@@ -490,7 +490,7 @@ impl SynthController {
     /// A transparent pass otherwise; the biquad state is cleared on the inactive→active edge so a
     /// fresh enable starts clean.
     #[inline]
-    fn psg_compensate(&mut self, l: f64, r: f64, config: &PerDeviceSettings) -> (f64, f64) {
+    fn psg_compensate(&mut self, l: Sample, r: Sample, config: &PerDeviceSettings) -> Frame {
         if !psg_comp_active(config) {
             self.psg_comp_was_active = false;
             return (l, r);
@@ -601,7 +601,7 @@ impl SynthController {
     /// One upsampled stereo sample routed from the mixer set through the bank: the resampler pulls
     /// mixer-rate samples (each a fresh advance + stereo mix of the mixer set) only as its read
     /// window consumes them.
-    fn route_mixer(&mut self, config: &PerDeviceSettings) -> (f64, f64) {
+    fn route_mixer(&mut self, config: &PerDeviceSettings) -> Frame {
         let mixer_synths = &mut self.mixer_synths;
         let enables = &config.track_enables;
         let mut render = || render_set(mixer_synths, enables, config);

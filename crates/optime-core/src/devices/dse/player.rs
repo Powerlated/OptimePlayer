@@ -18,7 +18,7 @@ use super::sequencer::{DseSequencer, SeqOp};
 use super::swdl::Swdl;
 use super::{volume, SampleInfo, Smdl};
 use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
-use crate::sample::Sample;
+use crate::waveform::Waveform;
 use crate::PerDeviceSettings;
 use crate::TRACK_COUNT;
 
@@ -189,7 +189,7 @@ pub struct DsePlayer {
     /// Per-song bank (programs/splits; its WAVI is ignored — see [`Self::sample`]).
     song_bank: Arc<Swdl>,
     /// Decoded samples, keyed by a split's `wave_index` (resolved against the main bank's WAVI).
-    sample_cache: HashMap<i16, Option<Arc<Sample>>>,
+    sample_cache: HashMap<i16, Option<Arc<Waveform>>>,
     tracks: [DseTrack; TRACK_COUNT],
     voices: Vec<DseVoice>,
     accum_us: i64,
@@ -594,7 +594,7 @@ impl DsePlayer {
     /// with *local* `pcm_offset`s (as if its samples were packed from zero) — they do not index
     /// the shared `bgm.swd` `pcmd`. Only the main bank's global WAVI has the correct offsets
     /// (root key / rate / loop are identical in both), so we look the slot up there.
-    fn sample(&mut self, wave_index: i16) -> Option<Arc<Sample>> {
+    fn sample(&mut self, wave_index: i16) -> Option<Arc<Waveform>> {
         if let Some(cached) = self.sample_cache.get(&wave_index) {
             return cached.clone();
         }

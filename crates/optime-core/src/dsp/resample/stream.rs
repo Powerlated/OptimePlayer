@@ -2,7 +2,7 @@
 //! (the intermediate mixer's bus → the output rate).
 //!
 //! Unlike the voice gather in [`source`](super::source) — which reads a finite, loop-mapped
-//! [`Sample`](crate::sample::Sample) at a pitch-driven position — this reads an open-ended stream
+//! [`Waveform`](crate::waveform::Waveform) at a pitch-driven position — this reads an open-ended stream
 //! pulled on demand from a callback, keeping just enough recent input in a small ring to feed the
 //! windowed-sinc kernel. It applies the same [`InstrumentResampleMode`] set as a voice (resolved
 //! against a non-PSG signal — a finished mix has no PSG/sampled distinction) by reusing the shared
@@ -14,7 +14,7 @@ use super::{
     effective_gather, mode_half_taps, resample_sinc, sinc_fc, tap_window, EffectiveGather,
     ResampleTables, GATHER_BUF_LEN, MAX_HALF_TAPS,
 };
-use crate::sample::InstrumentResampleMode;
+use crate::waveform::{Frame, InstrumentResampleMode, Sample};
 
 /// Recent-input ring length: wider than the widest possible tap window so the oldest tap a gather
 /// reads is never overwritten before it is read.
@@ -104,7 +104,7 @@ impl StreamResampler {
     }
 
     #[inline]
-    fn push(&mut self, l: f64, r: f64) {
+    fn push(&mut self, l: Sample, r: Sample) {
         let slot = (self.loaded as usize) % RING;
         self.ring_l[slot] = l as f32;
         self.ring_r[slot] = r as f32;
@@ -123,7 +123,7 @@ impl StreamResampler {
 
     /// Pulls input from `next_in` until the ring holds the sample at absolute index `k`.
     #[inline]
-    fn fill_to(&mut self, k: i64, next_in: &mut impl FnMut() -> (f64, f64)) {
+    fn fill_to(&mut self, k: i64, next_in: &mut impl FnMut() -> Frame) {
         while self.loaded <= k {
             let (l, r) = next_in();
             self.push(l, r);
@@ -132,7 +132,7 @@ impl StreamResampler {
 
     /// Produces one output stereo sample, pulling mixer-rate input from `next_in` as the read
     /// window requires it.
-    pub fn next(&mut self, next_in: &mut impl FnMut() -> (f64, f64)) -> (f64, f64) {
+    pub fn next(&mut self, next_in: &mut impl FnMut() -> Frame) -> Frame {
         let out = match self.gather {
             EffectiveGather::Nearest => {
                 // Zero-order hold: the most recent input at or before `pos`.
@@ -147,7 +147,7 @@ impl StreamResampler {
                 let i = self.pos.floor() as i64;
                 let frac = self.pos - i as f64;
                 self.fill_to(i + 1, next_in);
-                let lerp = |ring: &[f32; RING]| -> f64 {
+                let lerp = |ring: &[f32; RING]| -> Sample {
                     let a = f64::from(Self::at(ring, i));
                     let b = f64::from(Self::at(ring, i + 1));
                     a + (b - a) * frac
@@ -195,7 +195,7 @@ mod tests {
             (v, -v)
         };
         // pos = 0, .25, .5, .75 → floor 0 → input[0]; then 1.0,1.25,.. → input[1]; ...
-        let got: Vec<(f64, f64)> = (0..12).map(|_| rs.next(&mut pull)).collect();
+        let got: Vec<Frame> = (0..12).map(|_| rs.next(&mut pull)).collect();
         for (i, &(l, r)) in got.iter().enumerate() {
             let expected = inputs[i / 4];
             assert_eq!(l, expected, "sample {i}");
@@ -215,7 +215,7 @@ mod tests {
             (v, 0.0)
         };
         // pos = 0, .5, 1, 1.5, 2 → 0, 1, 2, 3, 4 (left channel).
-        let got: Vec<f64> = (0..5).map(|_| rs.next(&mut pull).0).collect();
+        let got: Vec<Sample> = (0..5).map(|_| rs.next(&mut pull).0).collect();
         for (i, &l) in got.iter().enumerate() {
             assert!((l - i as f64).abs() < 1e-9, "sample {i}: got {l}");
         }
