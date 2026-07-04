@@ -32,7 +32,7 @@ impl DelayLine {
         if self.pos_out >= len {
             self.pos_out = 0;
         }
-        out_val * self.gain
+        out_val * self.gain as Sample
     }
 
     /// Sets the delay length in samples (clamped to the buffer capacity).

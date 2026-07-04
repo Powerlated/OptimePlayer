@@ -252,7 +252,7 @@ impl WaveformSynthesizer {
         let resample = config.resample();
         let pop_smoothing = config.pop_smoothing();
 
-        let mut mono = [0.0f64; MAX_BLOCK];
+        let mut mono: [Sample; MAX_BLOCK] = [0.0; MAX_BLOCK];
         for &i in &self.active_instrs {
             self.instrs[i].advance_block(resample, tables, pop_smoothing, &mut mono[..n]);
         }
@@ -280,9 +280,15 @@ impl WaveformSynthesizer {
             self.pan_target
         };
 
+        // Narrow the f64 pan/volume gains to the sample width once, so the mix arithmetic is done
+        // entirely in `Sample` (a no-op when `Sample = f64`).
+        let vol = self.volume as Sample;
+        let gl = (1.0 - pan) as Sample;
+        let gr = pan as Sample;
+
         if !config.stereo_separation {
-            self.val_l = mono * (1.0 - pan) * self.volume;
-            self.val_r = mono * pan * self.volume;
+            self.val_l = mono * gl * vol;
+            self.val_r = mono * gr * vol;
             return;
         }
 
@@ -292,13 +298,13 @@ impl WaveformSynthesizer {
             let lo = self.crossover_lp.transform(mono);
             let hi = self.crossover_hp.transform(mono);
             let center = lo * 0.5;
-            let hi_l = self.delay_line_l.process(hi * (1.0 - pan));
-            let hi_r = self.delay_line_r.process(hi * pan);
-            self.val_l = (hi_l + center) * self.volume;
-            self.val_r = (hi_r + center) * self.volume;
+            let hi_l = self.delay_line_l.process(hi * gl);
+            let hi_r = self.delay_line_r.process(hi * gr);
+            self.val_l = (hi_l + center) * vol;
+            self.val_r = (hi_r + center) * vol;
         } else {
-            self.val_l = self.delay_line_l.process(mono * (1.0 - pan)) * self.volume;
-            self.val_r = self.delay_line_r.process(mono * pan) * self.volume;
+            self.val_l = self.delay_line_l.process(mono * gl) * vol;
+            self.val_r = self.delay_line_r.process(mono * gr) * vol;
         }
     }
 

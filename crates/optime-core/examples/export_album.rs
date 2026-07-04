@@ -15,13 +15,21 @@
 //! The input archive must already be decompressed (gunzip any `*.gbaaudio.gz` first). The JSON is
 //! the curated `[{ "songId", "title" }]` table (its array order is the album order).
 //!
-//! Usage: `cargo run -p optime-core --example export_album_flac -- <archive> <names.json> <out.flac> [--max-silence S] [--limit N]`
+//! Usage: `cargo run -p optime-core --example export_album -- <archive> <names.json> <out.flac> [--max-silence S] [--limit N]`
+//!
+//! `--benchmark [PCT]` turns the tool into a render-performance benchmark instead of a FLAC export:
+//! it renders a deterministic, evenly-spread `PCT` (default `100%`) of the album with the same
+//! high-quality preset and reports wall time, realtime factor, and throughput (no FLAC, no temp
+//! files, on a fixed 4-thread pool through the same `parallel_render` path as the export). It also
+//! prints the engine's `Sample` width
+//! ([`optime_core::SAMPLE_SIZE_BYTES`]), so an `f32`-vs-`f64` build comparison is self-identifying.
+//! Example: `--example export_album -- mother-3.gbaaudio mother_3.json /dev/null --benchmark 10%`.
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use clap::Parser;
 use ebur128::{EbuR128, Mode};
@@ -58,6 +66,104 @@ struct Args {
     /// Only export the first N songs (for quick tests).
     #[arg(long)]
     limit: Option<usize>,
+    /// Benchmark render performance instead of exporting a FLAC. Renders a deterministic,
+    /// evenly-spread percentage of the album (e.g. `--benchmark 10%`; the flag alone means 100%)
+    /// and reports wall time, realtime factor, and throughput. Accepts `10%`, `10`, or `0.1`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "100%", value_name = "PCT")]
+    benchmark: Option<String>,
+}
+
+/// Parses a percentage string (`"10%"`, `"10"`, or `"0.1"`) into a fraction in `(0, 1]`.
+fn parse_percent(s: &str) -> Result<f64, String> {
+    let t = s.trim().trim_end_matches('%').trim();
+    let raw: f64 = t.parse().map_err(|_| format!("invalid percentage '{s}'"))?;
+    // A bare value ≤ 1 is read as a fraction (0.1 → 10%); otherwise as a percent (10 → 10%).
+    let frac = if s.contains('%') || raw > 1.0 {
+        raw / 100.0
+    } else {
+        raw
+    };
+    if frac > 0.0 && frac <= 1.0 {
+        Ok(frac)
+    } else {
+        Err(format!("percentage out of range (0, 100]: '{s}'"))
+    }
+}
+
+/// Deterministically picks `frac` of `total` items, evenly spread across the whole range (so a 10%
+/// benchmark samples the album start-to-end rather than just its first tracks). Returns the chosen
+/// indices in ascending order.
+fn spread_indices(total: usize, frac: f64) -> Vec<usize> {
+    let count = ((total as f64 * frac).round() as usize).clamp(1, total.max(1));
+    (0..count)
+        .map(|k| (((k as f64 + 0.5) * total as f64 / count as f64) as usize).min(total - 1))
+        .collect()
+}
+
+/// Renders `subset` of `album` serially, `passes` times, and reports render performance. No FLAC or
+/// temp files — a clean single-threaded throughput/realtime measurement for the current engine build.
+fn run_benchmark(
+    data: &dyn SoundData,
+    album: &[(u32, String)],
+    config: &PerDeviceSettings,
+    frac: f64,
+    is_gba: bool,
+) -> ExitCode {
+    use std::time::Instant;
+
+    let idxs = spread_indices(album.len(), frac);
+    let sample_bits = optime_core::SAMPLE_SIZE_BYTES * 8;
+    eprintln!(
+        "Benchmark: Sample = f{sample_bits} ({} B) — {}/{} tracks ({:.0}% of album), {} console, high-quality preset, {BENCH_THREADS} threads.",
+        optime_core::SAMPLE_SIZE_BYTES,
+        idxs.len(),
+        album.len(),
+        frac * 100.0,
+        if is_gba { "GBA" } else { "DS/other" },
+    );
+
+    // THE benchmark renders on a fixed 4-thread pool (canonical config in CLAUDE.md), so the
+    // throughput number is reproducible across machines with ≥4 cores rather than scaling with
+    // `available_parallelism`. It goes through the exact same `parallel_render` path as the FLAC
+    // export, just counting frames instead of writing PCM.
+    const BENCH_THREADS: usize = 4;
+
+    // Warm up caches/JIT-free codegen paths with one untimed pass, then time three passes and
+    // report the median (rendering is deterministic, so variance is pure scheduling noise).
+    let render_pass = || -> (u64, std::time::Duration) {
+        let frames = AtomicU64::new(0);
+        let t0 = Instant::now();
+        parallel_render(data, album, config, &idxs, BENCH_THREADS, |_, _, f, _| {
+            frames.fetch_add(f.len() as u64, Ordering::Relaxed);
+        });
+        (frames.load(Ordering::Relaxed), t0.elapsed())
+    };
+
+    let _ = render_pass(); // warmup
+    const PASSES: usize = 3;
+    let mut runs: Vec<(u64, f64)> = Vec::with_capacity(PASSES);
+    for p in 0..PASSES {
+        let (frames, dt) = render_pass();
+        let wall = dt.as_secs_f64();
+        let audio_s = frames as f64 / f64::from(SR);
+        eprintln!(
+            "  pass {}/{PASSES}: {frames} frames ({audio_s:.1}s audio) in {wall:.3}s  →  {:.1}× realtime, {:.2} Msamp/s",
+            p + 1,
+            audio_s / wall,
+            frames as f64 * 2.0 / wall / 1.0e6,
+        );
+        runs.push((frames, wall));
+    }
+    runs.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let (frames, wall) = runs[runs.len() / 2];
+    let audio_s = frames as f64 / f64::from(SR);
+    eprintln!(
+        "\nMEDIAN  Sample=f{sample_bits}  tracks={}  frames={frames}  audio={audio_s:.1}s  wall={wall:.3}s  realtime={:.1}x  throughput={:.2}Msamp/s",
+        idxs.len(),
+        audio_s / wall,
+        frames as f64 * 2.0 / wall / 1.0e6,
+    );
+    ExitCode::SUCCESS
 }
 
 /// Renders one song to stereo frames using the shared controller fade policy (one loop then a
@@ -93,6 +199,33 @@ fn render_song(data: &dyn SoundData, song_id: u32, config: &PerDeviceSettings) -
         }
     }
     out
+}
+
+/// Renders the given album positions in parallel on a fixed `threads`-wide rayon pool — the one
+/// render code path shared by the FLAC export and `--benchmark`. `on_track` runs on the worker
+/// with each rendered track's `(index, (songId, title), frames, worker)`, where `worker`
+/// (`0..threads`, from [`rayon::current_thread_index`]) indexes a per-worker progress bar.
+fn parallel_render<F>(
+    data: &dyn SoundData,
+    album: &[(u32, String)],
+    config: &PerDeviceSettings,
+    idxs: &[usize],
+    threads: usize,
+    on_track: F,
+) where
+    F: Fn(usize, &(u32, String), &[(f32, f32)], usize) + Sync,
+{
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .expect("build render thread pool");
+    pool.install(|| {
+        idxs.par_iter().for_each(|&i| {
+            let frames = render_song(data, album[i].0, config);
+            let worker = rayon::current_thread_index().unwrap_or(0);
+            on_track(i, &album[i], &frames, worker);
+        });
+    });
 }
 
 /// `dir/trk_{i:05}.pcm` — the per-track interleaved-i16 scratch file for album position `i`.
@@ -178,6 +311,18 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Benchmark mode: render a deterministic slice of the album and report performance; no FLAC.
+    if let Some(pct) = &args.benchmark {
+        let frac = match parse_percent(pct) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return run_benchmark(&*data, &album, &config, frac, is_gba);
+    }
+
     eprintln!(
         "Console: {} (high-quality {} preset) — {} tracks, {:.1}s max silence between songs.",
         if is_gba { "GBA" } else { "DS/other" },
@@ -192,7 +337,8 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // --- Parallel render: each album position -> its own interleaved-i16 PCM file. ---
+    // --- Parallel render: each album position -> its own interleaved-i16 PCM file, through the
+    // shared `parallel_render` path (also used by `--benchmark`). ---
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -215,34 +361,30 @@ fn main() -> ExitCode {
         })
         .collect();
 
-    let cursor = AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        for pb in &worker_bars {
-            let (overall, cursor, album, data, config, tmp_dir) =
-                (&overall, &cursor, &album, &data, &config, &tmp_dir);
-            scope.spawn(move || {
-                loop {
-                    let i = cursor.fetch_add(1, Ordering::Relaxed);
-                    let Some((id, title)) = album.get(i) else {
-                        break;
-                    };
-                    pb.set_message(format!("songId {id:<5} \"{title}\""));
-                    let frames = render_song(&**data, *id, config);
-                    let mut bytes = Vec::with_capacity(frames.len() * 4);
-                    for &(l, r) in &frames {
-                        for s in [l, r] {
-                            bytes.extend_from_slice(
-                                &((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes(),
-                            );
-                        }
-                    }
-                    fs::write(track_path(tmp_dir, i), &bytes).expect("write track pcm");
-                    overall.inc(1);
+    let idxs: Vec<usize> = (0..album.len()).collect();
+    parallel_render(
+        &*data,
+        &album,
+        &config,
+        &idxs,
+        threads,
+        |i, (id, title), frames, worker| {
+            worker_bars[worker].set_message(format!("songId {id:<5} \"{title}\""));
+            let mut bytes = Vec::with_capacity(frames.len() * 4);
+            for &(l, r) in frames {
+                for s in [l, r] {
+                    bytes.extend_from_slice(
+                        &((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes(),
+                    );
                 }
-                pb.finish_and_clear();
-            });
-        }
-    });
+            }
+            fs::write(track_path(&tmp_dir, i), &bytes).expect("write track pcm");
+            overall.inc(1);
+        },
+    );
+    for pb in &worker_bars {
+        pb.finish_and_clear();
+    }
     overall.finish();
 
     let gap_frames = (args.max_silence.max(0.0) * SR as f32) as usize;

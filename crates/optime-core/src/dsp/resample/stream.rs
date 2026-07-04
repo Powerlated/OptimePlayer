@@ -139,8 +139,8 @@ impl StreamResampler {
                 let idx = self.pos.floor() as i64;
                 self.fill_to(idx, next_in);
                 (
-                    f64::from(Self::at(&self.ring_l, idx)),
-                    f64::from(Self::at(&self.ring_r, idx)),
+                    Sample::from(Self::at(&self.ring_l, idx)),
+                    Sample::from(Self::at(&self.ring_r, idx)),
                 )
             }
             EffectiveGather::Linear => {
@@ -150,7 +150,7 @@ impl StreamResampler {
                 let lerp = |ring: &[f32; RING]| -> Sample {
                     let a = f64::from(Self::at(ring, i));
                     let b = f64::from(Self::at(ring, i + 1));
-                    a + (b - a) * frac
+                    (a + (b - a) * frac) as Sample
                 };
                 (lerp(&self.ring_l), lerp(&self.ring_r))
             }

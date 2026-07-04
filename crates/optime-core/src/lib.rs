@@ -10,7 +10,7 @@
 //! SynthEvent stream   ─► SynthController             (voice pools, master clock, mixing)
 //! ```
 //!
-//! Each console lives in its own folder under [`devices`] (`nintendo_ds`, `gba`); the
+//! Each console lives in its own folder under [`devices`] (`nds`, `gba`); the
 //! synthesis layer ([`synth_controller`], [`synth`], [`dsp`] incl. `dsp::resample`) is shared and
 //! knows nothing about any console's formats.
 //!
@@ -29,7 +29,7 @@ pub mod util;
 pub use device_settings::{
     InstrumentResampleChoice, InstrumentResampleSettings, MixerResampleSettings, PerDeviceSettings,
 };
-pub use devices::nintendo_ds::{
+pub use devices::nds::{
     calc_channel_volume, BankInfo, InstrumentBank, InstrumentRecord, InstrumentType, Message,
     MessageType, Sdat, Sequence, SequenceTrack, SseqInfo, SwarInfo,
 };
@@ -51,6 +51,10 @@ pub use tuning::{midi_note_to_hz, TuningSystem};
 
 /// Number of sequence tracks the synthesis layer exposes (both consoles fit in 16).
 pub const TRACK_COUNT: usize = 16;
+
+/// Size in bytes of one [`Sample`] (the signal-path amplitude type). Lets tools report whether the
+/// engine was built with `Sample = f64` (8) or `Sample = f32` (4) without knowing the alias.
+pub const SAMPLE_SIZE_BYTES: usize = core::mem::size_of::<Sample>();
 
 /// DS system clock, in Hz. The DS sequence timer is driven from this.
 pub const DS_CLOCK_RATE: u64 = 33_513_982;

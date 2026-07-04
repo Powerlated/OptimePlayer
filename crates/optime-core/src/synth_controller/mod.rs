@@ -647,8 +647,8 @@ impl SynthController {
         let threshold = self.player.cycles_per_tick() * self.sample_rate;
         let clock = self.player.clock_rate();
         let frames = out.len() / 2;
-        let mut acc_l = [0.0f64; MAX_BLOCK];
-        let mut acc_r = [0.0f64; MAX_BLOCK];
+        let mut acc_l: [Sample; MAX_BLOCK] = [0.0; MAX_BLOCK];
+        let mut acc_r: [Sample; MAX_BLOCK] = [0.0; MAX_BLOCK];
 
         let mut frame = 0;
         while frame < frames {

@@ -65,21 +65,23 @@ impl BiquadFilter {
         }
     }
 
-    /// Processes one sample through the whole cascade.
-    pub fn transform(&mut self, mut in_sample: Sample) -> Sample {
+    /// Processes one sample through the whole cascade. The coefficients and per-section state stay
+    /// `f64` for numerical stability regardless of the [`Sample`] width; only the I/O is narrowed.
+    pub fn transform(&mut self, in_sample: Sample) -> Sample {
+        let mut x = in_sample as f64;
         for i in 0..self.num_cascade() {
-            let result = self.a0 * in_sample + self.a1 * self.x1[i] + self.a2 * self.x2[i]
+            let result = self.a0 * x + self.a1 * self.x1[i] + self.a2 * self.x2[i]
                 - self.a3 * self.y1[i]
                 - self.a4 * self.y2[i];
 
             self.x2[i] = self.x1[i];
-            self.x1[i] = in_sample;
+            self.x1[i] = x;
             self.y2[i] = self.y1[i];
             self.y1[i] = result;
 
-            in_sample = result;
+            x = result;
         }
-        in_sample
+        x as Sample
     }
 
     /// Sets and normalizes the filter coefficients.

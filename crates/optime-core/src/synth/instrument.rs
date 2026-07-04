@@ -181,7 +181,7 @@ impl WaveformInstrument {
                 t = (t - loop_point).rem_euclid(loop_len) + loop_point;
             }
             if t >= 0 && t < data_len {
-                f64::from(data[t as usize])
+                Sample::from(data[t as usize])
             } else {
                 0.0
             }
@@ -194,7 +194,7 @@ impl WaveformInstrument {
                 let frac = pos - i as f64;
                 let a = get(i);
                 let b = get(i + 1);
-                a + (b - a) * frac
+                a + (b - a) * frac as Sample
             }
             EffectiveGather::Sinc {
                 step_mode,
@@ -217,7 +217,7 @@ impl WaveformInstrument {
             }
         };
 
-        self.output = result * gain;
+        self.output = result * gain as Sample;
     }
 
     /// Advances playback by `out.len()` output samples, adding each `volume`-scaled sample into
@@ -317,7 +317,7 @@ impl WaveformInstrument {
                 wrapped,
             };
             let result = gather_sinc(&src, tbl, pos, fc, step_mode);
-            last = result * g;
+            last = result * g as Sample;
             *slot += last;
         }
         self.sample_t = pos;

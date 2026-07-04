@@ -228,9 +228,9 @@ pub fn resample_sinc(
     let wsum = if step_mode { wsum.abs() } else { wsum };
 
     if wsum > 1e-12 {
-        out / wsum
+        (out / wsum) as Sample
     } else {
         // Degenerate weights (pathological fc): fall back to the nearest staged tap.
-        f64::from(src[(pos.round() as i64 - k_lo) as usize])
+        Sample::from(src[(pos.round() as i64 - k_lo) as usize])
     }
 }

@@ -8,7 +8,7 @@
 //! SoundData ──► devices::<console>::Player ──► SynthEvent stream ──► SynthController (voices/mixing)
 //! ```
 //!
-//! - [`nintendo_ds`] — SDAT archives, the SSEQ sequencer, and the DS ADSR/LFO hardware model.
+//! - [`nds`] — SDAT archives, the SSEQ sequencer, and the DS ADSR/LFO hardware model.
 //! - [`gba`] — GBA ROMs running the MP2K ("Sappy") engine from `pret/pokeemerald`.
 //! - [`dse`] — Procyon Studios' DSE engine (SMDL/SWDL), used by PMD: Explorers of Sky; from
 //!   `pret/pmd-sky`. A full [`SoundData`]/[`DevicePlayer`] backend: SMDL sequencer, the volume
@@ -19,7 +19,7 @@
 
 pub mod dse;
 pub mod gba;
-pub mod nintendo_ds;
+pub mod nds;
 
 pub use crate::synth_controller::messages::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
 
@@ -156,7 +156,7 @@ pub trait DevicePlayer: Send {
 /// GBA ROM). DSE is probed before GBA: a PMD `.nds` has no SDAT, so the SDAT scan comes up
 /// empty and the `swdl`/`smdl` scan identifies it.
 pub fn load_all(bytes: &[u8]) -> Vec<Box<dyn SoundData>> {
-    let sdats = nintendo_ds::Sdat::load_all(bytes);
+    let sdats = nds::Sdat::load_all(bytes);
     if !sdats.is_empty() {
         return sdats
             .into_iter()

@@ -1,14 +1,14 @@
 //! The [`Waveform`] type (a decoded waveform + playback metadata), the [`Sample`]/[`Frame`]
 //! signal-path aliases, and the PCM8/PCM16/IMA-ADPCM/WAV decoders.
 
-use crate::devices::nintendo_ds::tables::{ADPCM_INDEX_TABLE, ADPCM_STEP_TABLE};
+use crate::devices::nds::tables::{ADPCM_INDEX_TABLE, ADPCM_STEP_TABLE};
 use crate::util::{read_u16, read_u32, read_u8};
 
 /// A single audio sample value (amplitude) in the synthesis signal path.
 ///
 /// The mixing/resampling pipeline runs in `f64`; decoded waveform storage
 /// ([`Waveform::data`]) stays `f32`, and the final output is narrowed to `f32` at the very edge.
-pub type Sample = f64;
+pub type Sample = f32;
 
 /// A stereo pair of [`Sample`]s, ordered `(left, right)`.
 pub type Frame = (Sample, Sample);

@@ -1,7 +1,7 @@
 //! Procyon Studios **DSE** ("Digital Sound Elements") sound engine — the format used by
 //! *Pokémon Mystery Dungeon: Explorers of Sky* (and Time/Darkness).
 //!
-//! Unlike the standard NDS SDAT/SSEQ engine in [`super::nintendo_ds`], DSE music is split into
+//! Unlike the standard NDS SDAT/SSEQ engine in [`super::nds`], DSE music is split into
 //! two container types:
 //!
 //! - [`smdl::Smdl`] — a music **sequence** (`.smd`): a MIDI-like bytecode of notes, pauses, and
