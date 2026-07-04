@@ -42,17 +42,14 @@ jobs:
         run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
 
       - name: Stage legacy JS app under /legacy-js
-        # The legacy browser app is a self-contained static site that references
-        # fonts/, assets/, and demos/*.sdat relative to its own directory. Copy it
-        # plus only the shared resources it loads into dist/legacy-js so it is served
-        # at https://<user>.github.io/<repo>/legacy-js/.
+        # The legacy browser app is a self-contained static site: its fonts/ and
+        # assets/ now live inside legacy-js/, so a single copy carries them. The only
+        # shared resource still at the repo root is demos/*.sdat. Copy it so the app is
+        # served at https://<user>.github.io/<repo>/legacy-js/.
         run: |
           dest=crates/optime-app/dist/legacy-js
           mkdir -p "$dest"
           cp -r legacy-js/. "$dest/"
-          cp -r fonts "$dest/fonts"
-          mkdir -p "$dest/assets"
-          cp assets/piano_section_1.png assets/piano_section_2.png assets/piano_section_3.png "$dest/assets/"
           mkdir -p "$dest/demos"
           for demo in new-super-mario-bros super-mario-64-ds pokemon-platinum pokemon-heartgold pokemon-black-2 ace-attorney; do
             cp "demos/$demo.sdat" "$dest/demos/"

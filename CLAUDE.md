@@ -37,7 +37,7 @@ The workspace pins **nightly Rust** (`rust-toolchain.toml`): the default `simd` 
 - Web dev server: `cd crates/optime-app && trunk serve` (needs `rustup target add wasm32-unknown-unknown` and `cargo install trunk`)
 - Web release build: `cd crates/optime-app && trunk build --release`
 
-The web app deploys to GitHub Pages via `.github/workflows/deploy.yml` (Trunk release build with `--public-url "/<repo>/"` → Pages artifact). It triggers on pushes to `rust-rewrite`/`master`. The same workflow also stages the legacy browser app (see "Legacy app") into `dist/legacy-js/` so it is served alongside the Rust app at `/<repo>/legacy-js/`: it copies `legacy-js/` verbatim plus only the shared resources the legacy app loads relative to itself — `fonts/`, the three `assets/piano_section_*.png`, and the six `demos/*.sdat` its demo buttons reference (not the whole `demos/` dir, which carries large `.zip`/`.gz`/`.gbaaudio` files the legacy app can't use).
+The web app deploys to GitHub Pages via `.github/workflows/deploy.yml` (Trunk release build with `--public-url "/<repo>/"` → Pages artifact). It triggers on pushes to `rust-rewrite`/`master`. The same workflow also stages the legacy browser app (see "Legacy app") into `dist/legacy-js/` so it is served alongside the Rust app at `/<repo>/legacy-js/`: it copies `legacy-js/` verbatim (which now contains the app's own `fonts/` and `assets/`) plus only the shared resource still at the repo root — the six `demos/*.sdat` its demo buttons reference (not the whole `demos/` dir, which carries large `.zip`/`.gz`/`.gbaaudio` files the legacy app can't use).
 
 ### Local-only extras
 
@@ -117,7 +117,7 @@ The config (`PerDeviceSettings` for the current song's console, with the live pi
 
 ## Legacy app
 
-`legacy-js/` holds the original browser app verbatim: `OptimePlayer/OptimePlayer.js` (engine + parser), `OptimePlayer/dsp.js`, `index.js` (DOM glue), `index.html`, plus the ffmpeg/canvas exporters `video-exporter.js` / `playlist-exporter.js` (intentionally **not** ported — the Rust app provides in-app WAV export instead). It is kept only as a historical reference (no longer the accuracy oracle). `demos/`, `assets/`, and `fonts/` remain at the repo root and are shared.
+`legacy-js/` holds the original browser app verbatim: `OptimePlayer/OptimePlayer.js` (engine + parser), `OptimePlayer/dsp.js`, `index.js` (DOM glue), `index.html`, plus the ffmpeg/canvas exporters `video-exporter.js` / `playlist-exporter.js` (intentionally **not** ported — the Rust app provides in-app WAV export instead). It is kept only as a historical reference (no longer the accuracy oracle). Its `assets/` and `fonts/` now live inside `legacy-js/`; only `demos/` remains a shared directory at the repo root.
 
 ## Refactor / Rearchitecting
 
