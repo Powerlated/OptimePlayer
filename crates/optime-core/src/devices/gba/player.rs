@@ -29,6 +29,11 @@ const MASTER_VOLUME: u32 = 12;
 /// ±0.5, so 0.25 here lands a full-scale CGB channel at ±0.125 of a full-scale DS voice.
 const CGB_GAIN: f64 = 0.25;
 
+/// Overall gain on the GBA backend's emitted voice volumes, applied uniformly to both DirectSound
+/// and CGB so their relative balance is unchanged. The GBA mix natively lands well below the NDS
+/// backend's level; `2.0` brings GBA output up to roughly match NDS loudness.
+const GBA_OUTPUT_GAIN: f64 = 2.0;
+
 /// DirectSound channel envelope phase (the `SOUND_CHANNEL_SF_ENV` states + pseudo-echo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvPhase {
@@ -500,7 +505,7 @@ impl GbaPlayer {
             events.push(SynthEvent::VoiceVolume {
                 track: c.common.track,
                 voice: c.common.voice,
-                volume: (env_l + env_r) as f64 / 512.0,
+                volume: (env_l + env_r) as f64 / 512.0 * GBA_OUTPUT_GAIN,
             });
         }
 
@@ -523,7 +528,7 @@ impl GbaPlayer {
             events.push(SynthEvent::VoiceVolume {
                 track: c.common.track,
                 voice: c.common.voice,
-                volume: f64::from(c.env.min(15)) / 15.0 * CGB_GAIN,
+                volume: f64::from(c.env.min(15)) / 15.0 * CGB_GAIN * GBA_OUTPUT_GAIN,
             });
         }
     }
