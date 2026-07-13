@@ -12,6 +12,10 @@
 //! ```
 
 mod extract;
+/// Faithful line-for-line Rust transliteration of `pret/pokeemerald`'s `src/m4a.c` (see the module
+/// doc), for diffing the reference engine against Optime's. The live playback path remains
+/// [`player`]/[`sequencer`]; this is the recompiled control layer per the CLAUDE.md rearchitecture.
+pub mod m4a;
 mod player;
 pub mod rom;
 pub(crate) mod sequencer;
