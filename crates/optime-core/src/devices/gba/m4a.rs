@@ -26,10 +26,10 @@
 //!
 //!   The asm-engine entry points themselves (`MPlayMain`, `ply_note`, `SoundMain`, `SoundMainBTM`,
 //!   `TrackStop`, `MPlayJumpTableCopy`, `RealClearChain`) have **no C to mirror** — they are
-//!   implemented by the "no-C-home" modules [`super::sequencer`] (the per-VBlank track interpreter,
-//!   standing in for `MPlayMain`/`ply_note`/`TrackStop`) and [`super::player`] (channel allocation +
-//!   the software mixer, standing in for `SoundMain` + `CgbSound`'s register back-end). They appear
-//!   below as documented seam stubs so the call sites read exactly like `m4a.c`.
+//!   implemented by the "no-C-home" module [`super::m4a_1`], which drives this file's structs and
+//!   pure functions (`TrkVolPitSet`, `ply_memacc`, the `ply_x*` handlers, `ClearModM`, …) per VBlank
+//!   and, in place of the hardware mixer / PSG registers, emits the standardized `SynthEvent`
+//!   stream. So this file is the *live* control + math layer, not a parallel reference.
 //!
 //! Hardware registers the transliterated code genuinely reads back within a frame (the CGB sound
 //! register file, `REG_SOUNDBIAS_H`) are modeled by [`Hw`]; everything else is a commented no-op.
@@ -44,7 +44,7 @@
     clippy::manual_clamp
 )]
 
-use super::tables::{
+use super::m4a_tables::{
     CGB_FREQ_TABLE, CGB_SCALE_TABLE, FREQ_TABLE, NOISE_TABLE, SCALE_TABLE, umul3232h32,
 };
 
@@ -143,13 +143,43 @@ pub struct WaveData {
     pub freq: u32,
     pub loopStart: u32,
     pub size: u32, // number of samples
-    // `s8 data[1]` in C — the PCM lives in ROM; carried as an offset by the backend, not here.
+    // `s8 data[1]` in C — the PCM lives in ROM; carried as its byte offset by the backend, not here.
     pub data: usize,
 }
 
-#[derive(Clone, Copy, Default)]
+impl WaveData {
+    /// Reads and validates the `WaveData` header at ROM address `wav_addr` (the backend's ROM
+    /// accessor — the C just casts a `struct WaveData *`). `data` is the offset of the PCM stream.
+    pub fn read(rom: &[u8], wav_addr: u32) -> Option<WaveData> {
+        use crate::util::{read_u16, read_u32};
+        let off = super::rom::ptr_to_offset(wav_addr, rom.len())?;
+        let size = read_u32(rom, off + 12);
+        let loopStart = read_u32(rom, off + 8);
+        let data = off + 16;
+        if size as usize > rom.len().saturating_sub(data) || loopStart > size {
+            return None;
+        }
+        Some(WaveData {
+            type_: read_u16(rom, off),
+            status: read_u16(rom, off + 2),
+            freq: read_u32(rom, off + 4),
+            loopStart,
+            size,
+            data,
+        })
+    }
+
+    /// `WAVE_DATA_FLAG_LOOP` (byte 3, the high byte of `status`).
+    pub fn looping(&self) -> bool {
+        (self.status >> 8) & 0x40 != 0
+    }
+}
+
+// The C field is `type` (a Rust keyword), so it is spelled `kind` here — this also lets `ToneData`
+// be the single shared instrument record used by the data layer (`super::voice` re-exports it).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ToneData {
-    pub type_: u8,
+    pub kind: u8,
     pub key: u8,
     pub length: u8,    // sound length (compatible sound)
     pub pan_sweep: u8, // pan or sweep (compatible sound ch. 1)
@@ -158,6 +188,25 @@ pub struct ToneData {
     pub decay: u8,
     pub sustain: u8,
     pub release: u8,
+}
+
+impl ToneData {
+    /// Reads the 12-byte record at `offset` (the backend's ROM accessor — the C code just casts a
+    /// `struct ToneData *` onto the voicegroup, which has no portable equivalent).
+    pub fn read(rom: &[u8], offset: usize) -> ToneData {
+        use crate::util::{read_u8, read_u32};
+        ToneData {
+            kind: read_u8(rom, offset),
+            key: read_u8(rom, offset + 1),
+            length: read_u8(rom, offset + 2),
+            pan_sweep: read_u8(rom, offset + 3),
+            wav: read_u32(rom, offset + 4),
+            attack: read_u8(rom, offset + 8),
+            decay: read_u8(rom, offset + 9),
+            sustain: read_u8(rom, offset + 10),
+            release: read_u8(rom, offset + 11),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -241,7 +290,7 @@ pub struct SoundChannel {
 #[derive(Clone, Copy, Default)]
 pub struct ToneDataPad; // (placeholder to keep struct grouping close to the header layout)
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct SongHeader {
     pub trackCount: u8,
     pub blockCount: u8,
@@ -352,6 +401,26 @@ pub struct MusicPlayerInfo {
 // gMPlayTable / gSongTable / gPokemonCry* globals are ROM- and game-specific; in Optime the song
 // table is owned by `super::rom::GbaRom`, so they are not duplicated as globals here.
 
+/// `struct SoundInfo` (`m4a_internal.h`) — the sound driver's global state and hardware channel
+/// pool that the `m4a_1.s` engine drives. Only the fields Optime's software synth reads back are
+/// modeled; the omitted ones are DMA/FIFO/timer/intrusive-list bookkeeping for the hardware mixer
+/// that `super::m4a_1`'s `SoundMain` replaces (fenced there as a backend seam).
+#[derive(Clone, Default)]
+pub struct SoundInfo {
+    pub ident: u32,
+    /// `reverb`: the SoundMainRAM reverb pre-pass amount; Optime leaves it 0 (no HW reverb line).
+    pub reverb: u8,
+    pub maxChans: u8,
+    pub masterVolume: u8,
+    /// The `m4aSoundMode` word (reverb / maxchan / masvol / freq bits); `mode & 1` is CgbSound's
+    /// stereo flag.
+    pub mode: u32,
+    /// `c15`: CgbSound steps the CGB envelope twice every 15th frame to track the 1/64 s HW rate.
+    pub c15: u8,
+    pub cgbChans: [CgbChannel; 4],
+    pub chans: [SoundChannel; MAX_DIRECTSOUND_CHANNELS],
+}
+
 // ===========================================================================================
 // Modeled hardware — the CGB sound register file + SOUNDBIAS, so the transliterated `CgbSound`
 // reads back exactly what it wrote within a frame. All other MMIO (DMA/FIFO/timers/SOUNDCNT) is a
@@ -448,7 +517,7 @@ pub fn MPlayFadeOut(mplayInfo: &mut MusicPlayerInfo, speed: u16) {
 // ┌─ SYNTH BACKEND SEAM ─ m4aSongNumStart / m4aSongNumStop / MPlayStart ─┐
 //   In `m4a.c` these index the ROM globals `gSongTable` / `gMPlayTable` and call `MPlayStart`,
 //   which in turn calls the asm `TrackStop`. Optime resolves songs through `super::rom::GbaRom`
-//   and drives playback through `super::player::GbaPlayer` (the "no-C-home" engine), so the song-
+//   and drives playback through `super::m4a_1::M4aPlayer` (the "no-C-home" engine), so the song-
 //   selection wrappers are provided by that layer rather than duplicated here.
 // └──────────────────────────────────────────────────────────────────────┘
 
@@ -496,7 +565,7 @@ pub fn m4aMPlayImmInit(mplayInfo: &mut MusicPlayerInfo) {
             track.bendRange = 2;
             track.volX = 64;
             track.lfoSpeed = 22;
-            track.tone.type_ = 1;
+            track.tone.kind = 1;
         }
     }
 }
@@ -506,7 +575,7 @@ pub fn m4aMPlayImmInit(mplayInfo: &mut MusicPlayerInfo) {
 // ┌─ SYNTH BACKEND SEAM ─ SoundInit hardware bring-up ─┐
 //   `m4a.c` programs DMA1/DMA2 for the two DirectSound FIFOs, resets SOUNDCNT_X/H, points the
 //   sound DMAs at `pcmBuffer`, and installs the asm `ply_note` / jump-table. Optime has no FIFO
-//   DMA — the mixer in `super::player` synthesizes PCM directly — so all register/DMA writes are
+//   DMA — the mixer in `super::m4a_1` synthesizes PCM directly — so all register/DMA writes are
 //   documented no-ops. The one line with a portable equivalent is `SampleFreqSet`.
 // └────────────────────────────────────────────────────┘
 pub fn SoundInit(hw: &mut Hw) {
@@ -746,7 +815,7 @@ pub fn MidiKeyToCgbFreq(chanNum: u8, mut key: u8, mut fineAdjust: u8) -> u32 {
 }
 
 // [m4a.c:857] CgbOscOff — transliterated. The register writes are the seam (no audible effect in
-// Optime, whose CGB voices are silenced by `super::player`); kept for structural fidelity.
+// Optime, whose CGB voices are silenced by `super::m4a_1`); kept for structural fidelity.
 pub fn CgbOscOff(hw: &mut Hw, chanNum: u8) {
     match chanNum {
         1 => {
@@ -803,15 +872,177 @@ pub fn CgbModVol(chan: &mut CgbChannel, mode: u8) {
     chan.pan &= chan.panMask;
 }
 
+// [m4a.c:925] CgbSound — transliterated (envelope state machine).
+//
 // ┌─ SYNTH BACKEND SEAM ─ CgbSound register back-end ─┐
-//   `CgbSound` is the CGB (PSG) per-frame envelope+pitch engine. Its *computation* — attack/decay/
-//   sustain/release stepping, pseudo-echo, `CgbModVol` — is real behavior and is transliterated
-//   faithfully in `super::player`'s CGB path (which owns the per-channel state and drives the
-//   `SynthEvent` stream). The heavy per-register NRx0..NRx4 / WAVE_RAM / NR51 back-half of the C
-//   function only pokes MMIO that Optime's software PSG does not read, so it is not reproduced
-//   here. `CgbModVol` / `CgbPan` / `CgbOscOff` above are provided because they are pure state math
-//   the backend reuses.
+//   The per-frame attack/decay/sustain/release stepping, pseudo-echo, and every-15th-frame double
+//   step below are real behavior and are reproduced faithfully. The heavy per-register
+//   NRx0..NRx4 / WAVE_RAM writes (`nrx*ptr`, `envelopeStepTimeAndDir`) and the §3 pitch-register
+//   half only poke MMIO Optime's software PSG never reads, so they are documented no-ops. The
+//   channel's resolved `frequency` (set by `ply_note`/`MPlayMain`) and `envelopeVolume` are what
+//   the backend reads.
 // └────────────────────────────────────────────────────┘
+pub fn CgbSound(soundInfo: &mut SoundInfo) {
+    // every 15 frames the envelope steps twice, to keep up with the 1/64 s hardware rate.
+    if soundInfo.c15 != 0 {
+        soundInfo.c15 -= 1;
+    } else {
+        soundInfo.c15 = 14;
+    }
+    let double_step = soundInfo.c15 == 0;
+    let mode = (soundInfo.mode & 1) as u8;
+
+    for ch in 1..=4u8 {
+        let channels = &mut soundInfo.cgbChans[(ch - 1) as usize];
+        if channels.statusFlags & SOUND_CHANNEL_SF_ON == 0 {
+            continue;
+        }
+        // SYNTH BACKEND SEAM: nrx0..nrx4 / WAVE_RAM register selection + writes omitted.
+        let mut off = CgbSound_Channel(channels, ch, mode);
+        // `envelope_step_complete` re-enters `envelope_step_repeat` once more on the c15==0 frame;
+        // the SF_START/SF_IEC/pseudo-echo first-frame paths `goto envelope_complete` and don't.
+        if !off && double_step && channels.statusFlags & SOUND_CHANNEL_SF_IEC == 0 {
+            off = CgbSound_Channel(channels, ch, mode);
+        }
+        if off {
+            // oscillator_off: CgbOscOff(ch) register writes are a seam; the channel is silenced by
+            // clearing statusFlags, which the backend observes.
+            channels.statusFlags = 0;
+        }
+    }
+}
+
+/// One `CgbSound` envelope frame for a single already-`SF_ON` CGB channel. Returns `true` if the
+/// channel reached `oscillator_off` (the caller clears `statusFlags`). `ch` (1..=4) only affects
+/// the omitted register back-end, so it is unused here beyond documenting the correspondence.
+fn CgbSound_Channel(c: &mut CgbChannel, _ch: u8, mode: u8) -> bool {
+    // Entry dispatch (C `if` ladder). `Flow` names the C's gotos; `None` returns immediately.
+    enum Flow {
+        StepRepeat,
+        StepComplete,
+        DecayStart,
+        SustainStart,
+        PseudoEchoStart,
+    }
+    let mut flow = if c.statusFlags & SOUND_CHANNEL_SF_START != 0 {
+        if c.statusFlags & SOUND_CHANNEL_SF_STOP == 0 {
+            c.statusFlags = SOUND_CHANNEL_SF_ENV_ATTACK;
+            c.modify = CGB_CHANNEL_MO_PIT | CGB_CHANNEL_MO_VOL;
+            CgbModVol(c, mode);
+            c.envelopeCounter = c.attack;
+            if c.attack as i8 != 0 {
+                c.envelopeVolume = 0;
+                Flow::StepComplete
+            } else {
+                // attack is instantaneous
+                Flow::DecayStart
+            }
+        } else {
+            return true; // oscillator_off
+        }
+    } else if c.statusFlags & SOUND_CHANNEL_SF_IEC != 0 {
+        c.pseudoEchoLength = c.pseudoEchoLength.wrapping_sub(1);
+        if (c.pseudoEchoLength as i8) <= 0 {
+            return true; // oscillator_off
+        }
+        return false; // envelope_complete
+    } else if c.statusFlags & SOUND_CHANNEL_SF_STOP != 0
+        && c.statusFlags & SOUND_CHANNEL_SF_ENV != 0
+    {
+        c.statusFlags &= !SOUND_CHANNEL_SF_ENV;
+        c.envelopeCounter = c.release;
+        if c.release as i8 != 0 {
+            c.modify |= CGB_CHANNEL_MO_VOL;
+            Flow::StepComplete
+        } else {
+            Flow::PseudoEchoStart
+        }
+    } else {
+        Flow::StepRepeat
+    };
+
+    // `prevC15` inside CgbSound is the driver-loop double step; here CgbSound handles it, so the
+    // internal `envelope_step_complete` never re-loops (it always completes) — a single frame.
+    loop {
+        match flow {
+            Flow::StepRepeat => {
+                if c.envelopeCounter == 0 {
+                    CgbModVol(c, mode);
+                    match c.statusFlags & SOUND_CHANNEL_SF_ENV {
+                        SOUND_CHANNEL_SF_ENV_RELEASE => {
+                            c.envelopeVolume = c.envelopeVolume.wrapping_sub(1);
+                            if c.envelopeVolume as i8 <= 0 {
+                                flow = Flow::PseudoEchoStart;
+                                continue;
+                            }
+                            c.envelopeCounter = c.release;
+                        }
+                        SOUND_CHANNEL_SF_ENV_SUSTAIN => {
+                            c.envelopeVolume = c.sustainGoal;
+                            c.envelopeCounter = 7;
+                        }
+                        SOUND_CHANNEL_SF_ENV_DECAY => {
+                            c.envelopeVolume = c.envelopeVolume.wrapping_sub(1);
+                            if (c.envelopeVolume as i8) <= c.sustainGoal as i8 {
+                                flow = Flow::SustainStart;
+                                continue;
+                            }
+                            c.envelopeCounter = c.decay;
+                        }
+                        _ => {
+                            // SF_ENV_ATTACK
+                            c.envelopeVolume = c.envelopeVolume.wrapping_add(1);
+                            if c.envelopeVolume >= c.envelopeGoal {
+                                flow = Flow::DecayStart;
+                                continue;
+                            }
+                            c.envelopeCounter = c.attack;
+                        }
+                    }
+                }
+                flow = Flow::StepComplete;
+            }
+            Flow::DecayStart => {
+                c.statusFlags = c.statusFlags.wrapping_sub(1);
+                c.envelopeCounter = c.decay;
+                if c.envelopeCounter != 0 {
+                    c.modify |= CGB_CHANNEL_MO_VOL;
+                    c.envelopeVolume = c.envelopeGoal;
+                    flow = Flow::StepComplete;
+                } else {
+                    flow = Flow::SustainStart;
+                }
+            }
+            Flow::SustainStart => {
+                if c.sustain == 0 {
+                    c.statusFlags &= !SOUND_CHANNEL_SF_ENV;
+                    flow = Flow::PseudoEchoStart;
+                } else {
+                    c.statusFlags = c.statusFlags.wrapping_sub(1);
+                    c.modify |= CGB_CHANNEL_MO_VOL;
+                    // envelope_sustain
+                    c.envelopeVolume = c.sustainGoal;
+                    c.envelopeCounter = 7;
+                    flow = Flow::StepComplete;
+                }
+            }
+            Flow::PseudoEchoStart => {
+                c.envelopeVolume =
+                    (((c.envelopeGoal as u32 * c.pseudoEchoVolume as u32) + 0xFF) >> 8) as u8;
+                if c.envelopeVolume != 0 {
+                    c.statusFlags |= SOUND_CHANNEL_SF_IEC;
+                    c.modify |= CGB_CHANNEL_MO_VOL;
+                    return false; // envelope_complete
+                }
+                return true; // oscillator_off
+            }
+            Flow::StepComplete => {
+                c.envelopeCounter = c.envelopeCounter.wrapping_sub(1);
+                return false; // envelope_complete (double step handled by the CgbSound driver loop)
+            }
+        }
+    }
+}
 
 // [m4a.c:1234] m4aMPlayTempoControl — transliterated.
 pub fn m4aMPlayTempoControl(mplayInfo: &mut MusicPlayerInfo, tempo: u16) {
@@ -947,7 +1178,7 @@ pub fn m4aMPlayLFOSpeedSet(mplayInfo: &mut MusicPlayerInfo, trackBits: u16, lfoS
 
 // [m4a.c:1437] ply_memacc — transliterated. The `MEMACC_COND_JUMP` macro expands to a returned
 // verdict: `true` means "take the conditional jump" (the C tail-calls the asm `ply_goto` via the
-// jump table); `false` means skip the 4-byte jump target. The caller (`super::sequencer`) performs
+// jump table); `false` means skip the 4-byte jump target. The caller (`super::m4a_1`) performs
 // the actual jump, since the goto handler is asm — that dispatch is the seam.
 pub enum MemAccResult {
     /// Fall through; `cmdPtr` advanced past the jump operand (`track->cmdPtr += 4`).
@@ -965,11 +1196,17 @@ pub fn ply_memacc(
     let op = cmd[track.cmdPtr] as u32;
     track.cmdPtr += 1;
 
-    let addr = cmd[track.cmdPtr] as usize; // index into memAccArea (was `memAccArea + *cmdPtr`)
+    // `& 0xF`: the C indexes a 16-byte `memAccArea` by a raw byte (values > 15 are UB); we mask so
+    // the port stays in-bounds. `data` keeps its full value as a literal, but is masked where it
+    // is itself used as an index (ops 3–5, 12–17), exactly matching the C's `memAccArea[data]`.
+    let addr = (cmd[track.cmdPtr] as usize) & 0xF;
     track.cmdPtr += 1;
 
     let data = cmd[track.cmdPtr];
     track.cmdPtr += 1;
+
+    let lhs = memAccArea[addr];
+    let rhs = memAccArea[(data as usize) & 0xF];
 
     macro_rules! MEMACC_COND_JUMP {
         ($cond:expr) => {
@@ -984,23 +1221,23 @@ pub fn ply_memacc(
 
     match op {
         0 => memAccArea[addr] = data,
-        1 => memAccArea[addr] = memAccArea[addr].wrapping_add(data),
-        2 => memAccArea[addr] = memAccArea[addr].wrapping_sub(data),
-        3 => memAccArea[addr] = memAccArea[data as usize],
-        4 => memAccArea[addr] = memAccArea[addr].wrapping_add(memAccArea[data as usize]),
-        5 => memAccArea[addr] = memAccArea[addr].wrapping_sub(memAccArea[data as usize]),
-        6 => MEMACC_COND_JUMP!(memAccArea[addr] == data),
-        7 => MEMACC_COND_JUMP!(memAccArea[addr] != data),
-        8 => MEMACC_COND_JUMP!(memAccArea[addr] > data),
-        9 => MEMACC_COND_JUMP!(memAccArea[addr] >= data),
-        10 => MEMACC_COND_JUMP!(memAccArea[addr] <= data),
-        11 => MEMACC_COND_JUMP!(memAccArea[addr] < data),
-        12 => MEMACC_COND_JUMP!(memAccArea[addr] == memAccArea[data as usize]),
-        13 => MEMACC_COND_JUMP!(memAccArea[addr] != memAccArea[data as usize]),
-        14 => MEMACC_COND_JUMP!(memAccArea[addr] > memAccArea[data as usize]),
-        15 => MEMACC_COND_JUMP!(memAccArea[addr] >= memAccArea[data as usize]),
-        16 => MEMACC_COND_JUMP!(memAccArea[addr] <= memAccArea[data as usize]),
-        17 => MEMACC_COND_JUMP!(memAccArea[addr] < memAccArea[data as usize]),
+        1 => memAccArea[addr] = lhs.wrapping_add(data),
+        2 => memAccArea[addr] = lhs.wrapping_sub(data),
+        3 => memAccArea[addr] = rhs,
+        4 => memAccArea[addr] = lhs.wrapping_add(rhs),
+        5 => memAccArea[addr] = lhs.wrapping_sub(rhs),
+        6 => MEMACC_COND_JUMP!(lhs == data),
+        7 => MEMACC_COND_JUMP!(lhs != data),
+        8 => MEMACC_COND_JUMP!(lhs > data),
+        9 => MEMACC_COND_JUMP!(lhs >= data),
+        10 => MEMACC_COND_JUMP!(lhs <= data),
+        11 => MEMACC_COND_JUMP!(lhs < data),
+        12 => MEMACC_COND_JUMP!(lhs == rhs),
+        13 => MEMACC_COND_JUMP!(lhs != rhs),
+        14 => MEMACC_COND_JUMP!(lhs > rhs),
+        15 => MEMACC_COND_JUMP!(lhs >= rhs),
+        16 => MEMACC_COND_JUMP!(lhs <= rhs),
+        17 => MEMACC_COND_JUMP!(lhs < rhs),
         _ => {}
     }
     MemAccResult::Continue
@@ -1020,7 +1257,7 @@ pub fn ply_xwave(track: &mut MusicPlayerTrack, cmd: &[u8]) {
 
 // [m4a.c:1561] ply_xtype — transliterated.
 pub fn ply_xtype(track: &mut MusicPlayerTrack, cmd: &[u8]) {
-    track.tone.type_ = cmd[track.cmdPtr];
+    track.tone.kind = cmd[track.cmdPtr];
     track.cmdPtr += 1;
 }
 
@@ -1072,13 +1309,15 @@ pub fn ply_xswee(track: &mut MusicPlayerTrack, cmd: &[u8]) {
     track.cmdPtr += 1;
 }
 
-// [m4a.c:1615] ply_xwait — transliterated (READ_XCMD_BYTE assembles a 16-bit timer).
+// [m4a.c:1615] ply_xwait — transliterated. `READ_XCMD_BYTE` reads the two length bytes at `cmdPtr`
+// *without* advancing it, so the still-waiting branch rewinds by 2 to re-execute the `XCMD 0x0C`
+// next frame, while the finished branch steps over the two length bytes.
 pub fn ply_xwait(track: &mut MusicPlayerTrack, cmd: &[u8]) {
     let len = u16::from_le_bytes([cmd[track.cmdPtr], cmd[track.cmdPtr + 1]]);
 
     if track.timer < len {
         track.timer += 1;
-        // track->cmdPtr -= 2 was preceded by the +2 the READ macro implies; net: re-read next frame
+        track.cmdPtr -= 2; // C: `track->cmdPtr -= 2`
         track.wait = 1;
     } else {
         track.timer = 0;
@@ -1155,18 +1394,18 @@ pub fn SetPokemonCryPriority(song: &mut PokemonCrySong, val: u8) {
 //   The reference sound engine implements these in assembly; there is no `m4a.c` counterpart to
 //   diff against. Optime provides the equivalent behavior in the "no-C-home" modules:
 //
-//     MPlayMain / ply_note / TrackStop / ply_* note commands  →  super::sequencer::Mp2kSequencer
-//     SoundMain / CgbSound register back-end / the mixer      →  super::player::GbaPlayer
+//     MPlayMain / ply_note / TrackStop / ply_* note commands  →  super::m4a_1 (M4aPlayer interp)
+//     SoundMain / CgbSound register back-end / the mixer      →  super::m4a_1 (envelope + mixer)
 //
 //   They appear here as documented no-ops so the transliterated call sites above (`MPlayStart`,
 //   `m4aMPlayStop`, `FadeOutBody`) read exactly like `m4a.c`.
 // └────────────────────────────────────────────────────────────────────┘
 
 /// `TrackStop` (asm `m4a_1.s`): stops a track's channel and clears its per-note state. Real
-/// behavior lives in `super::player`/`super::sequencer`; here it only zeroes the track-local note
+/// behavior lives in `super::m4a_1`; here it only zeroes the track-local note
 /// bookkeeping the transliterated callers rely on.
 pub fn TrackStop(_track: &mut MusicPlayerTrack) {
-    // SYNTH BACKEND SEAM: channel teardown handled by super::player; nothing to do on this model.
+    // SYNTH BACKEND SEAM: channel teardown handled by super::m4a_1; nothing to do on this model.
 }
 
 #[cfg(test)]
@@ -1203,7 +1442,7 @@ mod tests {
                 let freq = 13379u32 << 10;
                 assert_eq!(
                     MidiKeyToFreq(freq, key, fine),
-                    super::super::tables::midi_key_to_freq(freq, key, fine),
+                    super::super::m4a_tables::midi_key_to_freq(freq, key, fine),
                 );
             }
         }
@@ -1217,7 +1456,7 @@ mod tests {
                 for fine in [0u8, 128, 255] {
                     assert_eq!(
                         MidiKeyToCgbFreq(chan, key, fine),
-                        super::super::tables::midi_key_to_cgb_freq(chan, key, fine),
+                        super::super::m4a_tables::midi_key_to_cgb_freq(chan, key, fine),
                     );
                 }
             }
@@ -1237,6 +1476,51 @@ mod tests {
         CgbModVol(&mut c, 1); // mono
         assert_eq!(c.pan & !0x11, 0); // masked to panMask
         assert_eq!(c.envelopeGoal, (100u8.wrapping_add(60)) / 16);
+    }
+
+    /// `CgbSound`: a full-volume CGB note attacks up, decays to its sustain floor and holds there,
+    /// then — once released with no pseudo-echo — ramps down and shuts the channel off.
+    #[test]
+    fn cgb_envelope_attacks_sustains_and_releases() {
+        let mut si = SoundInfo {
+            cgbChans: [CgbChannel::default(); 4],
+            ..SoundInfo::default()
+        };
+        si.cgbChans[1] = CgbChannel {
+            statusFlags: SOUND_CHANNEL_SF_START,
+            type_: 2, // square 2
+            leftVolume: 127,
+            rightVolume: 127,
+            attack: 2,
+            decay: 4,
+            sustain: 8,
+            release: 2,
+            ..CgbChannel::default()
+        };
+        // envelopeGoal = (127+127)/16 clamped = 15; sustainGoal = (15*8+15)>>4 = 8.
+        let mut peak = 0u8;
+        for _ in 0..80 {
+            CgbSound(&mut si);
+            peak = peak.max(si.cgbChans[1].envelopeVolume);
+        }
+        assert_eq!(peak, 15, "attack reaches the full envelope goal");
+        assert_eq!(
+            si.cgbChans[1].envelopeVolume, 8,
+            "held note settles at the sustain floor"
+        );
+        assert_ne!(si.cgbChans[1].statusFlags, 0, "still sounding while held");
+
+        // Release: no pseudo-echo (pseudoEchoVolume 0) → decays to silence and turns off.
+        si.cgbChans[1].statusFlags |= SOUND_CHANNEL_SF_STOP;
+        let mut turned_off = false;
+        for _ in 0..200 {
+            CgbSound(&mut si);
+            if si.cgbChans[1].statusFlags == 0 {
+                turned_off = true;
+                break;
+            }
+        }
+        assert!(turned_off, "a released, echo-less CGB channel shuts off");
     }
 
     /// `ply_memacc` op 0 stores; op 6 (== compare) reports Goto on equality, else Continue+skip.

@@ -15,8 +15,8 @@
 
 use std::collections::HashSet;
 
+use super::m4a::{ToneData, WaveData};
 use super::rom::{GbaRom, ptr_to_offset};
-use super::voice::{ToneData, WaveData};
 use crate::devices::WaveformDcStat;
 use crate::util::{read_u8, read_u32};
 
@@ -100,8 +100,8 @@ impl Marks {
     /// programmable wave would occupy — `xWAVE` overrides don't say which kind follows.
     fn mark_wave(&mut self, rom: &[u8], wav_ptr: u32) {
         if let Some(wave) = WaveData::read(rom, wav_ptr) {
-            let start = wave.data_offset - 16;
-            self.mark(start, wave.data_offset + wave.size as usize);
+            let start = wave.data - 16;
+            self.mark(start, wave.data + wave.size as usize);
         } else if let Some(off) = ptr_to_offset(wav_ptr, rom.len()) {
             self.mark(off, off + 16);
         }
@@ -163,8 +163,7 @@ impl GroupWalker {
                     // DirectSound PCM (uncompressed only — same constraint as playback).
                     0 if tone.kind & TYPE_CMP_REV == 0 => {
                         if let Some(wave) = WaveData::read(rom, tone.wav) {
-                            marks
-                                .mark(wave.data_offset - 16, wave.data_offset + wave.size as usize);
+                            marks.mark(wave.data - 16, wave.data + wave.size as usize);
                         }
                     }
                     // CGB programmable wave: 32 packed 4-bit samples.
@@ -181,7 +180,7 @@ impl GroupWalker {
 }
 
 /// Statically walks one track's bytecode from `start`, marking every byte the interpreter can
-/// fetch. Argument lengths mirror `Mp2kSequencer::execute_command` exactly, including running
+/// fetch. Argument lengths mirror `super::m4a_1`'s command interpreter exactly, including running
 /// status; jump targets are walked as further branches.
 fn walk_track(rom: &[u8], marks: &mut Marks, start: usize) {
     // Branches are (offset, running_status) pairs; the status decides how a data byte
@@ -316,7 +315,7 @@ fn follow_target(rom: &[u8], marks: &mut Marks, work: &mut Vec<(usize, u8)>, sta
 
 /// DC-offset stats for every DirectSound sample reachable from song `song_id`'s voicegroup,
 /// deduped by wave address and sorted by DC shift (most shifted first). Mirrors playback: each
-/// sample is decoded the same way [`super::player`] does, and the DC shift recorded is exactly
+/// sample is decoded the same way [`super::m4a_1`] does, and the DC shift recorded is exactly
 /// what the player subtracts.
 pub fn waveform_dc_stats(rom: &GbaRom, song_id: u32) -> Vec<WaveformDcStat> {
     let data: &[u8] = &rom.data;
@@ -336,7 +335,7 @@ pub fn waveform_dc_stats(rom: &GbaRom, song_id: u32) -> Vec<WaveformDcStat> {
         let Some(wav) = WaveData::read(data, wav_addr) else {
             continue;
         };
-        let raw = &data[wav.data_offset..wav.data_offset + wav.size as usize];
+        let raw = &data[wav.data..wav.data + wav.size as usize];
         let pcm = crate::waveform::decode_pcm8(raw);
         if pcm.is_empty() {
             continue;
