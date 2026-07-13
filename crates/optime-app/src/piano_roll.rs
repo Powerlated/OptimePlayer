@@ -17,8 +17,8 @@ use egui::{Color32, ColorImage, Pos2, Rect, Sense, Stroke};
 
 use optime_core::{FsVisController, SongOverview};
 
-use crate::visualizer::VisSnapshot;
 use crate::TRACK_COUNT;
+use crate::visualizer::VisSnapshot;
 
 /// Lowest/highest MIDI notes shown (A0..=C8, the 88-key piano range).
 const MIDI_LO: u8 = 21;

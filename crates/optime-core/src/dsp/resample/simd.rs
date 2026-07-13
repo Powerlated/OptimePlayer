@@ -8,31 +8,37 @@
 //! scalar build by float rounding — the DC normalization in
 //! [`resample_sinc`](super::resample_sinc) stays exact because `out` and `wsum` accumulate with
 //! identical operations.
+//!
+//! The entire gather — phasors, kernel weights, and sample accumulation — runs in `f32`; no value
+//! is ever widened to `f64`. The rotating recurrence's rounding stays negligible because the
+//! Blackman window drives the weight to zero at the ≤ `2P` window edges, long before the phase can
+//! drift meaningfully over a single gather.
 
-use core::f64::consts::PI;
+use core::f32::consts::PI;
 use std::simd::prelude::*;
 
 use super::kernels::kernel_weight;
 
 const LANES: usize = 4;
-type Fv = Simd<f64, LANES>;
+/// Gather lane vector (`f32`: phasors, weights, and sample accumulation alike).
+type Fv = Simd<f32, LANES>;
 
 /// A vector of sin/cos pairs advanced by a fixed per-chunk angle step via complex rotation.
 struct Phasor {
     sin: Fv,
     cos: Fv,
-    step_sin: f64,
-    step_cos: f64,
+    step_sin: f32,
+    step_cos: f32,
 }
 
 impl Phasor {
     /// Lanes at angles `rate · (d0 − i)` for `i = 0..LANES`, stepping by `−rate·LANES`/chunk.
-    fn new(rate: f64, d0: f64) -> Self {
+    fn new(rate: f32, d0: f32) -> Self {
         let (mut sin, mut cos) = ([0.0; LANES], [0.0; LANES]);
         for i in 0..LANES {
-            (sin[i], cos[i]) = f64::sin_cos(rate * (d0 - i as f64));
+            (sin[i], cos[i]) = f32::sin_cos(rate * (d0 - i as f32));
         }
-        let (step_sin, step_cos) = f64::sin_cos(rate * LANES as f64);
+        let (step_sin, step_cos) = f32::sin_cos(rate * LANES as f32);
         Self {
             sin: Fv::from_array(sin),
             cos: Fv::from_array(cos),
@@ -54,7 +60,7 @@ impl Phasor {
 /// Vectorized impulse gather: `w(d) = sinc(2fc·d) · blackman(|d|/P)` evaluated analytically.
 /// `sinc` is even and `blackman` is even in `d`, so no run splitting or `abs` ordering is
 /// needed — one support mask per chunk. Returns `(Σ src·w, Σ w)`.
-pub(crate) fn gather_impulse(src: &[f32], d0: f64, fc: f64, p: f64) -> (f64, f64) {
+pub(crate) fn gather_impulse(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32, f32) {
     // Angle rates per source sample: πτ = a·d for the sinc, and the blackman harmonics.
     let a = PI * 2.0 * fc;
     let b = PI / p;
@@ -67,16 +73,16 @@ pub(crate) fn gather_impulse(src: &[f32], d0: f64, fc: f64, p: f64) -> (f64, f64
     for chunk in src.chunks_exact(LANES) {
         // sinc(2fc·d) = sin(a·d)/(a·d), with the removable singularity at d = 0.
         let arg = d * Fv::splat(a);
-        let near_zero = arg.abs().simd_lt(Fv::splat(1e-12));
+        let near_zero = arg.abs().simd_lt(Fv::splat(1e-7));
         let sinc = near_zero.select(Fv::splat(1.0), ph_sinc.sin / arg);
         // blackman(|d|/P), 0 outside the ±P support.
         let win = Fv::splat(0.42) + Fv::splat(0.5) * ph_win1.cos + Fv::splat(0.08) * ph_win2.cos;
         let inside = d.abs().simd_lt(Fv::splat(p));
         let w = inside.select(sinc * win, Fv::splat(0.0));
 
-        out += Simd::<f32, LANES>::from_slice(chunk).cast::<f64>() * w;
+        out += Fv::from_slice(chunk) * w;
         wsum += w;
-        d -= Fv::splat(LANES as f64);
+        d -= Fv::splat(LANES as f32);
         ph_sinc.rotate();
         ph_win1.rotate();
         ph_win2.rotate();
@@ -85,9 +91,9 @@ pub(crate) fn gather_impulse(src: &[f32], d0: f64, fc: f64, p: f64) -> (f64, f64
 
     let done = src.len() - src.chunks_exact(LANES).remainder().len();
     for (j, &s) in src.iter().enumerate().skip(done) {
-        let d = d0 - j as f64;
+        let d = d0 - j as f32;
         let w = kernel_weight(d, fc, p);
-        out += f64::from(s) * w;
+        out += s * w;
         wsum += w;
     }
     (out, wsum)

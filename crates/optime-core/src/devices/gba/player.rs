@@ -5,14 +5,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::ENGINE_RATE;
 use super::rom::GbaRom;
 use super::sequencer::{Mp2kOp, Mp2kSequencer, NoteOn};
 use super::tables::{midi_key_to_cgb_freq, midi_key_to_freq};
 use super::voice::{CgbKind, ToneKind, WaveData};
-use super::ENGINE_RATE;
+use crate::PerDeviceSettings;
 use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
 use crate::waveform::Waveform;
-use crate::PerDeviceSettings;
 
 /// `MAX_DIRECTSOUND_CHANNELS` — we run the full hardware-struct count rather than the
 /// game-configured `maxChans` (usually 5), so dense songs don't drop notes.

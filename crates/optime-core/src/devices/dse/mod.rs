@@ -31,13 +31,13 @@ pub mod swdl;
 pub mod volume;
 
 pub use envelope::{EnvelopeParams, SoundEnvelope};
-pub use events::{control_info, decode_track, DseEvent, PAUSE_TICKS};
+pub use events::{DseEvent, PAUSE_TICKS, control_info, decode_track};
 pub use lfo::{Lfo, LfoConfig, LfoDest};
 pub use pitch::note_key_to_hz;
-pub use player::{DsePlayer, DSE_CYCLES_PER_TICK};
+pub use player::{DSE_CYCLES_PER_TICK, DsePlayer};
 pub use sequencer::{DseSequencer, SeqOp};
 pub use smdl::{Smdl, Track};
-pub use swdl::{Program, SampleFormat, WaveformInfo, Split, Swdl};
+pub use swdl::{Program, SampleFormat, Split, Swdl, WaveformInfo};
 
 use std::sync::Arc;
 

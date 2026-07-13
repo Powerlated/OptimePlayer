@@ -34,7 +34,7 @@ pub use web::MediaControls;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use std::sync::mpsc::{channel, Receiver};
+    use std::sync::mpsc::{Receiver, channel};
 
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use souvlaki::{
@@ -134,8 +134,8 @@ mod web {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
     use web_sys::{MediaMetadata, MediaSession, MediaSessionAction, MediaSessionPlaybackState};
 
     use super::MediaAction;

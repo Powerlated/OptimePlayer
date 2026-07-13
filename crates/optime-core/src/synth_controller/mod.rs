@@ -24,15 +24,15 @@ mod config;
 pub mod messages;
 mod vis;
 
-pub use config::{DelaySmoothing, HighShelf, PopSmoothing, DEFAULT_POP_SLEW_SECONDS};
+pub use config::{DEFAULT_POP_SLEW_SECONDS, DelaySmoothing, HighShelf, PopSmoothing};
 pub use vis::{FsVisController, SongOverview, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::resample::StreamResampler;
-use crate::waveform::{Frame, InstrumentResampleMode, Sample};
 use crate::synth::MAX_BLOCK;
-use crate::{PerDeviceSettings, WaveformSynthesizer, TRACK_COUNT};
+use crate::waveform::{Frame, InstrumentResampleMode, Sample};
+use crate::{PerDeviceSettings, TRACK_COUNT, WaveformSynthesizer};
 
 /// PSG crunch-compensation low-pass — a cascade of identical RBJ low-pass biquad sections fit
 /// (MATLAB, `scripts/fit_compensation.m`, fed by `examples/mixer_resample_response.rs`) to the
@@ -122,7 +122,7 @@ fn cut_finished(
             };
             let instr = synth.instr(slot);
             let ran_out =
-                !instr.waveform.looping && instr.sample_t > instr.waveform.data.len() as f64;
+                !instr.waveform.looping && instr.sample_t > instr.waveform.data.len() as f32;
             if ran_out || !instr.playing {
                 synth.cut_instrument(slot);
                 slot_owner[t][slot] = None;
@@ -173,8 +173,12 @@ impl Bank {
             self.rate = mixer_rate;
             self.rate
         });
-        self.resampler
-            .set(self.rate, out_rate, config.mixer_resample_mode());
+        // The mixer/output rates are frequencies (kept `f64` here); the resampler works in `f32`.
+        self.resampler.set(
+            self.rate as f32,
+            out_rate as f32,
+            config.mixer_resample_mode(),
+        );
         rate_change
     }
 
@@ -633,7 +637,7 @@ impl SynthController {
         let (val_l, val_r) = self.master_filter(val_l, val_r, config);
         // The end-of-song fade is applied here, once per output sample, so it lives in one place.
         let g = self.transition.advance(&mut self.messages);
-        (val_l as f32 * g, val_r as f32 * g)
+        (val_l * g, val_r * g)
     }
 
     /// Fills `out` with interleaved stereo (L, R, L, R, …) samples.
@@ -686,8 +690,8 @@ impl SynthController {
                 let (l, r) = self.master_filter(l, r, config);
                 // Per-sample fade gain (see `next_sample`), keeping the block path bit-identical.
                 let g = self.transition.advance(&mut self.messages);
-                frame_out[0] = l as f32 * g;
-                frame_out[1] = r as f32 * g;
+                frame_out[0] = l * g;
+                frame_out[1] = r * g;
             }
             frame += n;
         }
@@ -726,8 +730,8 @@ impl SynthController {
             // Advance the output (PSG) set too so one-shot endings / voice-steal feedback stay
             // consistent with a normal render; its audio is discarded.
             let _ = render_set(&mut self.synths, &config.track_enables, config);
-            out[2 * frame] = l as f32;
-            out[2 * frame + 1] = r as f32;
+            out[2 * frame] = l;
+            out[2 * frame + 1] = r;
         }
     }
 
@@ -792,7 +796,9 @@ impl SynthController {
                 // everything in direct mode play on the output set.
                 let mixer = config.use_mixer && !waveform.is_psg_square;
                 let (synths, slot_owner) = self.set_mut(mixer);
-                let slot = synths[track].play(waveform, pitch, volume, config);
+                // Device volumes arrive in `f64` (dB-domain/square-law envelope math); narrow to the
+                // sample width here, at the device→synth boundary.
+                let slot = synths[track].play(waveform, pitch, volume as Sample, config);
                 if let Some(old) = slot_owner[track][slot].replace(SlotOwner { voice, key }) {
                     // Round-robin steal: the previous occupant is gone; tell the device.
                     self.notes_on[track][old.key as usize] = 0;
@@ -806,7 +812,7 @@ impl SynthController {
                 volume,
             } => {
                 if let Some((mixer, slot)) = self.locate(track, voice) {
-                    self.set_mut(mixer).0[track].instr_mut(slot).volume = volume;
+                    self.set_mut(mixer).0[track].instr_mut(slot).volume = volume as Sample;
                 }
             }
             SynthEvent::VoicePitch {

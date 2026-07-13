@@ -6,8 +6,8 @@
 use std::path::PathBuf;
 
 use optime_core::{
-    load_all, InstrumentResampleChoice, InstrumentResampleSettings, MixerResampleSettings,
-    PerDeviceSettings, SoundData, SynthController,
+    InstrumentResampleChoice, InstrumentResampleSettings, MixerResampleSettings, PerDeviceSettings,
+    SoundData, SynthController, load_all,
 };
 
 fn load_demo() -> Box<dyn SoundData> {

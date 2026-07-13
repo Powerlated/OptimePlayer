@@ -10,8 +10,8 @@
 //! the global `wavi` table; each `bgm####.swd` is a **per-song bank** carrying only `prgi`
 //! programs + `kgrp` keygroups whose splits reference the main bank's samples by index.
 
-use crate::waveform::{decode_adpcm, decode_pcm16, decode_pcm8, Waveform};
 use crate::util::{read_u16, read_u32};
+use crate::waveform::{Waveform, decode_adpcm, decode_pcm8, decode_pcm16};
 
 const HEADER_LEN: usize = 0x50;
 const CHUNK_HEADER_LEN: usize = 0x10;

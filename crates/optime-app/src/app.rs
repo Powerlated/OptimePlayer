@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use optime_core::devices::gba::GbaRom;
-use optime_core::{load_all, FsVisController, InstrumentResampleMode, SoundData};
+use optime_core::{FsVisController, InstrumentResampleMode, SoundData, load_all};
 
 #[cfg(target_arch = "wasm32")]
 use crate::web::get_track_ref_from_query_string;
@@ -18,7 +18,7 @@ use crate::piano_roll::PianoRoll;
 use crate::player::{PlaybackCommand, PlaylistEntry};
 use crate::song_names;
 use crate::visualizer::{self, VisSnapshot};
-use crate::{audio::AudioEngine, player, TRACK_COUNT};
+use crate::{TRACK_COUNT, audio::AudioEngine, player};
 
 /// The four-option resampling-algorithm combo box, shared by the resampling settings sections.
 fn resample_combo(ui: &mut egui::Ui, id_salt: &str, choice: &mut InstrumentResampleChoice) {
@@ -2154,16 +2154,13 @@ impl OptimeApp {
                 gentler (fewer clicks) but softens note attacks; ~2 ms is a click-free default.",
         );
         if is_gba {
-            ui.checkbox(
-                &mut d.remove_sample_dc_offset,
-                "Remove sample DC offset",
-            )
-            .on_hover_text(
-                "Subtract each DirectSound sample's average level so it sits centered on zero, \
+            ui.checkbox(&mut d.remove_sample_dc_offset, "Remove sample DC offset")
+                .on_hover_text(
+                    "Subtract each DirectSound sample's average level so it sits centered on zero, \
                     matching the GBA's AC-coupled output and removing the thump a biased sample \
                     makes when its envelope opens or closes. See \"Stats for Nerds\" for how far \
                     each sample is shifted. Off preserves the raw ROM data.",
-            );
+                );
         }
         ui.separator();
         ui.label("Mixer settings");

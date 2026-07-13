@@ -48,11 +48,11 @@ mod stream;
 mod tests;
 
 pub use kernels::MAX_HALF_TAPS;
-pub use source::{gather_sinc, GatherSource};
+pub use source::{GatherSource, gather_sinc};
 pub use stream::StreamResampler;
 
 use crate::waveform::{InstrumentResampleMode, Sample};
-use kernels::{kernels, OVERSAMPLE, WIN_OVERSAMPLE};
+use kernels::{OVERSAMPLE, WIN_OVERSAMPLE, kernels};
 
 /// The gather a read actually runs after resolving the global [`InstrumentResampleMode`] against
 /// the signal kind (a voice's sample, or the mixer bus).
@@ -119,14 +119,14 @@ pub(crate) fn mode_half_taps(mode: InstrumentResampleMode) -> Option<usize> {
 /// - `cutoff_hz` (the crunchy-mode sliders) lowers either further: an output-domain frequency
 ///   `f` Hz is `f / (r · sample_rate)` cycles/source-sample.
 pub(crate) fn sinc_fc(
-    r: f64,
-    inv_sample_rate: f64,
+    r: f32,
+    inv_sample_rate: f32,
     step_mode: bool,
     cutoff_hz: Option<u32>,
-) -> f64 {
+) -> f32 {
     let mut fc = if step_mode || r > 1.0 { 0.5 / r } else { 0.5 };
     if let Some(hz) = cutoff_hz {
-        fc = fc.min(f64::from(hz) * inv_sample_rate / r);
+        fc = fc.min(hz as f32 * inv_sample_rate / r);
     }
     fc
 }
@@ -162,8 +162,8 @@ impl ResampleTables {
 /// every integer `k` with `|pos − k| ≤ P`. Exported so callers can pre-stage exactly the source
 /// samples [`resample_sinc`] will request (the formula must match the one used internally).
 #[inline]
-pub fn tap_window(tables: &ResampleTables, pos: f64) -> (i64, i64) {
-    let p = tables.half_taps as f64;
+pub fn tap_window(tables: &ResampleTables, pos: f32) -> (i64, i64) {
+    let p = tables.half_taps as f32;
     ((pos - p).floor() as i64, (pos + p).ceil() as i64)
 }
 
@@ -179,8 +179,8 @@ pub fn tap_window(tables: &ResampleTables, pos: f64) -> (i64, i64) {
 pub fn resample_sinc(
     tables: &ResampleTables,
     src: &[f32],
-    pos: f64,
-    fc: f64,
+    pos: f32,
+    fc: f32,
     step_mode: bool,
 ) -> Sample {
     let k = kernels();
@@ -201,23 +201,23 @@ pub fn resample_sinc(
     };
     // Table-index steps: fold the per-tap `·OVERSAMPLE` / `·WIN_OVERSAMPLE` scaling into the walk so
     // each tap advances the indices by a constant add instead of recomputing scaled products.
-    let sinc_idx_step = 2.0 * fc * OVERSAMPLE as f64; // Δ index per unit τ-step (one source sample)
-    let win_idx_step = WIN_OVERSAMPLE as f64 / tables.half_taps as f64; // Δ window index per source sample
+    let sinc_idx_step = 2.0 * fc * OVERSAMPLE as f32; // Δ index per unit τ-step (one source sample)
+    let win_idx_step = WIN_OVERSAMPLE as f32 / tables.half_taps as f32; // Δ window index per source sample
 
     // The gather kernel is selected at build time: the portable-SIMD version when the nightly
     // `simd` feature is enabled, the scalar version otherwise. Both compute the same
     // `(Σ src·w, Σ w)` pair (summation order differs, so results may diverge by float rounding).
-    let d0 = pos - k_lo as f64; // offset of the first tap from the read position (≈ P)
-                                // Step mode always uses the scalar gather: its cumulative-sinc table lookup carries one edge
-                                // value across iterations, which measures faster than any vectorized variant (the table
-                                // gathers dominate). Impulse mode vectorizes well because its kernel can be evaluated
-                                // analytically with rotating phasors — no table traffic at all.
-    let (out, wsum) = if step_mode {
+    let d0 = pos - k_lo as f32; // offset of the first tap from the read position (≈ P)
+    // Step mode always uses the scalar gather: its cumulative-sinc table lookup carries one edge
+    // value across iterations, which measures faster than any vectorized variant (the table
+    // gathers dominate). Impulse mode vectorizes well because its kernel can be evaluated
+    // analytically with rotating phasors — no table traffic at all.
+    let (out, wsum): (Sample, Sample) = if step_mode {
         gather::gather_step(k, src, d0, sinc_idx_step, win_idx_step)
     } else {
         #[cfg(feature = "simd")]
         {
-            simd::gather_impulse(src, d0, fc, tables.half_taps as f64)
+            simd::gather_impulse(src, d0, fc, tables.half_taps as f32)
         }
         #[cfg(not(feature = "simd"))]
         {
@@ -228,7 +228,7 @@ pub fn resample_sinc(
     let wsum = if step_mode { wsum.abs() } else { wsum };
 
     if wsum > 1e-12 {
-        (out / wsum) as Sample
+        out / wsum
     } else {
         // Degenerate weights (pathological fc): fall back to the nearest staged tap.
         Sample::from(src[(pos.round() as i64 - k_lo) as usize])

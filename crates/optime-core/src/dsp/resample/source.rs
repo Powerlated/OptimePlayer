@@ -2,7 +2,7 @@
 //! stages the exact tap window for a fractional source position so the inner resampler reads a
 //! plain, loop-mapped slice.
 
-use super::{resample_sinc, tap_window, ResampleTables, GATHER_BUF_LEN};
+use super::{GATHER_BUF_LEN, ResampleTables, resample_sinc, tap_window};
 use crate::waveform::Sample;
 
 /// Maps a source index past the loop end back into the loop body `[loop_point, data_len)`.
@@ -33,8 +33,8 @@ pub struct GatherSource<'a> {
 pub fn gather_sinc(
     src: &GatherSource,
     tbl: &ResampleTables,
-    pos: f64,
-    fc: f64,
+    pos: f32,
+    fc: f32,
     step_mode: bool,
 ) -> Sample {
     let &GatherSource {

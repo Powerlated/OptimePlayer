@@ -1,7 +1,7 @@
 //! Voicegroup (ToneData) parsing and instrument resolution, mirroring `ply_note`'s key-split /
 //! rhythm handling in `pret/pokeemerald`.
 
-use crate::util::{read_u32, read_u8};
+use crate::util::{read_u8, read_u32};
 
 use super::rom::ptr_to_offset;
 

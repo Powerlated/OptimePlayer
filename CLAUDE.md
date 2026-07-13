@@ -4,6 +4,8 @@ Guidance for Claude Code in this repo. Keep it current with the code.
 
 **Write style — mandatory for all agents editing this file.** Terse, telegraphic, high-density. Drop filler, hedging, and connective prose. Fragments over sentences. Keep every technical fact (names, paths, constants, behaviors); cut only the words around them. Example: "New object ref each render. Inline object prop = new ref = re-render. Wrap in useMemo." — not "The reason your component re-renders is likely that you create a new object reference each render cycle..." Contribute new facts in this same style.
 
+**Never launch subagents.** No Task/Agent tool, no fork, no spawning. Do all exploration and work inline with your own tools.
+
 When using Claude Haiku, follow these literal rules:
 * DO NOT run builds after completing a task
 * DO NOT run tests after completing a task

@@ -15,10 +15,10 @@
 
 use std::collections::HashSet;
 
-use super::rom::{ptr_to_offset, GbaRom};
+use super::rom::{GbaRom, ptr_to_offset};
 use super::voice::{ToneData, WaveData};
 use crate::devices::WaveformDcStat;
-use crate::util::{read_u32, read_u8};
+use crate::util::{read_u8, read_u32};
 
 /// `TONEDATA_TYPE_*` bits (mirrors `voice.rs`).
 const TYPE_CGB: u8 = 0x07;

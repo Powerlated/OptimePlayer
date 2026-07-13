@@ -20,34 +20,34 @@
 pub mod device_settings;
 pub mod devices;
 mod dsp;
-pub mod waveform;
 pub mod synth;
 pub mod synth_controller;
 pub mod tuning;
 pub mod util;
+pub mod waveform;
 
 pub use device_settings::{
     InstrumentResampleChoice, InstrumentResampleSettings, MixerResampleSettings, PerDeviceSettings,
 };
 pub use devices::nds::{
-    calc_channel_volume, BankInfo, InstrumentBank, InstrumentRecord, InstrumentType, Message,
-    MessageType, Sdat, Sequence, SequenceTrack, SseqInfo, SwarInfo,
+    BankInfo, InstrumentBank, InstrumentRecord, InstrumentType, Message, MessageType, Sdat,
+    Sequence, SequenceTrack, SseqInfo, SwarInfo, calc_channel_volume,
 };
 pub use devices::{
-    load_all, DevicePlayer, WaveformDcStat, SoundData, SynthEvent, VoiceId, VoicePitch,
+    DevicePlayer, SoundData, SynthEvent, VoiceId, VoicePitch, WaveformDcStat, load_all,
 };
 pub use dsp::biquad_filter;
 pub use dsp::resample::{ResampleTables, StreamResampler};
-pub use waveform::{
-    decode_adpcm, decode_pcm16, decode_pcm8, decode_wav, Frame, InstrumentResampleMode, Sample,
-    Waveform,
-};
-pub use synth::{DelayLine, WaveformInstrument, WaveformSynthesizer, CROSSOVER_Q};
+pub use synth::{CROSSOVER_Q, DelayLine, WaveformInstrument, WaveformSynthesizer};
 pub use synth_controller::{
     DelaySmoothing, FsVisController, HighShelf, LoopAndTransitionOptions, PlaybackEvent,
     PopSmoothing, SongOverview, SynthController, VisNote,
 };
-pub use tuning::{midi_note_to_hz, TuningSystem};
+pub use tuning::{TuningSystem, midi_note_to_hz};
+pub use waveform::{
+    Frame, InstrumentResampleMode, Sample, Waveform, decode_adpcm, decode_pcm8, decode_pcm16,
+    decode_wav,
+};
 
 /// Number of sequence tracks the synthesis layer exposes (both consoles fit in 16).
 pub const TRACK_COUNT: usize = 16;

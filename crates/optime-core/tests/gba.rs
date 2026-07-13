@@ -4,8 +4,8 @@
 
 use optime_core::devices::gba::GbaRom;
 use optime_core::{
-    load_all, LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData,
-    SynthController,
+    LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, SynthController,
+    load_all,
 };
 
 /// GBA ROM-space base address.

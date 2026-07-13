@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use optime_core::{load_all, PerDeviceSettings, SynthController};
+use optime_core::{PerDeviceSettings, SynthController, load_all};
 
 const SAMPLE_RATE: u32 = 32_768;
 

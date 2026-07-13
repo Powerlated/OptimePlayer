@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use optime_core::{load_all, Sdat};
+use optime_core::{Sdat, load_all};
 
 fn demo_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

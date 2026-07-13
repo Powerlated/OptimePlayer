@@ -4,7 +4,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use optime_core::{LoopAndTransitionOptions, PlaybackEvent, SynthController};
 
-use crate::player::{new_shared, AudioState, AutoAdvance, PlaybackCommand, Shared};
+use crate::player::{AudioState, AutoAdvance, PlaybackCommand, Shared, new_shared};
 
 /// Owns the live audio output stream and exposes the shared state the UI mutates.
 pub struct AudioEngine {

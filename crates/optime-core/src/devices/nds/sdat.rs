@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::bank::{
-    calc_decay_coeff, get_effective_attack, get_sustain_level, InstrumentBank, InstrumentRecord,
-    InstrumentRegion, InstrumentType,
+    InstrumentBank, InstrumentRecord, InstrumentRegion, InstrumentType, calc_decay_coeff,
+    get_effective_attack, get_sustain_level,
 };
-use crate::util::{read_u16, read_u32, read_u8, search_for_sequence};
+use crate::util::{read_u8, read_u16, read_u32, search_for_sequence};
 
 /// INFO record for a sequence (SSEQ).
 #[derive(Debug, Clone, Default)]

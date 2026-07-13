@@ -11,8 +11,8 @@
 //! path.
 
 use super::{
-    effective_gather, mode_half_taps, resample_sinc, sinc_fc, tap_window, EffectiveGather,
-    ResampleTables, GATHER_BUF_LEN, MAX_HALF_TAPS,
+    EffectiveGather, GATHER_BUF_LEN, MAX_HALF_TAPS, ResampleTables, effective_gather,
+    mode_half_taps, resample_sinc, sinc_fc, tap_window,
 };
 use crate::waveform::{Frame, InstrumentResampleMode, Sample};
 
@@ -31,11 +31,16 @@ pub struct StreamResampler {
     /// Sinc tables when the gather is a sinc variant; `None` for nearest / linear.
     tables: Option<ResampleTables>,
     /// Anti-image / anti-alias cutoff in cycles/input-sample (only used by the sinc gather).
-    fc: f64,
+    fc: f32,
     /// Input samples advanced per output sample.
-    step: f64,
-    /// Absolute input position of the next output sample.
-    pos: f64,
+    step: f32,
+    /// Integer part of the absolute input position of the next output sample. Carried exactly as
+    /// an `i64` (unbounded), so the read position never accumulates as one large float.
+    pos_int: i64,
+    /// Fractional part of the read position, always in `[0, 1)`. Keeping the position split this
+    /// way is what lets the whole resampler run in `f32` on an open-ended stream with no drift: the
+    /// kernel only ever sees a tiny synthetic offset, never a growing absolute float.
+    pos_frac: f32,
     /// Count of inputs pushed so far (the absolute index of the next push).
     loaded: i64,
     ring_l: [f32; RING],
@@ -56,7 +61,8 @@ impl StreamResampler {
             tables: None,
             fc: 0.5,
             step: 1.0,
-            pos: 0.0,
+            pos_int: 0,
+            pos_frac: 0.0,
             loaded: 0,
             ring_l: [0.0; RING],
             ring_r: [0.0; RING],
@@ -68,7 +74,7 @@ impl StreamResampler {
     /// Nyquist when downsampling, lowered further by the crunchy mode's cutoff slider (see
     /// [`sinc_fc`]). Cheap to call every block — only rebuilds the sinc tables on a `half_taps`
     /// change and never disturbs the running position.
-    pub fn set(&mut self, in_rate: f64, out_rate: f64, mode: InstrumentResampleMode) {
+    pub fn set(&mut self, in_rate: f32, out_rate: f32, mode: InstrumentResampleMode) {
         self.step = if out_rate > 0.0 {
             in_rate / out_rate
         } else {
@@ -97,7 +103,8 @@ impl StreamResampler {
 
     /// Clears the ring and read position (used when the mixer is (re)enabled, to start clean).
     pub fn reset(&mut self) {
-        self.pos = 0.0;
+        self.pos_int = 0;
+        self.pos_frac = 0.0;
         self.loaded = 0;
         self.ring_l = [0.0; RING];
         self.ring_r = [0.0; RING];
@@ -106,8 +113,8 @@ impl StreamResampler {
     #[inline]
     fn push(&mut self, l: Sample, r: Sample) {
         let slot = (self.loaded as usize) % RING;
-        self.ring_l[slot] = l as f32;
-        self.ring_r[slot] = r as f32;
+        self.ring_l[slot] = l;
+        self.ring_r[slot] = r;
         self.loaded += 1;
     }
 
@@ -136,21 +143,18 @@ impl StreamResampler {
         let out = match self.gather {
             EffectiveGather::Nearest => {
                 // Zero-order hold: the most recent input at or before `pos`.
-                let idx = self.pos.floor() as i64;
+                let idx = self.pos_int;
                 self.fill_to(idx, next_in);
-                (
-                    Sample::from(Self::at(&self.ring_l, idx)),
-                    Sample::from(Self::at(&self.ring_r, idx)),
-                )
+                (Self::at(&self.ring_l, idx), Self::at(&self.ring_r, idx))
             }
             EffectiveGather::Linear => {
-                let i = self.pos.floor() as i64;
-                let frac = self.pos - i as f64;
+                let i = self.pos_int;
+                let frac = self.pos_frac;
                 self.fill_to(i + 1, next_in);
                 let lerp = |ring: &[f32; RING]| -> Sample {
-                    let a = f64::from(Self::at(ring, i));
-                    let b = f64::from(Self::at(ring, i + 1));
-                    (a + (b - a) * frac) as Sample
+                    let a = Self::at(ring, i);
+                    let b = Self::at(ring, i + 1);
+                    a + (b - a) * frac
                 };
                 (lerp(&self.ring_l), lerp(&self.ring_r))
             }
@@ -158,9 +162,16 @@ impl StreamResampler {
                 // Clone the (cheap, half-width-only) table handle so the pull loop can borrow
                 // `self` mutably while staging the window.
                 let tables = self.tables.clone().expect("sinc gather has tables");
-                let (k_lo, k_hi) = tap_window(&tables, self.pos);
-                self.fill_to(k_hi, next_in);
-                let n = (k_hi - k_lo + 1) as usize;
+                let p = tables.half_taps as i64;
+                // Express the read position as a small synthetic offset in `[P, P+1)`: the exact
+                // integer part lives in `pos_int`, so the kernel never sees a large float. Its own
+                // `tap_window` then yields `k_lo = 0`, aligned with the absolute window we stage.
+                let syn_pos = tables.half_taps as f32 + self.pos_frac;
+                let (syn_lo, syn_hi) = tap_window(&tables, syn_pos);
+                debug_assert_eq!(syn_lo, 0);
+                let n = (syn_hi - syn_lo + 1) as usize;
+                let k_lo = self.pos_int - p; // absolute index of the first staged tap (src[0])
+                self.fill_to(k_lo + n as i64 - 1, next_in);
                 let mut buf_l = [0.0f32; GATHER_BUF_LEN];
                 let mut buf_r = [0.0f32; GATHER_BUF_LEN];
                 for (j, (sl, sr)) in buf_l[..n].iter_mut().zip(&mut buf_r[..n]).enumerate() {
@@ -169,12 +180,17 @@ impl StreamResampler {
                     *sr = Self::at(&self.ring_r, k);
                 }
                 (
-                    resample_sinc(&tables, &buf_l[..n], self.pos, self.fc, step_mode),
-                    resample_sinc(&tables, &buf_r[..n], self.pos, self.fc, step_mode),
+                    resample_sinc(&tables, &buf_l[..n], syn_pos, self.fc, step_mode),
+                    resample_sinc(&tables, &buf_r[..n], syn_pos, self.fc, step_mode),
                 )
             }
         };
-        self.pos += self.step;
+        // Advance the read position, keeping the fraction in `[0, 1)` and folding whole samples
+        // into the exact `pos_int` counter so nothing accumulates as an ever-growing float.
+        self.pos_frac += self.step;
+        let carry = self.pos_frac.floor();
+        self.pos_int += carry as i64;
+        self.pos_frac -= carry;
         out
     }
 }
@@ -188,7 +204,7 @@ mod tests {
     fn nearest_holds_input_samples() {
         let mut rs = StreamResampler::new();
         rs.set(1.0, 4.0, InstrumentResampleMode::NearestNeighbor); // 4× upsample, step = 0.25
-        let inputs = [1.0f64, 2.0, 3.0];
+        let inputs = [1.0f32, 2.0, 3.0];
         let mut it = inputs.into_iter();
         let mut pull = move || {
             let v = it.next().unwrap_or(0.0);
@@ -208,7 +224,7 @@ mod tests {
     fn linear_interpolates_between_inputs() {
         let mut rs = StreamResampler::new();
         rs.set(1.0, 2.0, InstrumentResampleMode::Linear); // 2× upsample, step = 0.5
-        let inputs = [0.0f64, 2.0, 4.0];
+        let inputs = [0.0f32, 2.0, 4.0];
         let mut it = inputs.into_iter();
         let mut pull = move || {
             let v = it.next().unwrap_or(4.0);
@@ -217,7 +233,7 @@ mod tests {
         // pos = 0, .5, 1, 1.5, 2 → 0, 1, 2, 3, 4 (left channel).
         let got: Vec<Sample> = (0..5).map(|_| rs.next(&mut pull).0).collect();
         for (i, &l) in got.iter().enumerate() {
-            assert!((l - i as f64).abs() < 1e-9, "sample {i}: got {l}");
+            assert!((l - i as f32).abs() < 1e-6, "sample {i}: got {l}");
         }
     }
 

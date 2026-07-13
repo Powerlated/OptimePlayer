@@ -18,7 +18,7 @@
 use std::io::Write as _;
 
 use optime_core::{
-    load_all, InstrumentResampleMode, PerDeviceSettings, StreamResampler, SynthController,
+    InstrumentResampleMode, PerDeviceSettings, StreamResampler, SynthController, load_all,
 };
 
 /// Mixer-bus (DirectSound) rate — deliberately below the output rate so nearest-neighbour ZOH
@@ -56,18 +56,18 @@ fn mixer_config() -> PerDeviceSettings {
 /// `(L+R)/2` output stream.
 fn resample_bus(bus: &[(f32, f32)], mode: InstrumentResampleMode) -> Vec<f32> {
     let mut rs = StreamResampler::new();
-    rs.set(MIXER_RATE, OUT_RATE, mode);
+    rs.set(MIXER_RATE as f32, OUT_RATE as f32, mode);
     let n_out = ((bus.len() as f64) * OUT_RATE / MIXER_RATE).floor() as usize;
     let mut idx = 0usize;
     let mut pull = || {
         let s = bus.get(idx).copied().unwrap_or((0.0, 0.0));
         idx += 1;
-        (f64::from(s.0), f64::from(s.1))
+        s
     };
     (0..n_out)
         .map(|_| {
             let (l, r) = rs.next(&mut pull);
-            ((l + r) * 0.5) as f32
+            (l + r) * 0.5
         })
         .collect()
 }

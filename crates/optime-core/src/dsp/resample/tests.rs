@@ -1,10 +1,14 @@
 //! Resampler unit tests: the BLEP step / impulse gathers, the fixed-tap support invariant, and
 //! the analysis-helper kernel/response properties.
+//!
+//! The resampler itself runs entirely in `f32`; these tests keep their reference signals and the
+//! comparison tolerances in `f64` (numerical analysis, not the audio path) and cast at the `f32`
+//! API boundary.
 
 use core::f64::consts::PI;
 
-use super::kernels::{kernels, sinc_int_at, OVERSAMPLE, TAU_MAX};
-use super::{resample_sinc, tap_window, ResampleTables};
+use super::kernels::{OVERSAMPLE, TAU_MAX, kernels, sinc_int_at};
+use super::{ResampleTables, resample_sinc, tap_window};
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
     (a - b).abs() < tol
@@ -13,7 +17,7 @@ fn close(a: f64, b: f64, tol: f64) -> bool {
 /// Stages the tap window for `pos` by sampling `f` at each source index (what the synth's
 /// gather staging does for real sample data).
 fn staged(tables: &ResampleTables, pos: f64, f: impl Fn(i64) -> f64) -> Vec<f32> {
-    let (k_lo, k_hi) = tap_window(tables, pos);
+    let (k_lo, k_hi) = tap_window(tables, pos as f32);
     (k_lo..=k_hi).map(|t| f(t) as f32).collect()
 }
 
@@ -21,7 +25,7 @@ fn staged(tables: &ResampleTables, pos: f64, f: impl Fn(i64) -> f64) -> Vec<f32>
 fn sinc_int_boundary_and_symmetry() {
     let k = kernels();
     // `sinc_int_at` takes the pre-scaled index τ·OVERSAMPLE.
-    let si = |tau: f64| sinc_int_at(k, tau * OVERSAMPLE as f64);
+    let si = |tau: f64| f64::from(sinc_int_at(k, (tau * OVERSAMPLE as f64) as f32));
     // S(0) = 0, and S saturates to ±0.5 outside the tabulated range.
     assert!(close(si(0.0), 0.0, 1e-12));
     assert!(close(si(TAU_MAX as f64 + 5.0), 0.5, 1e-6));
@@ -40,7 +44,7 @@ fn sinc_int_is_bounded() {
     let k = kernels();
     for i in 0..=2000 {
         let tau = -(TAU_MAX as f64) + 2.0 * TAU_MAX as f64 * i as f64 / 2000.0;
-        let s = sinc_int_at(k, tau * OVERSAMPLE as f64);
+        let s = f64::from(sinc_int_at(k, (tau * OVERSAMPLE as f64) as f32));
         assert!((-0.6..=0.6).contains(&s), "S({tau}) = {s} out of band");
     }
 }
@@ -52,7 +56,7 @@ fn step_mode_preserves_dc() {
     for fc in [0.1, 0.25, 0.5, 1.5] {
         for pos in [3.0, 7.35, 20.7] {
             let src = staged(&tables, pos, |_| 1.0);
-            let out = resample_sinc(&tables, &src, pos, fc, true);
+            let out = f64::from(resample_sinc(&tables, &src, pos as f32, fc as f32, true));
             assert!(close(out, 1.0, 1e-9), "DC at fc={fc}, pos={pos}: {out}");
         }
     }
@@ -65,7 +69,15 @@ fn step_mode_is_a_bandlimited_step() {
     let tables = ResampleTables::new(32);
     let fc = 0.5 / 4.0; // 4× downsampling
     let step = |k: i64| if k >= 0 { 1.0_f64 } else { 0.0 };
-    let at = |pos: f64| resample_sinc(&tables, &staged(&tables, pos, step), pos, fc, true);
+    let at = |pos: f64| {
+        f64::from(resample_sinc(
+            &tables,
+            &staged(&tables, pos, step),
+            pos as f32,
+            fc as f32,
+            true,
+        ))
+    };
 
     assert!(close(at(0.0), 0.5, 0.02));
     let half_width = tables.half_taps as f64 / (2.0 * fc);
@@ -89,7 +101,7 @@ fn impulse_mode_dc_gain() {
     let tables = ResampleTables::new(16);
     let pos = 12.37;
     let src = staged(&tables, pos, |_| 1.0);
-    let out = resample_sinc(&tables, &src, pos, 0.4, false);
+    let out = f64::from(resample_sinc(&tables, &src, pos as f32, 0.4, false));
     assert!(close(out, 1.0, 1e-6), "DC gain = {out}");
 }
 
@@ -103,7 +115,13 @@ fn impulse_mode_passband_signal_reconstructed() {
     for frac in [0.0, 0.25, 0.5, 0.75] {
         let pos = 32.0 + frac;
         let ideal = (2.0 * PI * f0 * pos).cos();
-        let out = resample_sinc(&tables, &staged(&tables, pos, get), pos, fc, false);
+        let out = f64::from(resample_sinc(
+            &tables,
+            &staged(&tables, pos, get),
+            pos as f32,
+            fc as f32,
+            false,
+        ));
         assert!(
             close(out, ideal, 1e-3),
             "at pos={pos}: reconstructed={out}, ideal={ideal}"

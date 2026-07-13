@@ -6,14 +6,14 @@ use std::sync::Arc;
 use super::delay_line::DelayLine;
 use super::instrument::WaveformInstrument;
 use super::{CROSSOVER_Q, MAX_BLOCK};
+use crate::PerDeviceSettings;
 use crate::devices::VoicePitch;
 use crate::dsp::biquad_filter::BiquadFilter;
-use crate::dsp::resample::{mode_half_taps, ResampleTables};
+use crate::dsp::resample::{ResampleTables, mode_half_taps};
 use crate::dsp::slewer::Slewer;
-use crate::waveform::{Sample, Waveform};
 use crate::synth_controller::{DelaySmoothing, PopSmoothing};
 use crate::tuning::TuningSystem;
-use crate::PerDeviceSettings;
+use crate::waveform::{Sample, Waveform};
 
 /// Seconds the panning slew takes to cross the full 0..1 pan range when pan smoothing is on. Short
 /// enough to track quick auto-pans, long enough to turn a hard pan jump into a click-free ramp.
@@ -31,12 +31,12 @@ pub struct WaveformSynthesizer {
     /// Last mixed right output.
     pub val_r: Sample,
     /// Track volume (0..1).
-    pub volume: f64,
+    pub volume: Sample,
     /// The left/right pan-split gains most recently requested (centered = 0.5 each). The applied
     /// gains in [`Self::apply_stereo`] either jump to these or slew toward them (see
     /// [`PerDeviceSettings::smooth_pan`]).
-    pan_l_target: f64,
-    pan_r_target: f64,
+    pan_l_target: Sample,
+    pan_r_target: Sample,
     /// The left/right pan gains actually applied last sample. Each slews toward its target when pan
     /// smoothing is on; otherwise tracks it exactly.
     pan_l: Slewer,
@@ -102,7 +102,7 @@ impl WaveformSynthesizer {
             instr.set_sample_rate(sample_rate);
         }
         // Keep the pan slews the same wall-clock duration at the new rate.
-        let pan_step = 1.0 / (PAN_SLEW_SECONDS * sample_rate);
+        let pan_step = (1.0 / (PAN_SLEW_SECONDS * sample_rate)) as Sample;
         self.pan_l.set_step(pan_step);
         self.pan_r.set_step(pan_step);
 
@@ -156,7 +156,7 @@ impl WaveformSynthesizer {
         &mut self,
         waveform: Arc<Waveform>,
         pitch: VoicePitch,
-        volume: f64,
+        volume: Sample,
         config: &PerDeviceSettings,
     ) -> usize {
         let tuning = config.tuning();
@@ -291,11 +291,8 @@ impl WaveformSynthesizer {
             (self.pan_l_target, self.pan_r_target)
         };
 
-        // Narrow the f64 pan/volume gains to the sample width once, so the mix arithmetic is done
-        // entirely in `Sample` (a no-op when `Sample = f64`).
-        let vol = self.volume as Sample;
-        let gl = gl as Sample;
-        let gr = gr as Sample;
+        // Pan/volume gains and the mix arithmetic are all in `Sample`.
+        let vol = self.volume;
 
         if !config.stereo_separation {
             self.val_l = mono * gl * vol;
@@ -379,9 +376,11 @@ impl WaveformSynthesizer {
                 self.delay_line_r.set_delay(delay_r);
             }
         }
-        self.delay_line_r.gain = gain_r;
-        self.pan_l_target = pan_vol_l;
-        self.pan_r_target = pan_vol_r;
+        self.delay_line_r.gain = gain_r as Sample;
+        // The pan-split gains multiply the mixed sample, so store them at the sample width; the
+        // Haas geometry above stays `f64` (physical distances/timing).
+        self.pan_l_target = pan_vol_l as Sample;
+        self.pan_r_target = pan_vol_r as Sample;
     }
 
     /// Applies a deferred delay-length change once the track is note-free.

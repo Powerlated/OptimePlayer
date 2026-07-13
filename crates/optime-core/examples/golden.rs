@@ -7,8 +7,8 @@
 //! baseline for the scalar gather; the SIMD and scalar builds hash differently by design).
 
 use optime_core::{
-    load_all, InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
-    PerDeviceSettings, SoundData, SynthController,
+    InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
+    PerDeviceSettings, SoundData, SynthController, load_all,
 };
 
 const SAMPLE_RATE: f64 = 32768.0;

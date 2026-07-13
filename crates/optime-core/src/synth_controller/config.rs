@@ -83,10 +83,6 @@ impl PopSmoothing {
     /// Whether a voice of the given kind should slew its gain.
     #[inline]
     pub fn enabled_for(self, is_psg: bool) -> bool {
-        if is_psg {
-            self.psg
-        } else {
-            self.sampled
-        }
+        if is_psg { self.psg } else { self.sampled }
     }
 }

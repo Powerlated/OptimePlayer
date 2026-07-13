@@ -1,6 +1,6 @@
 # Optime Player
 
-This is a web application for playing music from various game console ROMs.
+This is a web and desktop application for playing music from various game console ROMs.
 
 Currently, most games from these consoles are supported:
  * Nintendo DS

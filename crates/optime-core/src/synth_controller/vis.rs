@@ -6,9 +6,9 @@
 //! from the standard [`SynthEvent`] stream. This means the visualizer sees the same notes the
 //! audio player produces, with no device-specific logic here.
 
+use crate::PerDeviceSettings;
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback};
 use crate::util::CircularBuffer;
-use crate::PerDeviceSettings;
 
 /// A note observed by the look-ahead, on the sequencer-step timeline.
 #[derive(Debug, Clone, Copy)]

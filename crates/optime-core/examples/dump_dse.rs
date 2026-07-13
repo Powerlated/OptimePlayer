@@ -10,10 +10,10 @@
 //! `bgm.swd` is the main bank (sample data); `bgm####.smd` is the song; the optional per-song
 //! `.swd` is parsed for program info. Decoded WAVs are written to `out_dir` (default: cwd).
 
-use optime_core::devices::dse::{decode_track, DseEvent, Smdl, Swdl};
-use optime_core::waveform::Waveform;
+use optime_core::devices::dse::{DseEvent, Smdl, Swdl, decode_track};
 use optime_core::synth_controller::messages::TickFeedback;
-use optime_core::{load_all, FsVisController, PerDeviceSettings, SynthController, SynthEvent};
+use optime_core::waveform::Waveform;
+use optime_core::{FsVisController, PerDeviceSettings, SynthController, SynthEvent, load_all};
 use std::path::Path;
 
 fn main() {
@@ -53,7 +53,12 @@ fn main() {
         main.waveforms.len(),
         main.pcmd.len()
     );
-    let rates: Vec<u32> = main.waveforms.iter().take(8).map(|s| s.sample_rate).collect();
+    let rates: Vec<u32> = main
+        .waveforms
+        .iter()
+        .take(8)
+        .map(|s| s.sample_rate)
+        .collect();
     println!("   first sample rates (Hz): {rates:?}");
     println!();
 
@@ -157,8 +162,8 @@ fn main() {
     // --- Tick a player to prove the LFO path (vibrato / tremolo / auto-pan) ---
     if let Some(bytes) = &song_bank {
         if let Some(bank) = Swdl::parse(bytes) {
-            use optime_core::devices::dse::DsePlayer;
             use optime_core::DevicePlayer as _;
+            use optime_core::devices::dse::DsePlayer;
             use std::sync::Arc;
             let mut player = DsePlayer::new(&song, Arc::new(bank), Arc::new(main.clone()));
             let mut feedback = TickFeedback::default();

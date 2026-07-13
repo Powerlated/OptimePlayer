@@ -7,10 +7,10 @@
 
 use std::sync::Arc;
 
-use super::rom::{ptr_to_offset, SongHeader};
+use super::rom::{SongHeader, ptr_to_offset};
 use super::tables::CLOCK_TABLE;
-use super::voice::{resolve_tone, ResolvedTone, ToneData};
-use crate::util::{read_u32, read_u8};
+use super::voice::{ResolvedTone, ToneData, resolve_tone};
+use crate::util::{read_u8, read_u32};
 
 /// Sequencer steps trigger when the tempo accumulator reaches this (tempo 75 ⇒ one step/frame).
 pub(crate) const TEMPO_STEP: u16 = 150;

@@ -9,9 +9,9 @@
 //! The interpreter is headless: it emits a flat [`SeqOp`] stream that the device player turns
 //! into voices. It owns no audio or envelope state.
 
-use super::events::{control_info, PAUSE_TICKS};
+use super::events::{PAUSE_TICKS, control_info};
 use super::smdl::Smdl;
-use crate::util::{read_u16, read_u8};
+use crate::util::{read_u8, read_u16};
 
 /// Default tempo before any `SetBpm` event (the DSE driver's startup tempo).
 const DEFAULT_BPM: u8 = 120;

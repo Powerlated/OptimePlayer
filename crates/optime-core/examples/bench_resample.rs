@@ -13,8 +13,8 @@
 use std::time::Instant;
 
 use optime_core::{
-    load_all, InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
-    PerDeviceSettings, SynthController,
+    InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
+    PerDeviceSettings, SynthController, load_all,
 };
 
 fn main() {

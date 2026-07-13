@@ -3,17 +3,17 @@
 
 use std::sync::Arc;
 
-use super::lfo::{lfo_tick, lfo_type, LfoParams};
+use super::lfo::{LfoParams, lfo_tick, lfo_type};
 use super::sequence::{Message, MessageType, Sequence};
 use super::tables::SQUARE_WAVES;
 use super::volume::{calc_channel_volume, decibel_db};
 use super::{InstrumentType, Sdat};
-use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
-use crate::waveform::{decode_adpcm, decode_pcm16, decode_pcm8, Waveform};
-use crate::tuning::midi_note_to_hz;
-use crate::util::{read_u16, read_u32, read_u8};
 use crate::PerDeviceSettings;
 use crate::TRACK_COUNT;
+use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
+use crate::tuning::midi_note_to_hz;
+use crate::util::{read_u8, read_u16, read_u32};
+use crate::waveform::{Waveform, decode_adpcm, decode_pcm8, decode_pcm16};
 
 /// ADSR envelope stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

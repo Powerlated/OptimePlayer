@@ -5,10 +5,10 @@
 //! into the synthesis layer. Defaults are intentionally *not* defined here; the app owns the
 //! out-of-the-box values.
 
-use crate::waveform::InstrumentResampleMode;
+use crate::TRACK_COUNT;
 use crate::synth_controller::{DelaySmoothing, HighShelf, PopSmoothing};
 use crate::tuning::TuningSystem;
-use crate::TRACK_COUNT;
+use crate::waveform::InstrumentResampleMode;
 
 /// Which resampling algorithm a stage uses. Mirrors the variants of
 /// [`InstrumentResampleMode`](crate::InstrumentResampleMode) at the settings level.

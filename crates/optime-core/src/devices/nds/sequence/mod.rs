@@ -17,8 +17,8 @@ pub use track::SequenceTrack;
 
 use std::sync::Arc;
 
-use crate::util::{read_u8, CircularBuffer};
 use crate::TRACK_COUNT;
+use crate::util::{CircularBuffer, read_u8};
 
 /// How a command operand is encoded, mirroring pokediamond's `SND_SEQ_VAL_*` and the `0xA0`
 /// (random) / `0xA1` (variable) prefixes consumed by `TrackParseValue`.

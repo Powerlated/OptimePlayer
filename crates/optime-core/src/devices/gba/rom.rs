@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::util::{read_u16, read_u32, read_u8};
+use crate::util::{read_u8, read_u16, read_u32};
 
 /// Maximum songs we will enumerate from a table (guards against runaway scans).
 const MAX_SONGS: usize = 2048;

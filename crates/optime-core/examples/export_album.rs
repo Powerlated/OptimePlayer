@@ -37,8 +37,8 @@ use flac_codec::encode::{FlacSampleWriter, Options};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use optime_core::devices::gba::GbaRom;
 use optime_core::{
-    load_all, LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData,
-    SynthController,
+    LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, SynthController,
+    load_all,
 };
 use rayon::prelude::*;
 use serde_json::Value;

@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use crate::devices::VoicePitch;
 use crate::dsp::resample::{
-    effective_gather, gather_sinc, sinc_fc, EffectiveGather, GatherSource, ResampleTables,
+    EffectiveGather, GatherSource, ResampleTables, effective_gather, gather_sinc, sinc_fc,
 };
 use crate::dsp::slewer::Slewer;
+use crate::synth_controller::{DEFAULT_POP_SLEW_SECONDS, PopSmoothing};
+use crate::tuning::{TuningSystem, midi_note_to_hz};
 use crate::waveform::{InstrumentResampleMode, Sample, Waveform};
-use crate::synth_controller::{PopSmoothing, DEFAULT_POP_SLEW_SECONDS};
-use crate::tuning::{midi_note_to_hz, TuningSystem};
 
 /// A single playing voice.
 #[derive(Clone)]
@@ -22,7 +22,7 @@ pub struct WaveformInstrument {
     /// data rate — see [`VoicePitch`]).
     pub pitch: VoicePitch,
     /// Current playback gain.
-    pub volume: f64,
+    pub volume: Sample,
     /// Whether this voice is sounding.
     pub playing: bool,
     /// The gain actually applied last sample. Tracks [`Self::volume`] exactly, except for
@@ -34,8 +34,10 @@ pub struct WaveformInstrument {
     pop_slew_seconds: f64,
     /// Set by [`Self::begin_fade_out`]: the voice slews to silence and then stops itself.
     fading_out: bool,
-    /// Fractional sample position.
-    pub sample_t: f64,
+    /// Fractional sample position. Kept in `f32`: a looping voice's position is folded back into
+    /// the loop body every wrap (by subtracting the loop period, see [`fold_pos`]), so it stays
+    /// bounded and f32-precise over arbitrarily long notes rather than drifting.
+    pub sample_t: Sample,
     /// Whether a looping voice has wrapped past the sample end at least once. Once it has, the
     /// signal under the gather window is fully periodic in the loop, so every tap may be read
     /// through the periodic mapping (before the first wrap, taps left of the loop end must still
@@ -75,7 +77,7 @@ impl WaveformInstrument {
 
     /// Begins a note: sets the envelope volume and primes the applied gain. A pop-smoothed voice
     /// starts from silence and slews up; everything else starts at `volume` exactly.
-    pub fn begin_note(&mut self, volume: f64, pops: PopSmoothing) {
+    pub fn begin_note(&mut self, volume: Sample, pops: PopSmoothing) {
         self.volume = volume;
         // Adopt the configured slew time so the ramp speed follows the setting.
         self.pop_slew_seconds = pops.slew_seconds;
@@ -92,9 +94,9 @@ impl WaveformInstrument {
     /// Re-derives the gain slewer's per-sample step from the current sample rate and slew time.
     fn refresh_pop_step(&mut self) {
         let step = if self.pop_slew_seconds > 0.0 {
-            self.inv_sample_rate / self.pop_slew_seconds
+            (self.inv_sample_rate / self.pop_slew_seconds) as Sample
         } else {
-            f64::INFINITY // an instant (un-smoothed) gain change
+            Sample::INFINITY // an instant (un-smoothed) gain change
         };
         self.gain.set_step(step);
     }
@@ -127,8 +129,9 @@ impl WaveformInstrument {
         tables: Option<&ResampleTables>,
         pops: PopSmoothing,
     ) {
-        // r = source samples advanced per output sample (pitch-shifted playback speed).
-        let r = self.freq_ratio * self.waveform.sample_rate * self.inv_sample_rate;
+        // r = source samples advanced per output sample (pitch-shifted playback speed). Computed
+        // from the (frequency-domain, f64) pitch ratio, then narrowed to the position width.
+        let r = (self.freq_ratio * self.waveform.sample_rate * self.inv_sample_rate) as Sample;
         self.sample_t += r;
 
         let data = &self.waveform.data;
@@ -139,13 +142,8 @@ impl WaveformInstrument {
 
         // Fold the read position back into the loop body once playback wraps.
         let fold = looping && loop_len > 0;
-        let (folded, wrapped) = fold_pos(
-            self.sample_t,
-            fold,
-            data_len as f64,
-            loop_point as f64,
-            loop_len as f64,
-        );
+        let (folded, wrapped) =
+            fold_pos(self.sample_t, fold, data_len as Sample, loop_len as Sample);
         self.sample_t = folded;
         self.wrapped |= wrapped;
         let pos = self.sample_t;
@@ -191,17 +189,17 @@ impl WaveformInstrument {
             EffectiveGather::Nearest => get(pos.floor() as i64),
             EffectiveGather::Linear => {
                 let i = pos.floor() as i64;
-                let frac = pos - i as f64;
+                let frac = pos - i as Sample;
                 let a = get(i);
                 let b = get(i + 1);
-                a + (b - a) * frac as Sample
+                a + (b - a) * frac
             }
             EffectiveGather::Sinc {
                 step_mode,
                 cutoff_hz,
             } => {
                 if let Some(tbl) = tables {
-                    let fc = sinc_fc(r, self.inv_sample_rate, step_mode, cutoff_hz);
+                    let fc = sinc_fc(r, self.inv_sample_rate as Sample, step_mode, cutoff_hz);
                     let src = GatherSource {
                         data,
                         looping,
@@ -217,7 +215,7 @@ impl WaveformInstrument {
             }
         };
 
-        self.output = result * gain as Sample;
+        self.output = result * gain;
     }
 
     /// Advances playback by `out.len()` output samples, adding each `volume`-scaled sample into
@@ -250,15 +248,15 @@ impl WaveformInstrument {
             return;
         };
 
-        let r = self.freq_ratio * self.waveform.sample_rate * self.inv_sample_rate;
+        let r = (self.freq_ratio * self.waveform.sample_rate * self.inv_sample_rate) as Sample;
         let data = &self.waveform.data;
         let looping = self.waveform.looping;
         let loop_point = self.waveform.loop_point;
         let data_len = data.len() as i64;
-        let data_len_f = data_len as f64;
+        let data_len_f = data_len as Sample;
         let loop_len = data_len - loop_point;
         let fold = looping && loop_len > 0;
-        let (lp_f, loop_len_f) = (loop_point as f64, loop_len as f64);
+        let loop_len_f = loop_len as Sample;
 
         let mut pos = self.sample_t;
         let mut wrapped = self.wrapped;
@@ -273,7 +271,7 @@ impl WaveformInstrument {
             // per-sample folding) only.
             for _ in 0..out.len() {
                 pos += r;
-                let (p, w) = fold_pos(pos, fold, data_len_f, lp_f, loop_len_f);
+                let (p, w) = fold_pos(pos, fold, data_len_f, loop_len_f);
                 pos = p;
                 wrapped |= w;
             }
@@ -288,12 +286,12 @@ impl WaveformInstrument {
         }
 
         // See `sinc_fc` for the cutoff rationale (clean reconstruction vs BLEP output-Nyquist).
-        let fc = sinc_fc(r, self.inv_sample_rate, step_mode, cutoff_hz);
+        let fc = sinc_fc(r, self.inv_sample_rate as Sample, step_mode, cutoff_hz);
 
         let mut last = 0.0;
         for slot in out.iter_mut() {
             pos += r;
-            let (p, w) = fold_pos(pos, fold, data_len_f, lp_f, loop_len_f);
+            let (p, w) = fold_pos(pos, fold, data_len_f, loop_len_f);
             pos = p;
             wrapped |= w;
             let g = if smooth {
@@ -317,7 +315,7 @@ impl WaveformInstrument {
                 wrapped,
             };
             let result = gather_sinc(&src, tbl, pos, fc, step_mode);
-            last = result * g as Sample;
+            last = result * g;
             *slot += last;
         }
         self.sample_t = pos;
@@ -363,11 +361,23 @@ impl WaveformInstrument {
 /// sinc gather read taps without a per-tap loop-mapping division. Returns the (possibly folded)
 /// position and whether it wrapped. `fold` must be `looping && loop_len > 0`; all lengths are in
 /// source samples. Shared by [`WaveformInstrument::advance`] and [`WaveformInstrument::advance_block`]
-/// so the two paths fold bit-identically.
+/// so the two paths fold identically.
+///
+/// The wrap is done by **subtracting the loop period** rather than a modulo: this is what keeps the
+/// `f32` position accurate over arbitrarily long notes. The accumulator never grows past the loop
+/// body (`[loop_point, data_len)`, since `data_len = loop_point + loop_len`), so `sample_t += r`
+/// stays in a small range where `f32` has plenty of fractional precision — there is no long-run
+/// pitch drift. For the single-period overshoot one `+= r` step produces, one subtraction
+/// reproduces the modulo's mapping exactly; the `while` guards the rare case of a step longer than
+/// the loop.
 #[inline]
-fn fold_pos(pos: f64, fold: bool, data_len: f64, loop_point: f64, loop_len: f64) -> (f64, bool) {
+fn fold_pos(pos: Sample, fold: bool, data_len: Sample, loop_len: Sample) -> (Sample, bool) {
     if fold && pos >= data_len {
-        ((pos - loop_point) % loop_len + loop_point, true)
+        let mut p = pos;
+        while p >= data_len {
+            p -= loop_len;
+        }
+        (p, true)
     } else {
         (pos, false)
     }
@@ -475,13 +485,13 @@ mod tests {
     /// Accurate when `freq_hz` lands on a DFT bin (an integer number of cycles over the window).
     fn amp_at(signal: &[Sample], freq_hz: f64, rate: f64) -> Sample {
         let w = 2.0 * PI * freq_hz / rate;
-        let (mut re, mut im) = (0.0, 0.0);
+        let (mut re, mut im) = (0.0f64, 0.0f64);
         for (n, &x) in signal.iter().enumerate() {
             let p = w * n as f64;
-            re += x * p.cos();
-            im -= x * p.sin();
+            re += f64::from(x) * p.cos();
+            im -= f64::from(x) * p.sin();
         }
-        2.0 * (re * re + im * im).sqrt() / signal.len() as f64
+        (2.0 * (re * re + im * im).sqrt() / signal.len() as f64) as Sample
     }
 
     #[test]

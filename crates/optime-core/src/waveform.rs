@@ -2,7 +2,7 @@
 //! signal-path aliases, and the PCM8/PCM16/IMA-ADPCM/WAV decoders.
 
 use crate::devices::nds::tables::{ADPCM_INDEX_TABLE, ADPCM_STEP_TABLE};
-use crate::util::{read_u16, read_u32, read_u8};
+use crate::util::{read_u8, read_u16, read_u32};
 
 /// A single audio sample value (amplitude) in the synthesis signal path.
 ///

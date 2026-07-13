@@ -16,11 +16,11 @@ use super::lfo::{Lfo, LfoConfig, LfoDest, LfoRng};
 use super::pitch::note_key_to_hz;
 use super::sequencer::{DseSequencer, SeqOp};
 use super::swdl::Swdl;
-use super::{volume, WaveformInfo, Smdl};
-use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
-use crate::waveform::Waveform;
+use super::{Smdl, WaveformInfo, volume};
 use crate::PerDeviceSettings;
 use crate::TRACK_COUNT;
+use crate::devices::{SynthEvent, TickFeedback, VoiceId, VoicePitch};
+use crate::waveform::Waveform;
 
 /// DSE driver clock cycles between ticks: `64 * 5236` cycles of the 33.51 MHz clock (the
 /// `DseDriver_StartTickTimer` alarm), ≈ 100 Hz.
@@ -607,7 +607,9 @@ impl DsePlayer {
         let decoded = self
             .main_bank
             .waveform_for_wave(wave_index)
-            .and_then(|info: &WaveformInfo| self.main_bank.decode_waveform(info, &self.main_bank.pcmd))
+            .and_then(|info: &WaveformInfo| {
+                self.main_bank.decode_waveform(info, &self.main_bank.pcmd)
+            })
             .map(Arc::new);
         self.waveform_cache.insert(wave_index, decoded.clone());
         decoded

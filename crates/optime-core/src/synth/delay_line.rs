@@ -9,7 +9,7 @@ pub struct DelayLine {
     pos_out: usize,
     delay: usize,
     /// Output gain.
-    pub gain: f64,
+    pub gain: Sample,
 }
 
 impl DelayLine {
@@ -32,7 +32,7 @@ impl DelayLine {
         if self.pos_out >= len {
             self.pos_out = 0;
         }
-        out_val * self.gain as Sample
+        out_val * self.gain
     }
 
     /// Sets the delay length in samples (clamped to the buffer capacity).

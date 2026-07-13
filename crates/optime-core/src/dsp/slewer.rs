@@ -14,16 +14,16 @@
 /// cutoff) as long as the target is in the same units.
 #[derive(Debug, Clone, Copy)]
 pub struct Slewer {
-    current: f64,
+    current: f32,
     /// Maximum change applied per [`advance`](Self::advance), always non-negative.
-    step: f64,
+    step: f32,
 }
 
 impl Slewer {
     /// Creates a slewer starting at `initial`, moving at most `step_per_sample` value units toward
     /// the target on each [`advance`](Self::advance). A `step_per_sample` of `0.0` freezes the
     /// value; a very large step makes `advance` jump straight to the target.
-    pub fn new(initial: f64, step_per_sample: f64) -> Self {
+    pub fn new(initial: f32, step_per_sample: f32) -> Self {
         Self {
             current: initial,
             step: step_per_sample.abs(),
@@ -32,39 +32,40 @@ impl Slewer {
 
     /// Creates a slewer whose step crosses one unit of value (e.g. the full `0..1` gain range) in
     /// `seconds` at `sample_rate` Hz. This is the de-click ramp used for gain/pan smoothing, where
-    /// the controlled value lives in a normalized `0..1` range.
-    pub fn from_time(initial: f64, seconds: f64, sample_rate: f64) -> Self {
+    /// the controlled value lives in a normalized `0..1` range. `seconds`/`sample_rate` are wall-
+    /// clock timing (kept `f64`); only the resulting per-sample step is narrowed to the slew width.
+    pub fn from_time(initial: f32, seconds: f64, sample_rate: f64) -> Self {
         let step = if seconds > 0.0 && sample_rate > 0.0 {
-            1.0 / (seconds * sample_rate)
+            (1.0 / (seconds * sample_rate)) as f32
         } else {
-            f64::INFINITY
+            f32::INFINITY
         };
         Self::new(initial, step)
     }
 
     /// The current (last produced) value.
     #[inline]
-    pub fn value(&self) -> f64 {
+    pub fn value(&self) -> f32 {
         self.current
     }
 
     /// Jumps immediately to `value`, bypassing the ramp. Use when a discontinuity is intended
     /// (e.g. priming a voice's gain at note start).
     #[inline]
-    pub fn set(&mut self, value: f64) {
+    pub fn set(&mut self, value: f32) {
         self.current = value;
     }
 
     /// Replaces the per-sample step (value units per [`advance`](Self::advance)).
     #[inline]
-    pub fn set_step(&mut self, step_per_sample: f64) {
+    pub fn set_step(&mut self, step_per_sample: f32) {
         self.step = step_per_sample.abs();
     }
 
     /// Moves the held value toward `target` by at most one step, landing exactly on `target` once
     /// within reach, and returns the new value.
     #[inline]
-    pub fn advance(&mut self, target: f64) -> f64 {
+    pub fn advance(&mut self, target: f32) -> f32 {
         let d = target - self.current;
         self.current = if d.abs() <= self.step {
             target
@@ -93,8 +94,10 @@ mod tests {
     #[test]
     fn slews_downward_too() {
         let mut s = Slewer::new(1.0, 0.4);
-        assert!((s.advance(0.0) - 0.6).abs() < 1e-12);
-        assert!((s.advance(0.0) - 0.2).abs() < 1e-12);
+        // `0.4` is not exactly representable in `f32`, so compare within the sample width's epsilon
+        // rather than the old `f64` 1e-12.
+        assert!((s.advance(0.0) - 0.6).abs() < 1e-6);
+        assert!((s.advance(0.0) - 0.2).abs() < 1e-6);
         assert_eq!(s.advance(0.0), 0.0);
     }
 
