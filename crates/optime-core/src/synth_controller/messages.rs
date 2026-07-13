@@ -78,8 +78,13 @@ pub enum SynthEvent {
     /// The note is no longer held (release began): clears the visualizer grid while the
     /// release tail keeps sounding.
     NoteReleased { track: usize, key: u8 },
-    /// Track-wide stereo pan (0 = left … 1 = right).
-    TrackPan { track: usize, pan: f64 },
+    /// Track-wide stereo pan gains: `pan_vol_l`/`pan_vol_r` are the left/right pan-split gains the
+    /// device frontend's pan law produced (a normalized split, ~sums to 1).
+    TrackPan {
+        track: usize,
+        pan_vol_l: f64,
+        pan_vol_r: f64,
+    },
     /// Track-wide pitch offset in semitones (DS pitch-bend wheel).
     TrackDetune { track: usize, semitones: f64 },
     /// The sequence jumped backward (loop point) — used for loop counting.

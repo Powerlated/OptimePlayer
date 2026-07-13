@@ -269,9 +269,11 @@ impl DsePlayer {
                 let pan_idx = (t.pan.value() + (pan_mod >> 6)).clamp(0, 127);
                 if pan_idx != t.last_pan {
                     t.last_pan = pan_idx;
+                    let p = f64::from(pan_idx) / 127.0;
                     events.push(SynthEvent::TrackPan {
                         track,
-                        pan: f64::from(pan_idx) / 127.0,
+                        pan_vol_l: 1.0 - p,
+                        pan_vol_r: p,
                     });
                 }
             }
@@ -382,9 +384,11 @@ impl DsePlayer {
                 if let Some(t) = self.tracks.get_mut(track) {
                     t.pan.set(i32::from(pan));
                     t.last_pan = i32::from(pan);
+                    let p = f64::from(pan) / 127.0;
                     events.push(SynthEvent::TrackPan {
                         track,
-                        pan: f64::from(pan) / 127.0,
+                        pan_vol_l: 1.0 - p,
+                        pan_vol_r: p,
                     });
                 }
             }
@@ -442,9 +446,11 @@ impl DsePlayer {
         }
         if opcode == 0xE9 {
             t.last_pan = t.pan.value();
+            let p = f64::from(t.pan.value()) / 127.0;
             events.push(SynthEvent::TrackPan {
                 track,
-                pan: f64::from(t.pan.value()) / 127.0,
+                pan_vol_l: 1.0 - p,
+                pan_vol_r: p,
             });
         }
         self.handle_lfo_control(track, opcode, ops, events);

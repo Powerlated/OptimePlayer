@@ -405,10 +405,19 @@ impl GbaPlayer {
             let tr = &self.seq.tracks[t];
 
             if flags.volume {
-                // The track's stereo position comes from the mixer-volume pair.
+                // The track's stereo split comes straight from the mixer-volume pair (normalized
+                // so volume is carried separately by the per-voice `VoiceVolume`).
                 let (mr, ml) = (f64::from(tr.vol_mr), f64::from(tr.vol_ml));
-                let pan = if mr + ml > 0.0 { mr / (mr + ml) } else { 0.5 };
-                events.push(SynthEvent::TrackPan { track: t, pan });
+                let (pan_vol_l, pan_vol_r) = if mr + ml > 0.0 {
+                    (ml / (mr + ml), mr / (mr + ml))
+                } else {
+                    (0.5, 0.5)
+                };
+                events.push(SynthEvent::TrackPan {
+                    track: t,
+                    pan_vol_l,
+                    pan_vol_r,
+                });
             }
 
             for chan in self.ds_channels.iter_mut().flatten() {
@@ -949,13 +958,14 @@ mod tests {
     /// The pan-law agreement between this device core and the SynthController.
     ///
     /// The hardware computes *per-side* channel envelopes (`env_l`, `env_r`). The controller's
-    /// stereo stage is linear — `l = volume·(1−pan)`, `r = volume·pan` — so the device emits
-    /// `volume = (env_l+env_r)/512` per voice and `pan = mr/(mr+ml)` per track
-    /// (`refresh_changed_tracks`/`envelope_frame`). For the non-rhythm voices that share the
-    /// track's mixer volumes, that composition must land on the hardware's own per-side values
-    /// `env_l/512`, `env_r/512` (up to the integer quantization and the engine's inherent
-    /// 127-left/128-right asymmetry). Rhythm voices with a fixed per-voice pan keep their pan
-    /// inside the per-voice volume instead — the track pan is the agreed approximation there.
+    /// stereo stage just multiplies the mono voice by the pan-split gains the device emits — the
+    /// pan law lives here in the frontend now. So the device emits `volume = (env_l+env_r)/512`
+    /// per voice and the normalized split `pan_vol_l = ml/(ml+mr)`, `pan_vol_r = mr/(ml+mr)` per
+    /// track (`refresh_changed_tracks`/`envelope_frame`). For the non-rhythm voices that share the
+    /// track's mixer volumes, `volume·pan_vol_l`/`volume·pan_vol_r` must land on the hardware's own
+    /// per-side values `env_l/512`, `env_r/512` (up to the integer quantization and the engine's
+    /// inherent 127-left/128-right asymmetry). Rhythm voices with a fixed per-voice pan keep their
+    /// pan inside the per-voice volume instead — the track pan is the agreed approximation there.
     #[test]
     fn pan_law_composition_matches_per_side_envelopes() {
         for velocity in [1u8, 64, 100, 127] {
@@ -968,12 +978,13 @@ mod tests {
                         let env_r = (u32::from(right_vol) * uvol) >> 8;
                         let env_l = (u32::from(left_vol) * uvol) >> 8;
                         let volume = (env_l + env_r) as f64 / 512.0;
-                        // The device's per-track pan (refresh_changed_tracks).
+                        // The device's per-track pan split (refresh_changed_tracks).
                         let (mr, ml) = (f64::from(vol_mr), f64::from(vol_ml));
-                        let pan = mr / (mr + ml);
-                        // The controller's linear stereo stage (WaveformSynthesizer::apply_stereo).
-                        let l = volume * (1.0 - pan);
-                        let r = volume * pan;
+                        let (pan_vol_l, pan_vol_r) = (ml / (mr + ml), mr / (mr + ml));
+                        // The controller's stereo stage (WaveformSynthesizer::apply_stereo) just
+                        // scales the mono voice by the emitted split gains.
+                        let l = volume * pan_vol_l;
+                        let r = volume * pan_vol_r;
 
                         let want_l = env_l as f64 / 512.0;
                         let want_r = env_r as f64 / 512.0;

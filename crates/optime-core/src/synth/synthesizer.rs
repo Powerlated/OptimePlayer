@@ -32,12 +32,15 @@ pub struct WaveformSynthesizer {
     pub val_r: Sample,
     /// Track volume (0..1).
     pub volume: f64,
-    /// The pan target most recently requested (0 = left, 1 = right). The applied pan in
-    /// [`Self::apply_stereo`] either jumps to this or slews toward it (see [`PerDeviceSettings::smooth_pan`]).
-    pan_target: f64,
-    /// The pan gain-split value actually applied last sample. Slews toward `pan_target` when pan
+    /// The left/right pan-split gains most recently requested (centered = 0.5 each). The applied
+    /// gains in [`Self::apply_stereo`] either jump to these or slew toward them (see
+    /// [`PerDeviceSettings::smooth_pan`]).
+    pan_l_target: f64,
+    pan_r_target: f64,
+    /// The left/right pan gains actually applied last sample. Each slews toward its target when pan
     /// smoothing is on; otherwise tracks it exactly.
-    pan: Slewer,
+    pan_l: Slewer,
+    pan_r: Slewer,
     delay_line_l: DelayLine,
     delay_line_r: DelayLine,
     /// Delay lengths waiting for a note-free moment ([`DelaySmoothing::HoldDuringNotes`]).
@@ -71,8 +74,10 @@ impl WaveformSynthesizer {
             val_l: 0.0,
             val_r: 0.0,
             volume: 1.0,
-            pan_target: 0.5,
-            pan: Slewer::from_time(0.5, PAN_SLEW_SECONDS, sample_rate),
+            pan_l_target: 0.5,
+            pan_r_target: 0.5,
+            pan_l: Slewer::from_time(0.5, PAN_SLEW_SECONDS, sample_rate),
+            pan_r: Slewer::from_time(0.5, PAN_SLEW_SECONDS, sample_rate),
             delay_line_l: DelayLine::new(delay_len),
             delay_line_r: DelayLine::new(delay_len),
             pending_delays: None,
@@ -96,8 +101,10 @@ impl WaveformSynthesizer {
         for instr in &mut self.instrs {
             instr.set_sample_rate(sample_rate);
         }
-        // Keep the pan slew the same wall-clock duration at the new rate.
-        self.pan.set_step(1.0 / (PAN_SLEW_SECONDS * sample_rate));
+        // Keep the pan slews the same wall-clock duration at the new rate.
+        let pan_step = 1.0 / (PAN_SLEW_SECONDS * sample_rate);
+        self.pan_l.set_step(pan_step);
+        self.pan_r.set_step(pan_step);
 
         // Resize the Haas delay lines to the new 100 ms capacity, rescaling the current (and any
         // pending) delay *length* by the rate ratio so the physical widening time is preserved.
@@ -271,20 +278,24 @@ impl WaveformSynthesizer {
     /// The per-sample stereo stage: pan, optional Haas widening, and the bass-mono crossover.
     /// Consumes the voice-mixed `mono` sample and sets `val_l`/`val_r`.
     fn apply_stereo(&mut self, mono: Sample, config: &PerDeviceSettings) {
-        // Resolve this sample's pan gain split: slew toward the target when smoothing is on,
-        // otherwise jump straight to it (keeping the slewer in sync for a later toggle).
-        let pan = if config.smooth_pan {
-            self.pan.advance(self.pan_target)
+        // Resolve this sample's left/right pan gains: slew toward the targets when smoothing is on,
+        // otherwise jump straight to them (keeping the slewers in sync for a later toggle).
+        let (gl, gr) = if config.smooth_pan {
+            (
+                self.pan_l.advance(self.pan_l_target),
+                self.pan_r.advance(self.pan_r_target),
+            )
         } else {
-            self.pan.set(self.pan_target);
-            self.pan_target
+            self.pan_l.set(self.pan_l_target);
+            self.pan_r.set(self.pan_r_target);
+            (self.pan_l_target, self.pan_r_target)
         };
 
         // Narrow the f64 pan/volume gains to the sample width once, so the mix arithmetic is done
         // entirely in `Sample` (a no-op when `Sample = f64`).
         let vol = self.volume as Sample;
-        let gl = (1.0 - pan) as Sample;
-        let gr = pan as Sample;
+        let gl = gl as Sample;
+        let gr = gr as Sample;
 
         if !config.stereo_separation {
             self.val_l = mono * gl * vol;
@@ -327,14 +338,21 @@ impl WaveformSynthesizer {
         }
     }
 
-    /// Sets the stereo pan (0 = left, 1 = right), recomputing the Haas delay lines.
+    /// Sets the stereo pan from the frontend's left/right pan-split gains (centered = 0.5 each),
+    /// recomputing the Haas delay lines.
     ///
     /// The pan gains apply immediately unless [`PerDeviceSettings::smooth_pan`] is set, in which
-    /// case [`Self::apply_stereo`] slews them toward the new target over [`PAN_SLEW_SECONDS`].
-    /// Independently, under [`DelaySmoothing::HoldDuringNotes`] a delay-*length* change (which
-    /// would click in the middle of flowing audio) is deferred until the track has no notes
-    /// playing.
-    pub fn set_pan(&mut self, pan: f64, config: &PerDeviceSettings) {
+    /// case [`Self::apply_stereo`] slews them toward the new targets over [`PAN_SLEW_SECONDS`].
+    /// The Haas widening needs a pan *position*, not gains, so it is recovered from the split as
+    /// `pan_vol_r / (pan_vol_l + pan_vol_r)` (exact for a normalized split). Independently, under
+    /// [`DelaySmoothing::HoldDuringNotes`] a delay-*length* change (which would click in the middle
+    /// of flowing audio) is deferred until the track has no notes playing.
+    pub fn set_pan(&mut self, pan_vol_l: f64, pan_vol_r: f64, config: &PerDeviceSettings) {
+        let pan = if pan_vol_l + pan_vol_r > 0.0 {
+            pan_vol_r / (pan_vol_l + pan_vol_r)
+        } else {
+            0.5
+        };
         const SPEED_OF_SOUND: f64 = 343.0;
         let r = 3.0;
         let ear_x = 0.20;
@@ -362,7 +380,8 @@ impl WaveformSynthesizer {
             }
         }
         self.delay_line_r.gain = gain_r;
-        self.pan_target = pan;
+        self.pan_l_target = pan_vol_l;
+        self.pan_r_target = pan_vol_r;
     }
 
     /// Applies a deferred delay-length change once the track is note-free.
@@ -389,7 +408,7 @@ mod tests {
             ..PerDeviceSettings::neutral()
         };
         // Hard right gives the left delay line a non-zero length to rescale.
-        synth.set_pan(1.0, &config);
+        synth.set_pan(0.0, 1.0, &config);
         let delay_44k = synth.delay_line_l.delay();
         assert!(delay_44k > 0, "expected a non-zero Haas delay to rescale");
 
@@ -424,7 +443,7 @@ mod tests {
             config,
         );
         // Pan hard left.
-        synth.set_pan(0.0, config);
+        synth.set_pan(1.0, 0.0, config);
         let mut last = (0.0, 0.0);
         for _ in 0..8000 {
             synth.next_sample(config);
@@ -491,7 +510,7 @@ mod tests {
         assert!((synth.val_l - synth.val_r).abs() < 1e-9);
 
         // Pan hard right: the right channel must climb gradually, not jump.
-        synth.set_pan(1.0, &smooth);
+        synth.set_pan(0.0, 1.0, &smooth);
         synth.next_sample(&smooth);
         assert!(
             synth.val_r < 0.9,
@@ -512,7 +531,7 @@ mod tests {
         let mut synth2 = WaveformSynthesizer::new(sample_rate, 4);
         synth2.play(waveform, pitch, 1.0, &base);
         synth2.next_sample(&base);
-        synth2.set_pan(1.0, &base);
+        synth2.set_pan(0.0, 1.0, &base);
         synth2.next_sample(&base);
         assert!(
             (synth2.val_r - 1.0).abs() < 1e-9,
@@ -532,7 +551,7 @@ mod tests {
             ..PerDeviceSettings::neutral()
         };
         let mut synth = WaveformSynthesizer::new(sample_rate, 4);
-        synth.set_pan(0.0, &config); // hard left while silent: applies immediately
+        synth.set_pan(1.0, 0.0, &config); // hard left while silent: applies immediately
         let baseline_delay_r = synth.delay_line_r.delay();
 
         let waveform = Arc::new(Waveform::new(vec![1.0; 64], 440.0, sample_rate, true, 0));
@@ -546,7 +565,7 @@ mod tests {
             &config,
         );
         // Pan hard right mid-note: the delay change must be held back.
-        synth.set_pan(1.0, &config);
+        synth.set_pan(0.0, 1.0, &config);
         synth.next_sample(&config);
         assert_eq!(
             synth.delay_line_r.delay(),
@@ -580,7 +599,7 @@ mod tests {
             1.0,
             &immediate,
         );
-        synth.set_pan(0.0, &immediate);
+        synth.set_pan(1.0, 0.0, &immediate);
         assert_eq!(synth.delay_line_r.delay(), baseline_delay_r);
     }
 }

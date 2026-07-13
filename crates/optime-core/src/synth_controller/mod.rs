@@ -845,9 +845,13 @@ impl SynthController {
                 self.notes_on[track][key as usize] = 0;
             }
             // Track-level pan/detune apply to both sets: a track's voices may be split across them.
-            SynthEvent::TrackPan { track, pan } => {
-                self.synths[track].set_pan(pan, config);
-                self.mixer_synths[track].set_pan(pan, config);
+            SynthEvent::TrackPan {
+                track,
+                pan_vol_l,
+                pan_vol_r,
+            } => {
+                self.synths[track].set_pan(pan_vol_l, pan_vol_r, config);
+                self.mixer_synths[track].set_pan(pan_vol_l, pan_vol_r, config);
             }
             SynthEvent::TrackDetune { track, semitones } => {
                 self.synths[track].set_finetune(semitones, config.tuning());

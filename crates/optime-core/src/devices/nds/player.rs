@@ -200,10 +200,14 @@ impl NdsPlayer {
                 // domain per tick by `track_volume_db`, matching pokediamond, rather than applied
                 // as a separate linear mixer gain.
             }
-            MessageType::PanChange { pan } => events.push(SynthEvent::TrackPan {
-                track: msg.track_num,
-                pan: pan as f64 / 128.0,
-            }),
+            MessageType::PanChange { pan } => {
+                let p = pan as f64 / 128.0;
+                events.push(SynthEvent::TrackPan {
+                    track: msg.track_num,
+                    pan_vol_l: 1.0 - p,
+                    pan_vol_r: p,
+                });
+            }
             MessageType::PitchBend => {
                 let track = &self.sequence.tracks[msg.track_num];
                 // `pitch_bend` is already a signed byte (pokediamond `par._s8`, set by `0xC4`);

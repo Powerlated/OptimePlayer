@@ -114,6 +114,7 @@ Config (`PerDeviceSettings` for current console + live track mutes as `track_ena
 - **Naming = signal theory first.** "sample" = one amplitude value at an instant (sampling-theorem sense) = `Sample`(`= f64`); `Frame` = stereo `(Sample, Sample)`; whole decoded clip = `Waveform` (never "sample"). "sample" derivatives only for genuine sampling (`sample_rate`, per-sample loop, PCM sample data, "sampler"/"sampled" voice vs PSG). Renaming on these grounds → update surrounding comments same pass.
 - Keep `cargo clippy --workspace --all-targets` + `cargo fmt --all --check` clean.
 - Touching synth math → check vs matching pret decomp, add/adjust a transcription test pinning to the C.
+- **Commit messages: never mention Claude/AI.** No `Co-Authored-By: Claude`, no "Generated with Claude", no attribution of any kind. Applies to commit messages and PR bodies.
 
 ## Legacy app
 
