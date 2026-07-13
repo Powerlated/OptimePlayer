@@ -2295,6 +2295,20 @@ impl OptimeApp {
                  run from the source checkout.",
             );
         }
+
+        // Build provenance: which commit this binary was built from, and when. Embedded at compile
+        // time by build.rs (falls back to "unknown" when git isn't available).
+        ui.separator();
+        ui.label(
+            egui::RichText::new(format!(
+                "Build {} · {}",
+                env!("OPTIME_GIT_HASH"),
+                env!("OPTIME_BUILD_TIME"),
+            ))
+            .weak()
+            .small(),
+        )
+        .on_hover_text(format!("Commit date: {}", env!("OPTIME_COMMIT_DATE")));
     }
 
     /// The DC-offset stats for the current song, computed (and cached) on demand. `None` when no
