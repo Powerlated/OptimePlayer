@@ -408,7 +408,8 @@ pub struct MusicPlayerInfo {
 #[derive(Clone, Default)]
 pub struct SoundInfo {
     pub ident: u32,
-    /// `reverb`: the SoundMainRAM reverb pre-pass amount; Optime leaves it 0 (no HW reverb line).
+    /// `reverb`: the SoundMainRAM reverb pre-pass amount (0..=127). Set from the song header at
+    /// `MPlayStart`; the synth applies it as a mono feedback delay on the sampled bus.
     pub reverb: u8,
     pub maxChans: u8,
     pub masterVolume: u8,

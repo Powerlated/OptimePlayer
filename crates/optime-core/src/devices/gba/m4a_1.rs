@@ -335,31 +335,35 @@ fn control_command(
             // PORT: writes a raw GB sound register — consume the 2 operands, no effect.
             mp.tracks[t].cmdPtr += 2;
         }
-        0xCD => xcmd(mp, rom, t),
+        0xCD => xcmd(mp, si, rom, t),
         0xCE => end_tie(mp, si, rom, t),
         // FINE and every unassigned jump-table slot stop the track.
         _ => fine(mp, si, t),
     }
 }
 
-/// `ply_xcmd`: extended commands, dispatched into the `m4a` `ply_x*` handlers.
-fn xcmd(mp: &mut MusicPlayerInfo, rom: &[u8], t: usize) {
+/// `ply_xcmd` (`m4a.c:1523`): extended commands, dispatched via `gXcmdTable` into the `m4a`
+/// `ply_x*` handlers.
+fn xcmd(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize) {
     let n = arg(mp, rom, t);
-    let track = &mut mp.tracks[t];
     match n {
-        1 => m4a::ply_xwave(track, rom),
-        2 => m4a::ply_xtype(track, rom),
-        4 => m4a::ply_xatta(track, rom),
-        5 => m4a::ply_xdeca(track, rom),
-        6 => m4a::ply_xsust(track, rom),
-        7 => m4a::ply_xrele(track, rom),
-        8 => m4a::ply_xiecv(track, rom),
-        9 => m4a::ply_xiecl(track, rom),
-        10 => m4a::ply_xleng(track, rom),
-        11 => m4a::ply_xswee(track, rom),
-        12 => m4a::ply_xwait(track, rom),
-        13 => m4a::ply_xcmd_0D(track, rom),
-        _ => track.flags &= !MPT_FLG_EXIST,
+        1 => m4a::ply_xwave(&mut mp.tracks[t], rom),
+        2 => m4a::ply_xtype(&mut mp.tracks[t], rom),
+        4 => m4a::ply_xatta(&mut mp.tracks[t], rom),
+        5 => m4a::ply_xdeca(&mut mp.tracks[t], rom),
+        6 => m4a::ply_xsust(&mut mp.tracks[t], rom),
+        7 => m4a::ply_xrele(&mut mp.tracks[t], rom),
+        8 => m4a::ply_xiecv(&mut mp.tracks[t], rom),
+        9 => m4a::ply_xiecl(&mut mp.tracks[t], rom),
+        10 => m4a::ply_xleng(&mut mp.tracks[t], rom),
+        11 => m4a::ply_xswee(&mut mp.tracks[t], rom),
+        12 => m4a::ply_xwait(&mut mp.tracks[t], rom),
+        13 => m4a::ply_xcmd_0D(&mut mp.tracks[t], rom),
+        // gXcmdTable[0] and [3] are `ply_xxx`, which tail-calls gMPlayJumpTable[0] = `ply_fine`.
+        0 | 3 => fine(mp, si, t),
+        // Out-of-table indices (≥ 14) read past `gXcmdTable` in the C (UB); Optime safely stops
+        // the track by clearing its EXIST flag.
+        _ => mp.tracks[t].flags &= !MPT_FLG_EXIST,
     }
 }
 
