@@ -60,6 +60,12 @@ fn default_pop_slew_ms() -> f32 {
     2.0
 }
 
+/// The GBA's native mixer bit depth (8-bit); the serde fallback for `bitcrush_bits` so old saves
+/// load with the hardware value.
+fn default_bitcrush_bits() -> u32 {
+    8
+}
+
 impl InstrumentResampleSettings {
     /// Resolve the choice + per-kind cutoffs into the concrete [`InstrumentResampleMode`] the
     /// synthesis layer consumes. `half_taps` is half the (even) source-tap count, at least 1.
@@ -150,6 +156,15 @@ pub struct PerDeviceSettings {
     pub mixer_sample_rate: u32,
     /// Route sampled (non-PSG) voices through the intermediate mixer (then upsample to output).
     pub use_mixer: bool,
+    /// Quantize the intermediate mixer bus to [`Self::bitcrush_bits`]-bit signed (saturating),
+    /// emulating the GBA m4a software mixer's 8-bit DirectSound buffer (`m4a_1.s` `SoundMainRAM`).
+    /// Only engages when `use_mixer` is on. `#[serde(default)]` so old saves load as `false`.
+    #[serde(default)]
+    pub bitcrush_mixer: bool,
+    /// The signed bit depth the mixer bus is crushed to when [`Self::bitcrush_mixer`] is on (8 =
+    /// the GBA's native 8-bit). `#[serde(default)]` so old saves load as the 8-bit hardware value.
+    #[serde(default = "default_bitcrush_bits")]
+    pub bitcrush_bits: u32,
     pub psg_crunch_compensation: bool,
     /// Apply the MP2K (GBA) reverb: a mono-summing feedback delay on the sampled bus, using the
     /// song's `soundInfo.reverb` amount. Only engages when `use_mixer` is on (the sampled bus is
@@ -242,6 +257,8 @@ impl PerDeviceSettings {
             delay_smoothing_choice: 0,
             mixer_sample_rate: 48_000,
             use_mixer: false,
+            bitcrush_mixer: false,
+            bitcrush_bits: 8,
             psg_crunch_compensation: false,
             mp2k_reverb: false,
             remove_sample_dc_offset: false,
@@ -273,6 +290,8 @@ impl PerDeviceSettings {
             },
             use_mixer: true,
             mixer_sample_rate: 32768,
+            bitcrush_mixer: false,
+            bitcrush_bits: 8,
             psg_crunch_compensation: true,
             mp2k_reverb: false,
             remove_sample_dc_offset: false,
@@ -292,11 +311,11 @@ impl PerDeviceSettings {
         }
     }
 
-    /// The high-quality Game Boy Advance preset: the app's out-of-the-box GBA settings (mixer on at
+    /// The "Enhanced" Game Boy Advance preset: the app's out-of-the-box GBA settings (mixer on at
     /// the GBA-native 13379 Hz with crunchy output-Nyquist mixer upsample, clean sinc voices with
-    /// pop-smoothing, stereo separation and a deeper high-shelf). Shared by `Persisted::default`
-    /// (the app) and offline tools.
-    pub fn high_quality_gba() -> Self {
+    /// pop-smoothing, stereo separation and a deeper high-shelf). The polished counterpart to
+    /// [`Self::original_gba`]. Shared by `Persisted::default` (the app) and offline tools.
+    pub fn enhanced_gba() -> Self {
         Self {
             stereo_separation: true,
             force_stereo_separation: false,
@@ -317,6 +336,8 @@ impl PerDeviceSettings {
             },
             use_mixer: true,
             mixer_sample_rate: 13379,
+            bitcrush_mixer: false,
+            bitcrush_bits: 8,
             psg_crunch_compensation: true,
             mp2k_reverb: true,
             remove_sample_dc_offset: false,
@@ -331,6 +352,50 @@ impl PerDeviceSettings {
                 q: 0.5,
                 cutoff_hz: 12700.0,
                 gain_db: -20.0,
+            },
+            track_enables: all_tracks_enabled(),
+        }
+    }
+
+    /// The "Original" Game Boy Advance preset: the raw m4a signal chain with none of the enhancement
+    /// DSP. No stereo widening or smoothing, instrument→mixer linear interpolation, the intermediate
+    /// mixer at the GBA-native 13379 Hz crushed to 8-bit (as `m4a_1.s` renders DirectSound), a
+    /// nearest-neighbour mixer→output upsample, and no high-shelf EQ. The MP2K reverb pre-pass stays
+    /// on — it is part of the original engine, applied at the amount each song requests.
+    pub fn original_gba() -> Self {
+        Self {
+            stereo_separation: false,
+            force_stereo_separation: false,
+            smooth_pan: false,
+            delay_smoothing_choice: 0,
+            bass_mono: false,
+            bass_mono_freq: 200.0,
+            tuning_choice: 0,
+            pure_tonic: 0,
+            instrument_resample: InstrumentResampleSettings {
+                choice: InstrumentResampleChoice::Linear,
+                sinc_taps: 32,
+                psg_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+                sampler_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+                smooth_psg_pops: false,
+                smooth_sample_pops: false,
+                pop_slew_ms: 2.0,
+            },
+            use_mixer: true,
+            mixer_sample_rate: 13379,
+            bitcrush_mixer: true,
+            bitcrush_bits: 8,
+            psg_crunch_compensation: false,
+            mp2k_reverb: true,
+            remove_sample_dc_offset: false,
+            mixer_resample: MixerResampleSettings {
+                choice: InstrumentResampleChoice::Nearest,
+                sinc_taps: 32,
+                cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
+            },
+            shelf: HighShelf {
+                enabled: false,
+                ..HighShelf::default()
             },
             track_enables: all_tracks_enabled(),
         }

@@ -109,6 +109,14 @@ fn render_set(
     (l, r)
 }
 
+/// Quantizes one mixer-bus sample to `bits`-bit signed, saturating on overflow. Emulates the GBA
+/// m4a software mixer's 8-bit DirectSound PCM buffer (`m4a_1.s` `SoundMainRAM`): full scale is
+/// `2^(bits-1)`, so a value is rounded to the nearest of `2^bits` levels and clipped to the range.
+fn bitcrush_sample(x: Sample, bits: u32) -> Sample {
+    let scale = (1u32 << (bits.clamp(1, 16) - 1)) as Sample;
+    (x * scale).round().clamp(-scale, scale - 1.0) / scale
+}
+
 /// Cuts one-shot samples in a set that ran out (only the synthesizer knows their playback
 /// position), clearing their note-grid cells and reporting each ending to the device as feedback.
 fn cut_finished(
@@ -621,9 +629,16 @@ impl SynthController {
         // The MP2K reverb runs on the summed sampled bus at the mixer rate, before the bank upsamples
         // — matching the hardware, where the reverb pre-pass seeds the PCM buffer prior to DMA.
         let reverb_on = config.mp2k_reverb;
+        // The mixer bus is optionally crushed to N-bit here, at the mixer rate and after the reverb,
+        // mirroring m4a's 8-bit DirectSound buffer (the crushed samples are what would be DMA'd out).
+        let bitcrush = config.bitcrush_mixer.then_some(config.bitcrush_bits);
         let mut render = || {
             let (l, r) = render_set(mixer_synths, enables, config);
-            reverb.process(l, r, reverb_on)
+            let (l, r) = reverb.process(l, r, reverb_on);
+            match bitcrush {
+                Some(bits) => (bitcrush_sample(l, bits), bitcrush_sample(r, bits)),
+                None => (l, r),
+            }
         };
         self.bank.route(&mut render)
     }
@@ -983,5 +998,35 @@ mod transition_tests {
         for _ in 0..1000 {
             assert_eq!(t.advance(&mut Vec::new()), 1.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod bitcrush_tests {
+    use super::bitcrush_sample;
+
+    #[test]
+    fn quantizes_to_signed_levels() {
+        // 8-bit: full scale = 128 levels per side; 0 and exact half-scale survive unchanged.
+        assert_eq!(bitcrush_sample(0.0, 8), 0.0);
+        assert_eq!(bitcrush_sample(0.5, 8), 0.5);
+        // A value between two 1/128 steps snaps to the nearer one.
+        assert_eq!(bitcrush_sample(0.5 + 0.4 / 128.0, 8), 0.5);
+        assert_eq!(bitcrush_sample(0.5 + 0.6 / 128.0, 8), 0.5 + 1.0 / 128.0);
+    }
+
+    #[test]
+    fn saturates_on_overflow() {
+        // Overflow clips, it does not wrap: positive tops out just below +1, negative hits -1.
+        assert_eq!(bitcrush_sample(2.0, 8), 127.0 / 128.0);
+        assert_eq!(bitcrush_sample(1.0, 8), 127.0 / 128.0);
+        assert_eq!(bitcrush_sample(-2.0, 8), -1.0);
+        assert_eq!(bitcrush_sample(-1.0, 8), -1.0);
+    }
+
+    #[test]
+    fn lower_depth_is_coarser() {
+        // 4-bit: 8 levels per side, so 1/16 steps. 0.1 snaps to the nearest 1/8.
+        assert_eq!(bitcrush_sample(0.1, 4), (0.1f32 * 8.0).round() / 8.0);
     }
 }

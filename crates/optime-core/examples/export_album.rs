@@ -2,7 +2,7 @@
 //! stereo FLAC, loudness-normalized album-wide to -16 LUFS (EBU R128 / ITU-R BS.1770).
 //!
 //! Each track is rendered with the engine's high-quality preset for its console
-//! ([`PerDeviceSettings::high_quality_gba`] / [`PerDeviceSettings::high_quality_nintendo_ds`]),
+//! ([`PerDeviceSettings::enhanced_gba`] / [`PerDeviceSettings::high_quality_nintendo_ds`]),
 //! playing one loop then a 3-second fade — the same policy as the app's WAV export. Leading and
 //! trailing near-silence is trimmed from every track and a fixed `--max-silence` gap is inserted
 //! between songs, so the dead air between tracks is capped at that length.
@@ -272,7 +272,7 @@ fn main() -> ExitCode {
     // High-quality preset for the archive's console.
     let is_gba = data.as_any().downcast_ref::<GbaRom>().is_some();
     let config = if is_gba {
-        PerDeviceSettings::high_quality_gba()
+        PerDeviceSettings::enhanced_gba()
     } else {
         PerDeviceSettings::high_quality_nintendo_ds()
     };

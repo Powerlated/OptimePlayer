@@ -896,11 +896,11 @@ impl OptimeApp {
             let j = (self.rng % (i as u64 + 1)) as usize;
             out.swap(i, j);
         }
-        if let Some(k) = keep {
-            if let Some(pos) = out.iter().position(|t| t.same_song(k)) {
-                let item = out.remove(pos);
-                out.insert(0, item);
-            }
+        if let Some(k) = keep
+            && let Some(pos) = out.iter().position(|t| t.same_song(k))
+        {
+            let item = out.remove(pos);
+            out.insert(0, item);
         }
         out
     }
@@ -931,13 +931,13 @@ impl OptimeApp {
     /// Pushes a command plus the latest level state (config / paused / repeat) to the audio thread.
     fn send_command(&mut self, cmd: PlaybackCommand) {
         let config = self.config();
-        if let Some(audio) = &self.audio {
-            if let Ok(mut st) = audio.shared.lock() {
-                st.config = config;
-                st.paused = self.paused;
-                st.playback.repeat = self.p.repeat;
-                st.playback.commands.push_back(cmd);
-            }
+        if let Some(audio) = &self.audio
+            && let Ok(mut st) = audio.shared.lock()
+        {
+            st.config = config;
+            st.paused = self.paused;
+            st.playback.repeat = self.p.repeat;
+            st.playback.commands.push_back(cmd);
         }
     }
 
@@ -955,14 +955,14 @@ impl OptimeApp {
     fn restart(&mut self) {
         self.paused = false;
         let config = self.config();
-        if let Some(audio) = &self.audio {
-            if let Ok(mut st) = audio.shared.lock() {
-                let i = st.playback.index;
-                st.config = config;
-                st.paused = false;
-                st.playback.repeat = self.p.repeat;
-                st.playback.commands.push_back(PlaybackCommand::PlayAt(i));
-            }
+        if let Some(audio) = &self.audio
+            && let Ok(mut st) = audio.shared.lock()
+        {
+            let i = st.playback.index;
+            st.config = config;
+            st.paused = false;
+            st.playback.repeat = self.p.repeat;
+            st.playback.commands.push_back(PlaybackCommand::PlayAt(i));
         }
     }
 
@@ -989,10 +989,10 @@ impl OptimeApp {
 
     /// Pushes the (already-updated) repeat mode to the audio thread.
     fn push_repeat(&mut self) {
-        if let Some(audio) = &self.audio {
-            if let Ok(mut st) = audio.shared.lock() {
-                st.playback.repeat = self.p.repeat;
-            }
+        if let Some(audio) = &self.audio
+            && let Ok(mut st) = audio.shared.lock()
+        {
+            st.playback.repeat = self.p.repeat;
         }
     }
 
@@ -1164,10 +1164,10 @@ impl OptimeApp {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "file".to_owned());
-                    if let Ok(bytes) = std::fs::read(path) {
-                        if let Ok(mut slot) = inbox.lock() {
-                            *slot = Some((key, bytes));
-                        }
+                    if let Ok(bytes) = std::fs::read(path)
+                        && let Ok(mut slot) = inbox.lock()
+                    {
+                        *slot = Some((key, bytes));
                     }
                 }
             });
@@ -1291,15 +1291,15 @@ impl OptimeApp {
     /// window highlighted, the current tempo marking beneath it, then the scrolling roll.
     fn piano_roll_panel(&mut self, ui: &mut egui::Ui, snap: &VisSnapshot) {
         // Lazily (re)build the overview texture from the song loaded in `on_now_playing`.
-        if self.overview_tex.is_none() {
-            if let Some(ov) = &self.overview {
-                let img = crate::piano_roll::overview_image(ov, 1024, 72);
-                self.overview_tex = Some(ui.ctx().load_texture(
-                    "piano_overview",
-                    img,
-                    egui::TextureOptions::LINEAR,
-                ));
-            }
+        if self.overview_tex.is_none()
+            && let Some(ov) = &self.overview
+        {
+            let img = crate::piano_roll::overview_image(ov, 1024, 72);
+            self.overview_tex = Some(ui.ctx().load_texture(
+                "piano_overview",
+                img,
+                egui::TextureOptions::LINEAR,
+            ));
         }
 
         // The overview bar (whole track) with the on-screen window highlighted.
@@ -2037,6 +2037,38 @@ impl OptimeApp {
         let d = self.device_settings_mut();
         ui.heading("Settings");
         ui.label(format!("Settings are stored independently for each supported emulated device. You are currently editing the settings for: {device_name}"));
+        // GBA presets: a one-click swap of the whole settings block. "Enhanced" is the polished
+        // default; "Original" is the raw m4a chain (8-bit mixer, linear/nearest resampling, no DSP).
+        if is_gba {
+            ui.horizontal(|ui| {
+                ui.label("Presets:");
+                let te = d.track_enables;
+                if ui
+                    .button("Enhanced")
+                    .on_hover_text(
+                        "The polished default: stereo widening, clean sinc voices, crunchy mixer \
+                         upsample and a high-shelf de-harsher.",
+                    )
+                    .clicked()
+                {
+                    *d = PerDeviceSettings::enhanced_gba();
+                    d.track_enables = te;
+                }
+                if ui
+                    .button("Original")
+                    .on_hover_text(
+                        "The raw m4a signal chain: no stereo widening or smoothing, the intermediate \
+                         mixer at the GBA-native 13379 Hz crushed to 8-bit, nearest-neighbour mixer \
+                         upsample and no EQ.",
+                    )
+                    .clicked()
+                {
+                    *d = PerDeviceSettings::original_gba();
+                    d.track_enables = te;
+                }
+            });
+        }
+        ui.separator();
         ui.checkbox(
             &mut d.stereo_separation,
             "Stereo separation: Apply a stereo widener to panned instruments",
@@ -2192,6 +2224,22 @@ impl OptimeApp {
                     .suffix(" Hz")
                     .logarithmic(false),
             );
+            ui.add_enabled(
+                d.use_mixer,
+                egui::Checkbox::new(&mut d.bitcrush_mixer, "Bitcrush the mixer bus"),
+            )
+            .on_hover_text(
+                "Quantize the intermediate mixer bus to a reduced bit depth, the way the GBA's m4a \
+                    software mixer renders DirectSound into an 8-bit PCM buffer. Saturates (clips) on \
+                    overflow. Only the sampled bus is affected; PSG voices bypass the mixer.",
+            );
+            ui.add_enabled(
+                d.use_mixer && d.bitcrush_mixer,
+                egui::Slider::new(&mut d.bitcrush_bits, 1..=16)
+                    .text("Bit depth")
+                    .suffix("-bit"),
+            )
+            .on_hover_text("8-bit matches GBA hardware; lower is grittier.");
         }
         ui.separator();
 
@@ -2696,10 +2744,10 @@ impl OptimeApp {
                 // Same glyph either way (the outline heart isn't in egui's fonts); the
                 // active flag tints it accent when liked, white otherwise.
                 let heart = "❤";
-                if icon_button(ui, heart, small, 18.0, false, liked, current.is_some()).clicked() {
-                    if let Some(t) = current {
-                        self.p.library.toggle_liked(&t);
-                    }
+                if icon_button(ui, heart, small, 18.0, false, liked, current.is_some()).clicked()
+                    && let Some(t) = current
+                {
+                    self.p.library.toggle_liked(&t);
                 }
             });
             ui.add_space(6.0);

@@ -155,7 +155,7 @@ impl Default for Persisted {
             // The high-quality presets are owned by the engine (so offline tools share them); the
             // app's runtime-only piano-roll track mutes are injected per frame over these.
             nds: PerDeviceSettings::high_quality_nintendo_ds(),
-            gba: PerDeviceSettings::high_quality_gba(),
+            gba: PerDeviceSettings::enhanced_gba(),
         }
     }
 }
