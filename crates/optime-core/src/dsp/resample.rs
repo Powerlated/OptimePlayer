@@ -398,7 +398,7 @@ fn gather_impulse_simd(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32, f32) {
 
 /// The gather a read actually runs after resolving the global [`InstrumentResampleMode`] against
 /// the signal kind (a voice's sample, or the mixer bus).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EffectiveGather {
     Nearest,
     Linear,
@@ -417,9 +417,15 @@ pub(crate) enum EffectiveGather {
 /// hard ZOH edges are band-limited to the *output* Nyquist instead of being smoothed down to the
 /// (tiny) source Nyquist of an 8-sample loop, preserving their square character alias-free. The
 /// crunchy (OutputNyquist) mode additionally applies the user's per-kind cutoff slider.
+///
+/// PSG waveforms under **Linear** fall back to nearest-neighbour: the console's square/wave/noise
+/// channels output a stepped (zero-order-hold) signal, and linearly interpolating their few-sample
+/// loops would smear the hard edges away from the hardware sound. (The mixer bus passes `false`, so
+/// its own Linear stage is unaffected.)
 pub(crate) fn effective_gather(mode: InstrumentResampleMode, is_psg: bool) -> EffectiveGather {
     match mode {
         InstrumentResampleMode::NearestNeighbor => EffectiveGather::Nearest,
+        InstrumentResampleMode::Linear if is_psg => EffectiveGather::Nearest,
         InstrumentResampleMode::Linear => EffectiveGather::Linear,
         InstrumentResampleMode::SincSampleNyquist { .. } => EffectiveGather::Sinc {
             step_mode: is_psg,
@@ -1046,6 +1052,20 @@ mod tests {
         for (i, &l) in got.iter().enumerate() {
             assert!((l - i as f32).abs() < 1e-6, "sample {i}: got {l}");
         }
+    }
+
+    /// PSG voices fall back to nearest-neighbour under Linear (stepped hardware output); sampled
+    /// voices and the mixer bus (`is_psg = false`) still interpolate.
+    #[test]
+    fn linear_psg_falls_back_to_nearest() {
+        assert_eq!(
+            effective_gather(InstrumentResampleMode::Linear, true),
+            EffectiveGather::Nearest
+        );
+        assert_eq!(
+            effective_gather(InstrumentResampleMode::Linear, false),
+            EffectiveGather::Linear
+        );
     }
 
     /// Both sinc modes reconstruct a DC stream as flat DC at unity gain once the window fills.
