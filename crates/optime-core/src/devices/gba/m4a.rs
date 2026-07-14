@@ -619,6 +619,15 @@ pub struct SampleFreq {
     pub divFreq: i32,
 }
 
+/// The reverb portion of `m4aSoundMode` (m4a.c:439-445), which `MPlayStart` triggers via
+/// `if (songHeader->reverb & SOUND_MODE_REVERB_SET) m4aSoundMode(songHeader->reverb)` (m4a.c:661).
+/// Returns the 7-bit amount to store into `SoundInfo.reverb`, or `None` when the SET bit is clear
+/// (leaving the existing amount, exactly as `m4aSoundMode` only touches reverb when SET is present).
+pub fn reverb_from_song_header(song_reverb: u8) -> Option<u8> {
+    (u32::from(song_reverb) & SOUND_MODE_REVERB_SET != 0)
+        .then(|| (u32::from(song_reverb) & SOUND_MODE_REVERB_VAL) as u8)
+}
+
 // [m4a.c:611] MPlayStart — transliterated. `TrackStop` (asm) is a seam; the state reset is faithful.
 pub fn MPlayStart(mplayInfo: &mut MusicPlayerInfo, songHeader: SongHeader) {
     if mplayInfo.ident != ID_NUMBER {
@@ -663,7 +672,9 @@ pub fn MPlayStart(mplayInfo: &mut MusicPlayerInfo, songHeader: SongHeader) {
             i += 1;
         }
 
-        // (songHeader->reverb & SOUND_MODE_REVERB_SET → m4aSoundMode: reverb has no Optime effect)
+        // (songHeader->reverb & SOUND_MODE_REVERB_SET → m4aSoundMode: writes the 7-bit amount into
+        // gSoundInfo.reverb. Optime's SoundInfo is created after MPlayStart, so the player applies
+        // that step there — see `reverb_from_song_header`.)
         mplayInfo.ident = ID_NUMBER;
     }
 }

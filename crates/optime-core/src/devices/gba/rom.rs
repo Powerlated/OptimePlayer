@@ -38,6 +38,8 @@ pub struct SongHeader {
     pub track_count: u8,
     /// Player priority byte from the header.
     pub priority: u8,
+    /// Reverb byte from the header (`SOUND_MODE_REVERB_SET | amount`); `m4aSoundMode` applies it.
+    pub reverb: u8,
     /// Offset of the song's voicegroup (ToneData array).
     pub voicegroup: usize,
 }
@@ -122,6 +124,7 @@ fn parse_song_header(rom: &[u8], offset: usize) -> Option<SongHeader> {
         offset,
         track_count,
         priority: read_u8(rom, offset + 2),
+        reverb: read_u8(rom, offset + 3),
         voicegroup,
     })
 }

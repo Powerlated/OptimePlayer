@@ -151,6 +151,11 @@ pub struct PerDeviceSettings {
     /// Route sampled (non-PSG) voices through the intermediate mixer (then upsample to output).
     pub use_mixer: bool,
     pub psg_crunch_compensation: bool,
+    /// Apply the MP2K (GBA) reverb: a mono-summing feedback delay on the sampled bus, using the
+    /// song's `soundInfo.reverb` amount. Only engages when `use_mixer` is on (the sampled bus is
+    /// isolated there). `#[serde(default)]` so old saves load as `false`.
+    #[serde(default)]
+    pub mp2k_reverb: bool,
     /// Subtract each decoded sample's DC offset (GBA DirectSound only) to match the console's
     /// AC-coupled output. Off by default — it changes the raw sample data, so it's opt-in.
     /// `#[serde(default)]` so old saves load as `false`.
@@ -238,6 +243,7 @@ impl PerDeviceSettings {
             mixer_sample_rate: 48_000,
             use_mixer: false,
             psg_crunch_compensation: false,
+            mp2k_reverb: false,
             remove_sample_dc_offset: false,
             track_enables: all_tracks_enabled(),
         }
@@ -268,6 +274,7 @@ impl PerDeviceSettings {
             use_mixer: true,
             mixer_sample_rate: 32768,
             psg_crunch_compensation: true,
+            mp2k_reverb: false,
             remove_sample_dc_offset: false,
             mixer_resample: MixerResampleSettings {
                 choice: InstrumentResampleChoice::SincSampleNyquist,
@@ -311,6 +318,7 @@ impl PerDeviceSettings {
             use_mixer: true,
             mixer_sample_rate: 13379,
             psg_crunch_compensation: true,
+            mp2k_reverb: true,
             remove_sample_dc_offset: false,
             mixer_resample: MixerResampleSettings {
                 choice: InstrumentResampleChoice::SincOutputNyquist,

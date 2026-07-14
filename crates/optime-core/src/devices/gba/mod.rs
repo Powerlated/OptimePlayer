@@ -102,6 +102,9 @@ pub struct GbaPlayer {
     noise_waveforms: [Arc<Waveform>; 2],
     /// Whether to subtract each DirectSound sample's DC offset (refreshed from config each tick).
     remove_dc: bool,
+    /// Last MP2K reverb amount emitted as `ReverbAmount`, so it is sent once (and again if it ever
+    /// changes). `None` until the first tick emits the song's amount.
+    last_reverb: Option<u8>,
     finish_reported: bool,
 }
 
@@ -117,6 +120,7 @@ impl GbaPlayer {
         let mut song = SongHeader {
             trackCount: header.track_count,
             priority: header.priority,
+            reverb: header.reverb,
             tone: header.voicegroup as u32,
             ..SongHeader::default()
         };
@@ -133,11 +137,16 @@ impl GbaPlayer {
         };
         m4a::MPlayStart(&mut mp, song);
 
-        let si = SoundInfo {
+        let mut si = SoundInfo {
             maxChans: MAX_DS_CHANNELS as u8,
             masterVolume: MASTER_VOLUME,
             ..SoundInfo::default()
         };
+        // `MPlayStart` runs `m4aSoundMode(songHeader->reverb)` when the SET bit is present; its only
+        // Optime-visible effect is storing the reverb amount, applied here since `si` is built after.
+        if let Some(reverb) = m4a::reverb_from_song_header(header.reverb) {
+            si.reverb = reverb;
+        }
 
         Some(GbaPlayer {
             rom: data,
@@ -152,6 +161,7 @@ impl GbaPlayer {
             square_waveforms: build_square_waveforms(),
             noise_waveforms: build_noise_waveforms(),
             remove_dc: false,
+            last_reverb: None,
             finish_reported: false,
         })
     }
@@ -167,6 +177,15 @@ impl GbaPlayer {
         events: &mut Vec<SynthEvent>,
     ) {
         self.remove_dc = config.remove_sample_dc_offset;
+
+        // Announce the song's MP2K reverb amount once (and again only if it ever changes). The
+        // controller applies it as a mono feedback delay on the sampled bus.
+        if self.last_reverb != Some(self.si.reverb) {
+            self.last_reverb = Some(self.si.reverb);
+            events.push(SynthEvent::ReverbAmount {
+                amount: self.si.reverb,
+            });
+        }
 
         // Reap voices the synthesizer stopped on its own (one-shot samples that ran out): detach the
         // hardware channel so the engine stops driving it.

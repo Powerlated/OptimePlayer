@@ -2161,6 +2161,15 @@ impl OptimeApp {
                     makes when its envelope opens or closes. See \"Stats for Nerds\" for how far \
                     each sample is shifted. Off preserves the raw ROM data.",
                 );
+            ui.add_enabled(
+                d.use_mixer,
+                egui::Checkbox::new(&mut d.mp2k_reverb, "MP2K reverb"),
+            )
+            .on_hover_text(
+                "Apply the GBA sound engine's built-in reverb (the SoundMainRAM pre-pass): a \
+                    mono feedback echo on the sampled bus, using the amount each song requests. \
+                    Requires the intermediate mixer (below). PSG voices stay dry, as on hardware.",
+            );
         }
         ui.separator();
         ui.label("Mixer settings");

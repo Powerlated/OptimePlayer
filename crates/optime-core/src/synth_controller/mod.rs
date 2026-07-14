@@ -22,6 +22,7 @@
 
 mod config;
 pub mod messages;
+mod reverb;
 mod vis;
 
 pub use config::{DEFAULT_POP_SLEW_SECONDS, DelaySmoothing, HighShelf, PopSmoothing};
@@ -33,6 +34,7 @@ use crate::dsp::resample::StreamResampler;
 use crate::synth::MAX_BLOCK;
 use crate::waveform::{Frame, InstrumentResampleMode, Sample};
 use crate::{PerDeviceSettings, TRACK_COUNT, WaveformSynthesizer};
+use reverb::Reverb;
 
 /// PSG crunch-compensation low-pass — a cascade of identical RBJ low-pass biquad sections fit
 /// (MATLAB, `scripts/fit_compensation.m`, fed by `examples/mixer_resample_response.rs`) to the
@@ -420,6 +422,9 @@ pub struct SynthController {
     psg_comp_l: BiquadFilter,
     psg_comp_r: BiquadFilter,
     psg_comp_was_active: bool,
+    /// MP2K reverb on the sampled bus (amount from the device's `ReverbAmount` event, gated by
+    /// `config.mp2k_reverb`).
+    reverb: Reverb,
 }
 
 impl SynthController {
@@ -451,6 +456,7 @@ impl SynthController {
             psg_comp_l: psg_comp_filter(sample_rate),
             psg_comp_r: psg_comp_filter(sample_rate),
             psg_comp_was_active: false,
+            reverb: Reverb::new(),
         })
     }
 
@@ -601,6 +607,8 @@ impl SynthController {
                 synth.set_sample_rate(rate);
             }
         }
+        // The reverb delay is one VBlank of samples at the mixer rate (no-op when unchanged).
+        self.reverb.set_rate(self.bank.rate);
     }
 
     /// One upsampled stereo sample routed from the mixer set through the bank: the resampler pulls
@@ -608,8 +616,15 @@ impl SynthController {
     /// window consumes them.
     fn route_mixer(&mut self, config: &PerDeviceSettings) -> Frame {
         let mixer_synths = &mut self.mixer_synths;
+        let reverb = &mut self.reverb;
         let enables = &config.track_enables;
-        let mut render = || render_set(mixer_synths, enables, config);
+        // The MP2K reverb runs on the summed sampled bus at the mixer rate, before the bank upsamples
+        // — matching the hardware, where the reverb pre-pass seeds the PCM buffer prior to DMA.
+        let reverb_on = config.mp2k_reverb;
+        let mut render = || {
+            let (l, r) = render_set(mixer_synths, enables, config);
+            reverb.process(l, r, reverb_on)
+        };
         self.bank.route(&mut render)
     }
 
@@ -863,6 +878,7 @@ impl SynthController {
                 self.synths[track].set_finetune(semitones, config.tuning());
                 self.mixer_synths[track].set_finetune(semitones, config.tuning());
             }
+            SynthEvent::ReverbAmount { amount } => self.reverb.set_amount(amount),
             SynthEvent::Looped => self.transition.on_loop(&mut self.messages),
             SynthEvent::Ended => self.transition.on_end(&mut self.messages),
         }

@@ -87,6 +87,10 @@ pub enum SynthEvent {
     },
     /// Track-wide pitch offset in semitones (DS pitch-bend wheel).
     TrackDetune { track: usize, semitones: f64 },
+    /// The MP2K reverb amount for the current song (0..=127, hardware `soundInfo.reverb` units).
+    /// The controller applies it as a mono-summing feedback delay on the sampled bus; only the
+    /// GBA emits this. `0` disables the reverb stage.
+    ReverbAmount { amount: u8 },
     /// The sequence jumped backward (loop point) — used for loop counting.
     Looped,
     /// Every track has ended; the song is over.
