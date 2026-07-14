@@ -64,12 +64,9 @@ fn resample_bus(bus: &[(f32, f32)], mode: InstrumentResampleMode) -> Vec<f32> {
         idx += 1;
         s
     };
-    (0..n_out)
-        .map(|_| {
-            let (l, r) = rs.next(&mut pull);
-            (l + r) * 0.5
-        })
-        .collect()
+    let mut out = vec![(0.0f32, 0.0f32); n_out];
+    rs.process(&mut out, &mut pull);
+    out.iter().map(|&(l, r)| (l + r) * 0.5).collect()
 }
 
 fn main() {

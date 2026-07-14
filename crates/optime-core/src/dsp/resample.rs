@@ -804,61 +804,81 @@ impl StreamResampler {
         }
     }
 
-    /// Produces one output stereo sample, pulling mixer-rate input from `next_in` as the read
-    /// window requires it.
-    pub fn next(&mut self, next_in: &mut impl FnMut() -> Frame) -> Frame {
-        let out = match self.gather {
-            EffectiveGather::Nearest => {
-                // Zero-order hold: the most recent input at or before `pos`.
-                let idx = self.pos_int;
-                self.fill_to(idx, next_in);
-                (Self::at(&self.ring_l, idx), Self::at(&self.ring_r, idx))
-            }
-            EffectiveGather::Linear => {
-                let i = self.pos_int;
-                let frac = self.pos_frac;
-                self.fill_to(i + 1, next_in);
-                let lerp = |ring: &[f32; RING]| -> Sample {
-                    let a = Self::at(ring, i);
-                    let b = Self::at(ring, i + 1);
-                    a + (b - a) * frac
-                };
-                (lerp(&self.ring_l), lerp(&self.ring_r))
-            }
-            EffectiveGather::Sinc { step_mode, .. } => {
-                // Clone the (cheap, half-width-only) table handle so the pull loop can borrow
-                // `self` mutably while staging the window.
-                let tables = self.tables.clone().expect("sinc gather has tables");
-                let p = tables.half_taps as i64;
-                // Express the read position as a small synthetic offset in `[P, P+1)`: the exact
-                // integer part lives in `pos_int`, so the kernel never sees a large float. Its own
-                // `tap_window` then yields `k_lo = 0`, aligned with the absolute window we stage.
-                let syn_pos = tables.half_taps as f32 + self.pos_frac;
-                let (syn_lo, syn_hi) = tap_window(&tables, syn_pos);
-                debug_assert_eq!(syn_lo, 0);
-                let n = (syn_hi - syn_lo + 1) as usize;
-                let k_lo = self.pos_int - p; // absolute index of the first staged tap (src[0])
-                self.fill_to(k_lo + n as i64 - 1, next_in);
-                let mut buf_l = [0.0f32; GATHER_BUF_LEN];
-                let mut buf_r = [0.0f32; GATHER_BUF_LEN];
-                for (j, (sl, sr)) in buf_l[..n].iter_mut().zip(&mut buf_r[..n]).enumerate() {
-                    let k = k_lo + j as i64;
-                    *sl = Self::at(&self.ring_l, k);
-                    *sr = Self::at(&self.ring_r, k);
-                }
-                (
-                    resample_sinc(&tables, &buf_l[..n], syn_pos, self.fc, step_mode),
-                    resample_sinc(&tables, &buf_r[..n], syn_pos, self.fc, step_mode),
-                )
-            }
-        };
-        // Advance the read position, keeping the fraction in `[0, 1)` and folding whole samples
-        // into the exact `pos_int` counter so nothing accumulates as an ever-growing float.
+    /// Advances the read position by one output sample, keeping the fraction in `[0, 1)` and folding
+    /// whole samples into the exact `pos_int` counter so nothing accumulates as an ever-growing float.
+    #[inline]
+    fn advance(&mut self) {
         self.pos_frac += self.step;
         let carry = self.pos_frac.floor();
         self.pos_int += carry as i64;
         self.pos_frac -= carry;
-        out
+    }
+
+    /// Fills `out` with output stereo samples, pulling mixer-rate input from `next_in` as the read
+    /// window requires it.
+    ///
+    /// Block-only: the gather is matched and its per-mode setup (the sinc table handle, half-tap
+    /// count, and cutoff) is hoisted out of the per-sample loop, so a whole buffer's worth of output
+    /// is produced with one dispatch. Output is bit-identical regardless of how the caller chunks it
+    /// (the same input is pulled in the same order and the position advances identically), so a
+    /// single `process(&mut buf, cb)` equals repeated one-sample calls.
+    pub fn process(&mut self, out: &mut [Frame], next_in: &mut impl FnMut() -> Frame) {
+        match self.gather {
+            EffectiveGather::Nearest => {
+                for o in out.iter_mut() {
+                    // Zero-order hold: the most recent input at or before `pos`.
+                    let idx = self.pos_int;
+                    self.fill_to(idx, next_in);
+                    *o = (Self::at(&self.ring_l, idx), Self::at(&self.ring_r, idx));
+                    self.advance();
+                }
+            }
+            EffectiveGather::Linear => {
+                for o in out.iter_mut() {
+                    let i = self.pos_int;
+                    let frac = self.pos_frac;
+                    self.fill_to(i + 1, next_in);
+                    let lerp = |ring: &[f32; RING]| -> Sample {
+                        let a = Self::at(ring, i);
+                        let b = Self::at(ring, i + 1);
+                        a + (b - a) * frac
+                    };
+                    *o = (lerp(&self.ring_l), lerp(&self.ring_r));
+                    self.advance();
+                }
+            }
+            EffectiveGather::Sinc { step_mode, .. } => {
+                // Resolve the (cheap, half-width-only) table handle and cutoff once per block; the
+                // pull loop then borrows `self` mutably while staging each window.
+                let tables = self.tables.clone().expect("sinc gather has tables");
+                let p = tables.half_taps as i64;
+                let fc = self.fc;
+                let mut buf_l = [0.0f32; GATHER_BUF_LEN];
+                let mut buf_r = [0.0f32; GATHER_BUF_LEN];
+                for o in out.iter_mut() {
+                    // Express the read position as a small synthetic offset in `[P, P+1)`: the exact
+                    // integer part lives in `pos_int`, so the kernel never sees a large float. Its
+                    // own `tap_window` then yields `k_lo = 0`, aligned with the absolute window we
+                    // stage.
+                    let syn_pos = tables.half_taps as f32 + self.pos_frac;
+                    let (syn_lo, syn_hi) = tap_window(&tables, syn_pos);
+                    debug_assert_eq!(syn_lo, 0);
+                    let n = (syn_hi - syn_lo + 1) as usize;
+                    let k_lo = self.pos_int - p; // absolute index of the first staged tap (src[0])
+                    self.fill_to(k_lo + n as i64 - 1, next_in);
+                    for (j, (sl, sr)) in buf_l[..n].iter_mut().zip(&mut buf_r[..n]).enumerate() {
+                        let k = k_lo + j as i64;
+                        *sl = Self::at(&self.ring_l, k);
+                        *sr = Self::at(&self.ring_r, k);
+                    }
+                    *o = (
+                        resample_sinc(&tables, &buf_l[..n], syn_pos, fc, step_mode),
+                        resample_sinc(&tables, &buf_r[..n], syn_pos, fc, step_mode),
+                    );
+                    self.advance();
+                }
+            }
+        }
     }
 }
 
@@ -1028,7 +1048,8 @@ mod tests {
             (v, -v)
         };
         // pos = 0, .25, .5, .75 → floor 0 → input[0]; then 1.0,1.25,.. → input[1]; ...
-        let got: Vec<Frame> = (0..12).map(|_| rs.next(&mut pull)).collect();
+        let mut got = [(0.0f32, 0.0f32); 12];
+        rs.process(&mut got, &mut pull);
         for (i, &(l, r)) in got.iter().enumerate() {
             let expected = inputs[i / 4];
             assert_eq!(l, expected, "sample {i}");
@@ -1048,8 +1069,9 @@ mod tests {
             (v, 0.0)
         };
         // pos = 0, .5, 1, 1.5, 2 → 0, 1, 2, 3, 4 (left channel).
-        let got: Vec<Sample> = (0..5).map(|_| rs.next(&mut pull).0).collect();
-        for (i, &l) in got.iter().enumerate() {
+        let mut got = [(0.0f32, 0.0f32); 5];
+        rs.process(&mut got, &mut pull);
+        for (i, &(l, _)) in got.iter().enumerate() {
             assert!((l - i as f32).abs() < 1e-6, "sample {i}: got {l}");
         }
     }
@@ -1082,12 +1104,44 @@ mod tests {
             let mut rs = StreamResampler::new();
             rs.set(8000.0, 48000.0, mode);
             let mut pull = || (1.0, 0.5);
-            let mut last = (0.0, 0.0);
-            for _ in 0..2000 {
-                last = rs.next(&mut pull);
-            }
+            let mut buf = [(0.0f32, 0.0f32); 2000];
+            rs.process(&mut buf, &mut pull);
+            let last = buf[1999];
             assert!((last.0 - 1.0).abs() < 1e-3, "left DC gain off: {}", last.0);
             assert!((last.1 - 0.5).abs() < 1e-3, "right DC gain off: {}", last.1);
         }
+    }
+
+    /// The block API is chunk-invariant: one `process` over N samples equals splitting it into
+    /// arbitrary sub-blocks, since input is pulled in the same order and the position advances the
+    /// same way. Checked here for a sinc gather at a non-integer ratio (the interesting case).
+    #[test]
+    fn process_is_chunk_invariant() {
+        let mode = InstrumentResampleMode::SincSampleNyquist { half_taps: 16 };
+        let make = || {
+            let mut rs = StreamResampler::new();
+            rs.set(13379.0, 32768.0, mode);
+            rs
+        };
+        // A deterministic pseudo-random stereo stream so successive inputs differ.
+        let stream = |seed: &mut u32| {
+            *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let l = (*seed >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
+            (l, -l)
+        };
+
+        let mut whole = [(0.0f32, 0.0f32); 500];
+        let mut s = 1;
+        make().process(&mut whole, &mut || stream(&mut s));
+
+        let mut chunked = [(0.0f32, 0.0f32); 500];
+        let mut s2 = 1;
+        let mut rs = make();
+        let mut pull = || stream(&mut s2);
+        for chunk in chunked.chunks_mut(37) {
+            rs.process(chunk, &mut pull);
+        }
+
+        assert_eq!(whole, chunked);
     }
 }

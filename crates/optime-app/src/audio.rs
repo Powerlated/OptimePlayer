@@ -332,33 +332,45 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         device_rate,
         InstrumentResampleMode::SincSampleNyquist { half_taps: 8 },
     );
+    // The block resampler fills a scratch buffer of engine→device frames per chunk; the per-frame
+    // gain ramp is then applied while writing into the interleaved output.
+    const CHUNK: usize = 256;
+    let mut scratch = [(0.0f32, 0.0f32); CHUNK];
     if channels == 2 {
-        for frame in data.chunks_exact_mut(2) {
-            let (l, r) = resampler.next(&mut || controller.next_sample(config));
-            let g = ramp.next();
-            frame[0] = l * g;
-            frame[1] = r * g;
+        for block in data.chunks_mut(2 * CHUNK) {
+            let frames = &mut scratch[..block.len() / 2];
+            resampler.process(frames, &mut || controller.next_sample(config));
+            for (out, &(l, r)) in block.chunks_exact_mut(2).zip(frames.iter()) {
+                let g = ramp.next();
+                out[0] = l * g;
+                out[1] = r * g;
+            }
         }
         ramp.store(st);
         update_meters(st, t0, data.len() / 2);
         return;
     }
-    for frame in data.chunks_mut(channels.max(1)) {
-        let (l, r) = resampler.next(&mut || controller.next_sample(config));
-        let g = ramp.next();
-        let (l, r) = (l * g, r * g);
-        match frame.len() {
-            0 => {}
-            1 => frame[0] = (l + r) * 0.5,
-            _ => {
-                frame[0] = l;
-                frame[1] = r;
-                for s in &mut frame[2..] {
-                    *s = 0.0;
+    let frames_per_call = channels.max(1);
+    for block in data.chunks_mut(frames_per_call * CHUNK) {
+        let n = block.len() / frames_per_call;
+        let frames = &mut scratch[..n];
+        resampler.process(frames, &mut || controller.next_sample(config));
+        for (frame, &(l, r)) in block.chunks_mut(frames_per_call).zip(frames.iter()) {
+            let g = ramp.next();
+            let (l, r) = (l * g, r * g);
+            match frame.len() {
+                0 => {}
+                1 => frame[0] = (l + r) * 0.5,
+                _ => {
+                    frame[0] = l;
+                    frame[1] = r;
+                    for s in &mut frame[2..] {
+                        *s = 0.0;
+                    }
                 }
             }
         }
     }
     ramp.store(st);
-    update_meters(st, t0, data.len() / channels.max(1));
+    update_meters(st, t0, data.len() / frames_per_call);
 }

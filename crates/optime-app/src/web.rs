@@ -50,12 +50,12 @@ pub fn download(filename: &str, bytes: &[u8]) {
         return;
     };
 
-    if let Ok(anchor) = document.create_element("a") {
-        if let Ok(anchor) = anchor.dyn_into::<web_sys::HtmlAnchorElement>() {
-            anchor.set_href(&url);
-            anchor.set_download(filename);
-            anchor.click();
-        }
+    if let Ok(anchor) = document.create_element("a")
+        && let Ok(anchor) = anchor.dyn_into::<web_sys::HtmlAnchorElement>()
+    {
+        anchor.set_href(&url);
+        anchor.set_download(filename);
+        anchor.click();
     }
     let _ = web_sys::Url::revoke_object_url(&url);
 }

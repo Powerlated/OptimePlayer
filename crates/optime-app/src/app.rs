@@ -581,10 +581,10 @@ impl OptimeApp {
             let key = stem.to_owned();
             let url = stem.to_string();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Some(bytes) = crate::web::fetch_bytes(&url).await {
-                    if let Ok(mut slot) = inbox.lock() {
-                        *slot = Some((key, bytes));
-                    }
+                if let Some(bytes) = crate::web::fetch_bytes(&url).await
+                    && let Ok(mut slot) = inbox.lock()
+                {
+                    *slot = Some((key, bytes));
                 }
             });
         }

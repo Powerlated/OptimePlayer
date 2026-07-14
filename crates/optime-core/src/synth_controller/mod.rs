@@ -192,9 +192,13 @@ impl Bank {
         rate_change
     }
 
-    /// One upsampled stereo sample, pulling the mixer-rate bus from `render` on demand.
+    /// One upsampled stereo sample, pulling the mixer-rate bus from `render` on demand. The stream
+    /// resampler is block-only; here it is driven one output sample at a time (the mixer bus is
+    /// consumed per output sample as the device clock advances).
     fn route(&mut self, render: &mut impl FnMut() -> Frame) -> Frame {
-        self.resampler.next(render)
+        let mut out = [(0.0, 0.0)];
+        self.resampler.process(&mut out, render);
+        out[0]
     }
 }
 
