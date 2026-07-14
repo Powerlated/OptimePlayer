@@ -62,14 +62,20 @@ const MAX_DS_CHANNELS: usize = m4a::MAX_DIRECTSOUND_CHANNELS;
 /// `SOUND_MODE_MASVOL` value every Pokémon game passes to `m4aSoundMode`.
 const MASTER_VOLUME: u8 = 12;
 
-/// Overall gain on emitted voice volumes, bringing the natively-quiet GBA mix up to roughly match
-/// the NDS backend's level.
-const GBA_OUTPUT_GAIN: f64 = 2.0;
+/// The output level of the faithful `m4a_1.s` software mixer (`SoundMainRAM`). Each DirectSound
+/// channel accumulates `(envVolSide · s) >> 8` (`s` ∈ [−128, 127]) into an 8-bit (±128) PCM buffer,
+/// so on each output side it reaches `envVolSide / 256` of full scale — a single max-volume channel
+/// spans full scale. Optime carries this as one voice `volume = (envVolLeft + envVolRight) / 256`,
+/// which the panner splits back across the two sides; the split preserves the sum, so the per-side
+/// levels (and thus the dBFS) match the hardware mixer. See `ds_voice_level_matches_pokeemerald`.
+const DS_MIXER_FULL_SCALE: f64 = 256.0;
 
-/// Linear gain of a full-scale CGB channel relative to the DirectSound scale (the two paths meet at
-/// the 10-bit DAC ~1/8 apart; our PSG sample data is ±0.5, so 0.25 lands a full CGB channel at
-/// ±0.125 of a full DS voice).
-const CGB_GAIN: f64 = 0.25;
+/// PSG (CGB) channels are summed with DirectSound at the analog DAC, *outside* the `m4a_1.s`
+/// software mixer, so their relative level is a hardware analog balance rather than a mixer figure.
+/// Optime places a full-scale PSG channel at a quarter of output full scale (the classic GBA
+/// PSG:DirectSound ratio). PSG sample data is ±0.5, so the `env → volume` scalar tops out at `0.5`
+/// (`0.5 · 0.5 = 0.25`), putting a full PSG channel a factor of 4 below a full DirectSound one.
+const CGB_FULL_SCALE_GAIN: f64 = 0.5;
 
 /// The synth-side identity of a hardware channel slot: which voice it drives and what we last told
 /// the [`SynthController`](crate::SynthController) about it.
@@ -347,8 +353,7 @@ impl GbaPlayer {
                 continue;
             }
             let volume = (f64::from(c.envelopeVolumeLeft) + f64::from(c.envelopeVolumeRight))
-                / 512.0
-                * GBA_OUTPUT_GAIN;
+                / DS_MIXER_FULL_SCALE;
             let rate = ds_rate(c.type_, c.frequency);
             let released = c.statusFlags & m4a::SOUND_CHANNEL_SF_STOP != 0;
             update_voice(events, &mut slot, volume, rate, released);
@@ -368,7 +373,7 @@ impl GbaPlayer {
                 self.cgb_slots[i] = None;
                 continue;
             }
-            let volume = f64::from(c.envelopeVolume.min(15)) / 15.0 * CGB_GAIN * GBA_OUTPUT_GAIN;
+            let volume = f64::from(c.envelopeVolume.min(15)) / 15.0 * CGB_FULL_SCALE_GAIN;
             let rate = cgb_data_rate(c.type_ & TONEDATA_TYPE_CGB, c.frequency);
             let released = c.statusFlags & m4a::SOUND_CHANNEL_SF_STOP != 0;
             update_voice(events, &mut slot, volume, rate, released);
@@ -599,5 +604,75 @@ impl crate::devices::SoundData for GbaRom {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The per-side output byte the `m4a_1.s` DirectSound mixer (`SoundMainRAM`, inner loop
+    /// `_081DD0B0`) writes for one channel into a freshly cleared PCM buffer: `(envVolSide · s) >> 8`
+    /// (`mul` then `bic …, 0xFF0000` then the rotate-accumulate keep only the high byte of the
+    /// 16-bit product). The buffer is signed 8-bit, so this is the channel's contribution in units of
+    /// full scale = ±128.
+    fn mixer_output_byte(env_vol_side: u8, sample: i8) -> i32 {
+        (i32::from(env_vol_side) * i32::from(sample)) >> 8
+    }
+
+    /// The DirectSound voice level emitted by [`GbaPlayer::emit_updates`] carries the *summed* L+R
+    /// gain (the panner splits it back, preserving the sum). Pinned here against the reference
+    /// mixer: for any `(envVolLeft, envVolRight)` and sample, the synth's summed output
+    /// `sample_norm · volume` equals the mixer's summed normalized output (both sides), to within the
+    /// mixer's per-side `>> 8` truncation.
+    #[test]
+    fn ds_voice_level_matches_pokeemerald() {
+        for env_l in [0u8, 1, 32, 100, 180, 206, 254] {
+            for env_r in [0u8, 1, 32, 100, 180, 206, 254] {
+                // The exact expression from `emit_updates`.
+                let volume = (f64::from(env_l) + f64::from(env_r)) / DS_MIXER_FULL_SCALE;
+                for sample in [-128i8, -100, -1, 0, 1, 64, 127] {
+                    let sample_norm = f64::from(sample) / 128.0;
+                    let synth_sum = sample_norm * volume;
+                    // Reference: both channels' bytes, normalized to full scale (±128).
+                    let reference_sum = (f64::from(mixer_output_byte(env_l, sample))
+                        + f64::from(mixer_output_byte(env_r, sample)))
+                        / 128.0;
+                    // Each side's `>> 8` floors away up to 1 PCM8 LSB (= 1/128 of full scale); two
+                    // sides ⇒ tolerance just over 2/128.
+                    let tol = 2.0 / 128.0 + 1e-9;
+                    assert!(
+                        (synth_sum - reference_sum).abs() <= tol,
+                        "env_l={env_l} env_r={env_r} sample={sample}: \
+                         synth={synth_sum} reference={reference_sum}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A single max-volume DirectSound channel (both sides near the 8-bit ceiling) reaches essentially
+    /// full scale on each output side — the invariant the mixer's `(envVolSide · s) >> 8` into a ±128
+    /// buffer enforces, and the reason the emitted `volume` divides by exactly 256.
+    #[test]
+    fn full_ds_channel_spans_full_scale() {
+        // Max side volume with the game's master (12): rightVolume 255 · uvol((12+1)·255>>4=207)>>8.
+        let env = ((255u32 * ((13 * 255) >> 4)) >> 8) as u8; // == 206
+        let volume = (f64::from(env) + f64::from(env)) / DS_MIXER_FULL_SCALE;
+        // Full-scale sample ±1.0, centred (pan split 0.5/0.5) ⇒ per-side peak = 0.5 · volume.
+        let per_side_peak = 0.5 * volume;
+        assert!(
+            (0.75..=1.0).contains(&per_side_peak),
+            "per-side peak {per_side_peak} should approach full scale"
+        );
+    }
+
+    /// A full-scale PSG (CGB) channel spans a quarter of output full scale: ±0.5 sample data times
+    /// the `env=15` volume scalar (`0.5`) gives a summed peak of `0.25`.
+    #[test]
+    fn full_psg_channel_spans_quarter_scale() {
+        let volume = 15.0 / 15.0 * CGB_FULL_SCALE_GAIN;
+        let psg_peak = 0.5; // PSG sample data is ±0.5.
+        assert!((psg_peak * volume - 0.25).abs() < 1e-9);
     }
 }
