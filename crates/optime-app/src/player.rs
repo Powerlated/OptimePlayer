@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use optime_core::{
-    LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, SynthController,
+    LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, StreamResampler,
+    SynthController,
 };
 
 use crate::persisted::{RepeatMode, TrackRef};
@@ -144,6 +145,9 @@ pub struct AudioState {
     pub last_callback: f64,
     /// Audio-thread-owned playlist + advancement (see [`Playback`]).
     pub playback: Playback,
+    /// Final-stage resampler from the fixed engine render rate ([`crate::audio::ENGINE_SAMPLE_RATE_HZ`])
+    /// to the device's actual output rate.
+    pub resampler: StreamResampler,
 }
 
 impl AudioState {
@@ -162,6 +166,7 @@ impl AudioState {
             voices: 0,
             last_callback: f64::NEG_INFINITY,
             playback: Playback::default(),
+            resampler: StreamResampler::new(),
         }
     }
 }

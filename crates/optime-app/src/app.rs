@@ -2233,6 +2233,15 @@ impl OptimeApp {
                 );
             }
         });
+        ui.label(
+            egui::RichText::new(
+                "Note: the output here is a fixed 32768 Hz, emulating the hardware DACs. A further \
+                resampling stage converts that to your audio device's rate, which isn't adjustable \
+                here.",
+            )
+            .weak()
+            .small(),
+        );
         ui.separator();
 
         // Master high-shelf EQ — per device, like the resampling settings above.

@@ -2,9 +2,17 @@
 //! native (ALSA/CoreAudio/WASAPI) and web (WebAudio) targets.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use optime_core::{LoopAndTransitionOptions, PlaybackEvent, SynthController};
+use optime_core::{
+    InstrumentResampleMode, LoopAndTransitionOptions, PlaybackEvent, SynthController,
+};
 
 use crate::player::{AudioState, AutoAdvance, PlaybackCommand, Shared, new_shared};
+
+/// Fixed rate the engine always renders at, emulating the hardware DACs' 32768 Hz output. A
+/// [`optime_core::StreamResampler`] then converts this to the device's actual output rate in
+/// [`write_audio`] (a final resampling stage not exposed in the UI), so device rate never touches
+/// synthesis.
+pub const ENGINE_SAMPLE_RATE_HZ: f64 = 32768.0;
 
 /// Owns the live audio output stream and exposes the shared state the UI mutates.
 pub struct AudioEngine {
@@ -207,13 +215,14 @@ fn step_playback(st: &mut AudioState) {
         .get(target)
         .map(|e| (e.archive.clone(), e.track.song_id));
     let decoded = match to_decode {
-        Some((Some(arc), song_id)) => SynthController::new(st.sample_rate, &*arc, song_id),
+        Some((Some(arc), song_id)) => SynthController::new(ENGINE_SAMPLE_RATE_HZ, &*arc, song_id),
         _ => None,
     };
     match decoded {
         Some(mut controller) => {
             controller.set_loop_and_transition(LoopAndTransitionOptions::live());
             st.controller = Some(controller);
+            st.resampler.reset();
             st.playback.index = target;
             st.manual_fade_active = false;
             st.fade_gain = 0.0; // fade the new song in
@@ -311,23 +320,30 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         st.voices = 0;
         return;
     }
+    let device_rate = st.sample_rate as f32;
     let mut ramp = GainRamp::new(st);
     let config = &st.config;
     let controller = st.controller.as_mut().unwrap();
+    let resampler = &mut st.resampler;
+    // Cheap per docs: only rebuilds sinc tables on a half-taps change, never disturbs position.
+    resampler.set(
+        ENGINE_SAMPLE_RATE_HZ as f32,
+        device_rate,
+        InstrumentResampleMode::SincSampleNyquist { half_taps: 8 },
+    );
     if channels == 2 {
-        // The common case: render the whole device buffer through the block path.
-        controller.fill(data, config);
         for frame in data.chunks_exact_mut(2) {
+            let (l, r) = resampler.next(&mut || controller.next_sample(config));
             let g = ramp.next();
-            frame[0] *= g;
-            frame[1] *= g;
+            frame[0] = l * g;
+            frame[1] = r * g;
         }
         ramp.store(st);
         update_meters(st, t0, data.len() / 2);
         return;
     }
     for frame in data.chunks_mut(channels.max(1)) {
-        let (l, r) = controller.next_sample(config);
+        let (l, r) = resampler.next(&mut || controller.next_sample(config));
         let g = ramp.next();
         let (l, r) = (l * g, r * g);
         match frame.len() {
