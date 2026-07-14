@@ -1438,10 +1438,12 @@ mod tests {
         };
         TrkVolPitSet(&mut t);
 
-        // C: x = (127*64)>>5 = 254; centered y=0 → volMR=((128)*254)>>8, volML=((127)*254)>>8.
+        // C: x = (127*64)>>5 = 254; centered pan=0 → volMR=((0x80+pan)*254)>>8,
+        // volML=((0x7F-pan)*254)>>8.
         let x: u32 = (127 * 64) >> 5;
-        assert_eq!(t.volMR, (((0 + 128) as u32 * x) >> 8) as u8);
-        assert_eq!(t.volML, (((127 - 0) as u32 * x) >> 8) as u8);
+        let pan: i32 = 0;
+        assert_eq!(t.volMR, (((0x80 + pan) as u32 * x) >> 8) as u8);
+        assert_eq!(t.volML, (((0x7F - pan) as u32 * x) >> 8) as u8);
         // Flags cleared.
         assert_eq!(t.flags & (MPT_FLG_PITSET | MPT_FLG_VOLSET), 0);
     }

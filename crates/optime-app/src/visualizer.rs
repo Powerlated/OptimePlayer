@@ -132,18 +132,18 @@ pub fn draw(ui: &mut egui::Ui, snap: &VisSnapshot, track_enables: &mut [bool; TR
     }
 
     // Click handling against the computed layout.
-    if let Some(pos) = response.interact_pointer_pos() {
-        if response.clicked() {
-            for track in 0..TRACK_COUNT {
-                let row_y = origin.y + PAD + track as f32 * SECTION_H;
-                let toggle_rect = Rect::from_min_size(
-                    egui::pos2(origin.x, row_y),
-                    Vec2::new(TOGGLE_W, SECTION_H - 2.0),
-                );
-                if toggle_rect.contains(pos) {
-                    track_enables[track] = !track_enables[track];
-                    return;
-                }
+    if let Some(pos) = response.interact_pointer_pos()
+        && response.clicked()
+    {
+        for track in 0..TRACK_COUNT {
+            let row_y = origin.y + PAD + track as f32 * SECTION_H;
+            let toggle_rect = Rect::from_min_size(
+                egui::pos2(origin.x, row_y),
+                Vec2::new(TOGGLE_W, SECTION_H - 2.0),
+            );
+            if toggle_rect.contains(pos) {
+                track_enables[track] = !track_enables[track];
+                return;
             }
         }
     }

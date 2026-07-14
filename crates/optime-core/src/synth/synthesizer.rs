@@ -210,11 +210,11 @@ impl WaveformSynthesizer {
     /// Rebuilds the sinc tables if the mode switched to a sinc variant or the tap count changed.
     fn ensure_tables(&mut self, config: &PerDeviceSettings) {
         let needed_taps = mode_half_taps(config.resample());
-        if let Some(ht) = needed_taps {
-            if self.resample_tables.is_none() || self.resample_half_taps != ht {
-                self.resample_tables = Some(ResampleTables::new(ht));
-                self.resample_half_taps = ht;
-            }
+        if let Some(ht) = needed_taps
+            && (self.resample_tables.is_none() || self.resample_half_taps != ht)
+        {
+            self.resample_tables = Some(ResampleTables::new(ht));
+            self.resample_half_taps = ht;
         }
     }
 
@@ -385,11 +385,11 @@ impl WaveformSynthesizer {
 
     /// Applies a deferred delay-length change once the track is note-free.
     fn apply_pending_delays(&mut self) {
-        if self.active_instrs.is_empty() {
-            if let Some((delay_l, delay_r)) = self.pending_delays.take() {
-                self.delay_line_l.set_delay(delay_l);
-                self.delay_line_r.set_delay(delay_r);
-            }
+        if self.active_instrs.is_empty()
+            && let Some((delay_l, delay_r)) = self.pending_delays.take()
+        {
+            self.delay_line_l.set_delay(delay_l);
+            self.delay_line_r.set_delay(delay_r);
         }
     }
 }

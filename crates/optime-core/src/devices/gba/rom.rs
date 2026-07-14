@@ -149,10 +149,10 @@ fn find_table_by_signature(rom: &[u8]) -> Option<usize> {
     let positions = crate::util::search_for_sequence(rom, &SELECT_SONG_SIGNATURE);
     for pos in positions {
         let table_ptr = read_u32(rom, pos + 40);
-        if let Some(table) = ptr_to_offset(table_ptr, rom.len()) {
-            if entry_is_valid(rom, table) {
-                return Some(table);
-            }
+        if let Some(table) = ptr_to_offset(table_ptr, rom.len())
+            && entry_is_valid(rom, table)
+        {
+            return Some(table);
         }
     }
     None

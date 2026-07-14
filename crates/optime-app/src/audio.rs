@@ -172,11 +172,12 @@ fn step_playback(st: &mut AudioState) {
     }
     // A manual transition interrupting a playing song asks the controller for a quick fade-out —
     // once per switch (it overrides any in-progress end-of-song fade with the faster ramp).
-    if st.playback.pending.is_some() && !st.manual_fade_active {
-        if let Some(controller) = &mut st.controller {
-            controller.request_transition(MANUAL_FADE_SECONDS);
-            st.manual_fade_active = true;
-        }
+    if st.playback.pending.is_some()
+        && !st.manual_fade_active
+        && let Some(controller) = &mut st.controller
+    {
+        controller.request_transition(MANUAL_FADE_SECONDS);
+        st.manual_fade_active = true;
     }
 
     // (b) The end-of-song fade (loop-count / FINE) and our requested manual fade both live in the

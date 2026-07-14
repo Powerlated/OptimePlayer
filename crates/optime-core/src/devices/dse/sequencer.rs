@@ -340,11 +340,11 @@ impl DseSequencer {
             }
             0x9E => {
                 // SubLoopBreakOnLastIteration
-                if let Some(top) = tr.loop_stack.last().copied() {
-                    if top.count == 1 {
-                        tr.pos = top.end;
-                        tr.loop_stack.pop();
-                    }
+                if let Some(top) = tr.loop_stack.last().copied()
+                    && top.count == 1
+                {
+                    tr.pos = top.end;
+                    tr.loop_stack.pop();
                 }
             }
             0xA0 => {

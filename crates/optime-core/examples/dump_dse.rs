@@ -19,14 +19,14 @@ use std::path::Path;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // ROM mode: exercise the real SoundData/DevicePlayer pipeline the app uses.
-    if let Some(first) = args.first() {
-        if first.to_ascii_lowercase().ends_with(".nds") {
-            rom_mode(
-                first,
-                args.get(1).map(|s| s.parse().unwrap_or(0)).unwrap_or(0),
-            );
-            return;
-        }
+    if let Some(first) = args.first()
+        && first.to_ascii_lowercase().ends_with(".nds")
+    {
+        rom_mode(
+            first,
+            args.get(1).map(|s| s.parse().unwrap_or(0)).unwrap_or(0),
+        );
+        return;
     }
     if args.len() < 2 {
         eprintln!(
@@ -63,36 +63,35 @@ fn main() {
     println!();
 
     // --- Song bank (optional) ---
-    if let Some(bytes) = &song_bank {
-        if let Some(bank) = Swdl::parse(bytes) {
+    if let Some(bytes) = &song_bank
+        && let Some(bank) = Swdl::parse(bytes)
+    {
+        println!(
+            "== SONG BANK  '{}'  ({} wavi refs, {} programs) ==",
+            bank.name,
+            bank.waveforms.len(),
+            bank.programs.len()
+        );
+        for prog in bank.programs.iter().take(4) {
             println!(
-                "== SONG BANK  '{}'  ({} wavi refs, {} programs) ==",
-                bank.name,
-                bank.waveforms.len(),
-                bank.programs.len()
+                "   program {:>3}: {} split(s), vol {}",
+                prog.id,
+                prog.splits.len(),
+                prog.volume
             );
-            for prog in bank.programs.iter().take(4) {
+            // The faithful pitch model: a split's key_base (~ -1745 = the classic ctune -7 in
+            // 8.8 fixed point) plus note_delta give the absolute playback rate per key.
+            if let Some(split) = prog.splits.first() {
+                let note_key =
+                    i32::from(split.key_base) + (i32::from(split.note_delta) << 8) + (60i32 << 8);
+                let hz = optime_core::devices::dse::note_key_to_hz(note_key);
                 println!(
-                    "   program {:>3}: {} split(s), vol {}",
-                    prog.id,
-                    prog.splits.len(),
-                    prog.volume
+                    "      split0: key_base={} note_delta={} wave={} -> key 60 plays at {hz:.0} Hz",
+                    split.key_base, split.note_delta, split.wave_index
                 );
-                // The faithful pitch model: a split's key_base (~ -1745 = the classic ctune -7 in
-                // 8.8 fixed point) plus note_delta give the absolute playback rate per key.
-                if let Some(split) = prog.splits.first() {
-                    let note_key = i32::from(split.key_base)
-                        + (i32::from(split.note_delta) << 8)
-                        + (60i32 << 8);
-                    let hz = optime_core::devices::dse::note_key_to_hz(note_key);
-                    println!(
-                        "      split0: key_base={} note_delta={} wave={} -> key 60 plays at {hz:.0} Hz",
-                        split.key_base, split.note_delta, split.wave_index
-                    );
-                }
             }
-            println!();
         }
+        println!();
     }
 
     // --- Song sequence ---
@@ -160,40 +159,40 @@ fn main() {
     }
 
     // --- Tick a player to prove the LFO path (vibrato / tremolo / auto-pan) ---
-    if let Some(bytes) = &song_bank {
-        if let Some(bank) = Swdl::parse(bytes) {
-            use optime_core::DevicePlayer as _;
-            use optime_core::devices::dse::DsePlayer;
-            use std::sync::Arc;
-            let mut player = DsePlayer::new(&song, Arc::new(bank), Arc::new(main.clone()));
-            let mut feedback = TickFeedback::default();
-            let cfg = PerDeviceSettings::neutral();
-            let mut events = Vec::new();
-            let (mut vib, mut bends, mut max_bend, mut pans, mut notes) =
-                (0u32, 0u32, 0.0f64, 0u32, 0u32);
-            for _ in 0..2000 {
-                events.clear();
-                player.tick(&mut feedback, &cfg, &mut events);
-                for ev in &events {
-                    match ev {
-                        SynthEvent::NoteStarted { .. } => notes += 1,
-                        SynthEvent::VoiceDetune { semitones, .. } if semitones.abs() > 1e-9 => {
-                            vib += 1;
-                        }
-                        SynthEvent::TrackDetune { semitones, .. } if semitones.abs() > 1e-9 => {
-                            bends += 1;
-                            max_bend = max_bend.max(semitones.abs());
-                        }
-                        SynthEvent::TrackPan { .. } => pans += 1,
-                        _ => {}
+    if let Some(bytes) = &song_bank
+        && let Some(bank) = Swdl::parse(bytes)
+    {
+        use optime_core::DevicePlayer as _;
+        use optime_core::devices::dse::DsePlayer;
+        use std::sync::Arc;
+        let mut player = DsePlayer::new(&song, Arc::new(bank), Arc::new(main.clone()));
+        let mut feedback = TickFeedback::default();
+        let cfg = PerDeviceSettings::neutral();
+        let mut events = Vec::new();
+        let (mut vib, mut bends, mut max_bend, mut pans, mut notes) =
+            (0u32, 0u32, 0.0f64, 0u32, 0u32);
+        for _ in 0..2000 {
+            events.clear();
+            player.tick(&mut feedback, &cfg, &mut events);
+            for ev in &events {
+                match ev {
+                    SynthEvent::NoteStarted { .. } => notes += 1,
+                    SynthEvent::VoiceDetune { semitones, .. } if semitones.abs() > 1e-9 => {
+                        vib += 1;
                     }
+                    SynthEvent::TrackDetune { semitones, .. } if semitones.abs() > 1e-9 => {
+                        bends += 1;
+                        max_bend = max_bend.max(semitones.abs());
+                    }
+                    SynthEvent::TrackPan { .. } => pans += 1,
+                    _ => {}
                 }
             }
-            println!(
-                "== effects over ~20s: {notes} notes, {vib} vibrato (VoiceDetune), {bends} pitch \
-                 bends (TrackDetune, max {max_bend:.2} st), {pans} pan updates ==\n"
-            );
         }
+        println!(
+            "== effects over ~20s: {notes} notes, {vib} vibrato (VoiceDetune), {bends} pitch \
+                 bends (TrackDetune, max {max_bend:.2} st), {pans} pan updates ==\n"
+        );
     }
 
     // --- Decode a few samples to WAV to prove the sample path ---
