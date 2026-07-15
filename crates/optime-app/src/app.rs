@@ -10,6 +10,7 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
+use crate::chord_data;
 use crate::media_controls::{self, MediaAction};
 use crate::persisted::{
     InstrumentResampleChoice, PerDeviceSettings, Persisted, RepeatMode, SortMode, TrackRef,
@@ -1061,6 +1062,7 @@ impl OptimeApp {
                 guard += 1;
             }
             roll.ingest(&look);
+            roll.set_chords(self.chord_spans(archive_index, song_id));
             Some(look)
         });
         Some(SwipePreview {
@@ -1120,6 +1122,26 @@ impl OptimeApp {
         }
     }
 
+    /// Pre-inferred chord-lane spans for a song: `(start_step, end_step, label)`, the label already
+    /// baked as `"<roman> (<name>)"` (or `"N.C."`) offline. Empty when the game has no chord table
+    /// (only Pokémon Emerald ships one), so the roll hides the lane.
+    fn chord_spans(&self, archive_index: usize, song_id: u32) -> Vec<(f64, f64, String)> {
+        let game_code = self.archives[archive_index]
+            .as_any()
+            .downcast_ref::<GbaRom>()
+            .and_then(GbaRom::game_code);
+        let Some(chords) =
+            chord_data::lookup(Some(&self.current_source), game_code.as_deref(), song_id)
+        else {
+            return Vec::new();
+        };
+        chords
+            .segments
+            .iter()
+            .map(|s| (s.start_step, s.end_step, s.label.clone()))
+            .collect()
+    }
+
     /// Updates the UI visuals for a newly-playing track. The audio thread already installed the
     /// controller; this only refreshes the highlight, look-ahead, overview, status and history.
     fn on_now_playing(&mut self, t: TrackRef) {
@@ -1142,6 +1164,8 @@ impl OptimeApp {
             self.look_ahead = FsVisController::new(&*self.archives[archive_index], song_id);
             self.status = format!("Playing: {label}");
             self.overview = FsVisController::overview(&*self.archives[archive_index], song_id);
+            self.piano_roll
+                .set_chords(self.chord_spans(archive_index, song_id));
         }
         #[cfg(target_arch = "wasm32")]
         {

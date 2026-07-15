@@ -3,6 +3,7 @@
 
 mod app;
 mod audio;
+mod chord_data;
 mod media_controls;
 mod persisted;
 mod piano_roll;

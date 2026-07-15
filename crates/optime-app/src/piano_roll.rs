@@ -13,7 +13,7 @@
 //! All rendering is isolated here so the draw layer can later be swapped for a `wgpu` paint
 //! callback (true shader bloom / particles) without touching the app.
 
-use egui::{Color32, ColorImage, Pos2, Rect, Sense, Stroke};
+use egui::{Align2, Color32, ColorImage, FontId, Pos2, Rect, Sense, Stroke};
 
 use optime_core::{FsVisController, SongOverview};
 
@@ -39,6 +39,9 @@ const GRID_TICKS: f64 = 96.0;
 const MIN_NOTE_PX: f32 = 2.0;
 /// Width of the vertical keyboard, in points.
 const KEYBOARD_W: f32 = 40.0;
+/// Height of the chord-label lane reserved across the top of the roll (only when a
+/// song has pre-inferred chords). Chosen to fit one line of the chord font.
+const CHORD_LANE_H: f32 = 20.0;
 
 /// `midi % 12` is a black key. Index 0 == C.
 const IS_BLACK: [bool; 12] = [
@@ -57,10 +60,22 @@ struct NoteEvent {
     open: bool,
 }
 
+/// One pre-inferred chord change on the timeline: a step span and its display label
+/// (`"<roman> (<name>)"`, or `"N.C."` for no-chord). Drawn in the chord lane above
+/// the roll. See [`crate::chord_data`].
+struct ChordLabel {
+    start: f64,
+    end: f64,
+    label: String,
+}
+
 /// Piano-roll renderer: owns the visible note list and a smoothed playhead clock.
 #[derive(Default)]
 pub struct PianoRoll {
     notes: Vec<NoteEvent>,
+    /// Pre-inferred chord changes for the whole song (in sequencer steps). Empty for
+    /// songs with no chord data; the lane is then omitted entirely.
+    chords: Vec<ChordLabel>,
     /// Wall-clock-smoothed playhead position, in ticks (drives the scroll).
     display_tick: f64,
     /// Whether anything has been ingested yet (so the first frame snaps to the audio position).
@@ -71,8 +86,18 @@ impl PianoRoll {
     /// Resets the roll for a new song.
     pub fn clear(&mut self) {
         self.notes.clear();
+        self.chords.clear();
         self.display_tick = 0.0;
         self.primed = false;
+    }
+
+    /// Installs the song's pre-inferred chord timeline (step span + display label).
+    /// Cleared by [`Self::clear`]; pass an empty iterator to hide the lane.
+    pub fn set_chords(&mut self, spans: impl IntoIterator<Item = (f64, f64, String)>) {
+        self.chords = spans
+            .into_iter()
+            .map(|(start, end, label)| ChordLabel { start, end, label })
+            .collect();
     }
 
     /// The smoothed playhead position in ticks (used to drive the look-ahead target).
@@ -147,7 +172,19 @@ impl PianoRoll {
 
         painter.rect_filled(rect, 0.0, Color32::from_rgb(0x0c, 0x0e, 0x14));
 
-        let roll = Rect::from_min_max(Pos2::new(rect.min.x + KEYBOARD_W, rect.min.y), rect.max);
+        // Reserve a top strip for the chord lane only when the song has chord data,
+        // so DS / uncovered songs look exactly as before.
+        let lane_top = if self.chords.is_empty() {
+            0.0
+        } else {
+            CHORD_LANE_H
+        };
+        let content = Rect::from_min_max(Pos2::new(rect.min.x, rect.min.y + lane_top), rect.max);
+
+        let roll = Rect::from_min_max(
+            Pos2::new(content.min.x + KEYBOARD_W, content.min.y),
+            content.max,
+        );
         let lane_h = roll.height() / LANES as f32;
         let cursor_x = roll.min.x + roll.width() * CURSOR_FRAC;
         let ppt = roll.width() as f64 / WINDOW_TICKS; // points per tick
@@ -158,6 +195,13 @@ impl PianoRoll {
 
         self.draw_lanes(&painter, roll, lane_h);
         self.draw_grid(&painter, roll, &xt);
+        if lane_top > 0.0 {
+            let strip = Rect::from_min_max(
+                Pos2::new(roll.min.x, rect.min.y),
+                Pos2::new(roll.max.x, rect.min.y + CHORD_LANE_H),
+            );
+            self.draw_chords(&painter, strip, &xt, dim);
+        }
 
         // Which pitches are currently under the cursor (for key lighting).
         let mut lit: [Option<usize>; 128] = [None; 128];
@@ -169,7 +213,54 @@ impl PianoRoll {
         }
         self.draw_notes(&painter, roll, lane_h, cursor_x, &xt, dim);
         self.draw_cursor(&painter, roll, cursor_x);
-        self.draw_keyboard(&painter, rect, roll, lane_h, &lit, dim);
+        self.draw_keyboard(&painter, content, roll, lane_h, &lit, dim);
+    }
+
+    /// The chord lane across the top: each change's label, left-anchored at its start
+    /// and scrolling with the playhead, brightening while it is the chord sounding now
+    /// (its span contains the playhead). A faint divider marks each change boundary.
+    fn draw_chords(
+        &self,
+        painter: &egui::Painter,
+        strip: Rect,
+        xt: &impl Fn(f64) -> f32,
+        dim: f32,
+    ) {
+        let painter = painter.with_clip_rect(strip);
+        let mid_y = (strip.min.y + strip.max.y) * 0.5;
+        for c in &self.chords {
+            let x0 = xt(c.start);
+            let x1 = xt(c.end);
+            if x1 < strip.min.x || x0 > strip.max.x {
+                continue;
+            }
+            let now = c.start <= self.display_tick && self.display_tick < c.end;
+
+            // Divider at the change boundary.
+            if x0 >= strip.min.x {
+                painter.line_segment(
+                    [Pos2::new(x0, strip.min.y), Pos2::new(x0, strip.max.y)],
+                    Stroke::new(
+                        1.0_f32,
+                        Color32::from_rgba_unmultiplied(0x3a, 0x42, 0x58, 90),
+                    ),
+                );
+            }
+
+            let color = if now {
+                scale_alpha(Color32::from_rgb(0xf2, 0xf4, 0xff), dim)
+            } else {
+                scale_alpha(Color32::from_rgb(0x9a, 0xa2, 0xb8), dim)
+            };
+            let x = (x0 + 3.0).max(strip.min.x + 3.0);
+            painter.text(
+                Pos2::new(x, mid_y),
+                Align2::LEFT_CENTER,
+                &c.label,
+                FontId::proportional(12.0),
+                color,
+            );
+        }
     }
 
     /// y-range (top, bottom) of a pitch's lane within `roll`.
