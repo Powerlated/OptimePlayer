@@ -1,0 +1,9 @@
+/target
+
+# Generated artifacts (large, regenerable): synthetic + harvested datasets and
+# trained model weights. See README for the commands that produce them.
+/data
+/models
+
+# Compiler crash dumps.
+rustc-ice-*.txt

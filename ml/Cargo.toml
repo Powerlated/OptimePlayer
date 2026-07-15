@@ -1,0 +1,32 @@
+[package]
+name = "optime-ml"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[features]
+# Enables the real-song harvester + real-song eval, which depend on the main
+# engine crate. Off by default so the pure-synthetic build stays engine-free.
+harvest = ["dep:optime-core"]
+
+[dependencies]
+bincode = "1"
+burn = { version = "0.21.0", features = ["ndarray", "autodiff", "train"] }
+flate2 = "1"
+burn-ndarray = { version = "0.21", features = ["multi-threads"] }
+rand = "0.8"
+rayon = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+# Only for `--features harvest`: run device sequencers headlessly to harvest real
+# game songs. Scalar gather (no `simd`) — the headless player never resamples audio.
+optime-core = { path = "../crates/optime-core", default-features = false, optional = true }
+
+[[bin]]
+name = "harvest"
+required-features = ["harvest"]
+
+[[bin]]
+name = "chord_export"
+required-features = ["harvest"]
