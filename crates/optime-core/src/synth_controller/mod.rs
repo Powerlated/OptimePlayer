@@ -109,12 +109,19 @@ fn render_set(
     (l, r)
 }
 
-/// Quantizes one mixer-bus sample to `bits`-bit signed, saturating on overflow. Emulates the GBA
-/// m4a software mixer's 8-bit DirectSound PCM buffer (`m4a_1.s` `SoundMainRAM`): full scale is
-/// `2^(bits-1)`, so a value is rounded to the nearest of `2^bits` levels and clipped to the range.
+/// Quantizes one mixer-bus sample to `bits`-bit signed exactly as the GBA m4a software mixer does
+/// (`m4a_1.s` `SoundMainRAM`). Full scale is `2^(bits-1)` (128 at 8-bit). The value is **truncated
+/// toward −∞** onto the grid — the hardware's `(envVol·s) >> 8` arithmetic shift, which floors — and
+/// on overflow it **wraps in two's complement** (the 8-bit PCM accumulator flips polarity, the
+/// `strb` into the DMA buffer, rather than clipping). For 8-bit this is exactly `floor(x*128) as i8`.
 fn bitcrush_sample(x: Sample, bits: u32) -> Sample {
-    let scale = (1u32 << (bits.clamp(1, 16) - 1)) as Sample;
-    (x * scale).round().clamp(-scale, scale - 1.0) / scale
+    let bits = bits.clamp(1, 16);
+    let scale = (1i64 << (bits - 1)) as Sample; // 128 at 8-bit
+    let code = (x * scale).floor() as i64; // truncate toward −∞, like `>> 8`
+    let sign = 1i64 << (bits - 1); // 0x80 at 8-bit
+    let mask = (1i64 << bits) - 1; // 0xFF at 8-bit
+    let wrapped = ((code & mask) ^ sign) - sign; // sign-extend the low `bits` → two's-complement wrap
+    wrapped as Sample / scale
 }
 
 /// Cuts one-shot samples in a set that ran out (only the synthesizer knows their playback
@@ -1009,28 +1016,47 @@ mod transition_tests {
 mod bitcrush_tests {
     use super::bitcrush_sample;
 
+    /// Oracle for the 8-bit case: the m4a mixer floors (`>> 8`) then stores a signed byte (`strb`),
+    /// so `code as i8` performs the exact two's-complement wrap the hardware buffer does.
+    fn m4a_8bit(x: f32) -> f32 {
+        let code = (x * 128.0).floor() as i64;
+        f32::from(code as i8) / 128.0
+    }
+
     #[test]
-    fn quantizes_to_signed_levels() {
-        // 8-bit: full scale = 128 levels per side; 0 and exact half-scale survive unchanged.
+    fn truncates_to_signed_levels() {
         assert_eq!(bitcrush_sample(0.0, 8), 0.0);
         assert_eq!(bitcrush_sample(0.5, 8), 0.5);
-        // A value between two 1/128 steps snaps to the nearer one.
-        assert_eq!(bitcrush_sample(0.5 + 0.4 / 128.0, 8), 0.5);
-        assert_eq!(bitcrush_sample(0.5 + 0.6 / 128.0, 8), 0.5 + 1.0 / 128.0);
+        // Truncation, not rounding: even a value most of the way to the next step stays put.
+        assert_eq!(bitcrush_sample(0.5 + 0.9 / 128.0, 8), 0.5);
+        // Small negatives floor toward −∞ to −1 LSB (the mixer's truncation bias).
+        assert_eq!(bitcrush_sample(-0.001, 8), -1.0 / 128.0);
     }
 
     #[test]
-    fn saturates_on_overflow() {
-        // Overflow clips, it does not wrap: positive tops out just below +1, negative hits -1.
-        assert_eq!(bitcrush_sample(2.0, 8), 127.0 / 128.0);
-        assert_eq!(bitcrush_sample(1.0, 8), 127.0 / 128.0);
-        assert_eq!(bitcrush_sample(-2.0, 8), -1.0);
-        assert_eq!(bitcrush_sample(-1.0, 8), -1.0);
+    fn wraps_on_overflow_like_hardware() {
+        // The 8-bit accumulator wraps in two's complement (it does not clip): +full scale flips to
+        // −full scale, exactly as `strb` into the PCM buffer would.
+        assert_eq!(bitcrush_sample(1.0, 8), -1.0); // 128 → −128
+        assert_eq!(bitcrush_sample(1.5, 8), -0.5); // 192 → −64
+        assert_eq!(bitcrush_sample(2.0, 8), 0.0); //  256 → 0
+        assert_eq!(bitcrush_sample(-1.0, 8), -1.0); // in range
+        assert_eq!(bitcrush_sample(-1.5, 8), 0.5); // −192 → +64
     }
 
     #[test]
-    fn lower_depth_is_coarser() {
-        // 4-bit: 8 levels per side, so 1/16 steps. 0.1 snaps to the nearest 1/8.
-        assert_eq!(bitcrush_sample(0.1, 4), (0.1f32 * 8.0).round() / 8.0);
+    fn matches_m4a_8bit_oracle_across_range() {
+        // Sweep well past ±full scale so both truncation and the wrap are exercised.
+        for i in -400..=400 {
+            let x = i as f32 / 128.0;
+            assert_eq!(bitcrush_sample(x, 8), m4a_8bit(x), "x = {x}");
+        }
+    }
+
+    #[test]
+    fn lower_depth_truncates_on_a_coarser_grid() {
+        // 4-bit: 8 levels per side (1/8 steps). 0.1 floors to 0; 0.3 floors to 0.25.
+        assert_eq!(bitcrush_sample(0.1, 4), 0.0);
+        assert_eq!(bitcrush_sample(0.3, 4), 0.25);
     }
 }

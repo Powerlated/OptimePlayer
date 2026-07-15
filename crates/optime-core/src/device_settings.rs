@@ -156,9 +156,10 @@ pub struct PerDeviceSettings {
     pub mixer_sample_rate: u32,
     /// Route sampled (non-PSG) voices through the intermediate mixer (then upsample to output).
     pub use_mixer: bool,
-    /// Quantize the intermediate mixer bus to [`Self::bitcrush_bits`]-bit signed (saturating),
-    /// emulating the GBA m4a software mixer's 8-bit DirectSound buffer (`m4a_1.s` `SoundMainRAM`).
-    /// Only engages when `use_mixer` is on. `#[serde(default)]` so old saves load as `false`.
+    /// Quantize the intermediate mixer bus to [`Self::bitcrush_bits`]-bit signed, truncating and
+    /// wrapping on overflow exactly like the GBA m4a software mixer's 8-bit DirectSound buffer
+    /// (`m4a_1.s` `SoundMainRAM`). Only engages when `use_mixer` is on. `#[serde(default)]` so old
+    /// saves load as `false`.
     #[serde(default)]
     pub bitcrush_mixer: bool,
     /// The signed bit depth the mixer bus is crushed to when [`Self::bitcrush_mixer`] is on (8 =

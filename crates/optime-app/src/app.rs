@@ -2230,8 +2230,9 @@ impl OptimeApp {
             )
             .on_hover_text(
                 "Quantize the intermediate mixer bus to a reduced bit depth, the way the GBA's m4a \
-                    software mixer renders DirectSound into an 8-bit PCM buffer. Saturates (clips) on \
-                    overflow. Only the sampled bus is affected; PSG voices bypass the mixer.",
+                    software mixer renders DirectSound into an 8-bit PCM buffer: truncated, and \
+                    wrapping in two's complement on overflow (as the hardware accumulator does), not \
+                    clipped. Only the sampled bus is affected; PSG voices bypass the mixer.",
             );
             ui.add_enabled(
                 d.use_mixer && d.bitcrush_mixer,
