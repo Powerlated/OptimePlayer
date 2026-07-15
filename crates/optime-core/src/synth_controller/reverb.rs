@@ -1,31 +1,56 @@
-//! MP2K (GBA) reverb — a float delay-line approximation of pokeemerald's `SoundMainRAM` reverb
-//! pre-pass (`src/m4a_1.s:96`).
+//! MP2K (GBA) reverb — a float delay-line port of pokeemerald's `SoundMainRAM` reverb pre-pass
+//! (`src/m4a_1.s:96`).
 //!
-//! On hardware the reverb runs inside the 8-bit PCM mixer: before each frame's DirectSound channels
-//! are mixed, the buffer is seeded with `round((curL + curR + srcL + srcR) * reverb / 512)` — the
-//! mono sum of the target buffer's stale content and the currently-playing (echo) buffer, scaled by
-//! the song's 7-bit `reverb` amount. That makes it a **mono-summing feedback delay** one DMA buffer
-//! (≈ one VBlank) long, with the reverb tail spread equally to both channels.
+//! On hardware the reverb runs inside the 8-bit PCM mixer, seeding each frame's buffer segment
+//! *before* the DirectSound channels are mixed into it:
 //!
-//! Optime substitutes float voice mixing for that 8-bit PCM mixer (a documented backend seam), so
-//! this is a structural approximation, not a bit-exact port: a single one-VBlank feedback comb on
-//! the mono-summed sampled bus, feedback ≈ `reverb / 128` (the four `reverb/512` taps collapse to
-//! one mono-summed prior output). It runs on the sampled (mixer-set) bus only, matching the
-//! hardware where reverb touches the PCM buffer but not the CGB/PSG channels.
+//! ```c
+//! // dst = the ring segment about to be re-mixed this VBlank; src = the NEXT segment (dst + V).
+//! for (i = 0; i < pcmSamplesPerVBlank; i++) {
+//!     s32 sum = dstL[i] + dstR[i] + srcL[i] + srcR[i];   // L+R of two stale segments
+//!     s32 seed = (sum * reverb) >> 9;                    // * reverb / 512
+//!     dstL[i] = dstR[i] = seed;                          // mono seed to both channels
+//! }
+//! // ...then the mixer ADDS the dry DirectSound channels on top of `seed`.
+//! ```
+//!
+//! The PCM buffer is a ring of `pcmDmaPeriod` segments of `pcmSamplesPerVBlank` samples each
+//! (`1584 / 224 = 7` segments of `224` at the fixed 13379 Hz mix rate). A segment's content is
+//! re-read exactly one full ring later, so **the echo delay is one whole buffer — `7 × 224 = 1568`
+//! samples ≈ 117 ms — not one VBlank (~16.7 ms)**. `dst` is that full-buffer-old tap; `src` (the
+//! next segment) is one VBlank more recent, giving a **two-tap feedback** `≈ 117 ms` and `≈ 100 ms`.
+//!
+//! Optime substitutes float voice mixing for the 8-bit PCM mixer (a documented backend seam), so
+//! this reproduces that structure on the mono-summed sampled bus rather than being bit-exact: a
+//! circular buffer of the L+R output sum, two feedback taps at the full-buffer and full-buffer-minus-
+//! one-VBlank delays, `seed = (tap1 + tap2) * reverb / 512` added to both channels. It runs on the
+//! sampled (mixer-set) bus only, matching the hardware where reverb touches the PCM buffer but not
+//! the CGB/PSG channels.
 
 use crate::waveform::{Frame, Sample};
 
-/// One GBA VBlank in seconds: `CYCLES_PER_FRAME / GBA_CLOCK_RATE` (280896 / 16_777_216 ≈ 16.74 ms),
-/// the delay one DMA buffer of PCM represents.
+/// One GBA VBlank in seconds: `CYCLES_PER_FRAME / GBA_CLOCK_RATE` (280896 / 16_777_216 ≈ 16.74 ms).
+/// `pcmSamplesPerVBlank` at the mix rate is `mixer_rate * VBLANK_SECONDS` (≈ 224 at 13379 Hz).
 const VBLANK_SECONDS: f64 = 280_896.0 / 16_777_216.0;
 
-/// The mono feedback-delay reverb applied to the sampled bus.
+/// `pcmDmaPeriod` — the number of VBlanks (ring segments) the PCM buffer spans:
+/// `PCM_DMA_BUF_SIZE / pcmSamplesPerVBlank = 1584 / 224 = 7`. The reverb's echo delay is this many
+/// VBlanks (one full ring), which is the whole point of the effect's long slap-back character.
+const PCM_DMA_PERIOD: usize = 7;
+
+/// The `reverb`-sum shift from `m4a_1.s`: `(dstL + dstR + srcL + srcR) * reverb >> 9`.
+const REVERB_SHIFT_DIV: Sample = 512.0;
+
+/// The MP2K two-tap feedback-delay reverb applied to the sampled bus.
 #[derive(Debug, Clone)]
 pub struct Reverb {
-    /// Mono feedback buffer, one VBlank long at the current mixer rate. Holds the summed prior
-    /// output so it decays by the feedback gain each pass.
+    /// Circular buffer of the mono (L+R) output sum, one full PCM ring long (`PCM_DMA_PERIOD`
+    /// VBlanks). A slot is re-read one whole ring after it is written, so it is the long echo tap.
     buf: Vec<Sample>,
+    /// Write cursor into `buf`.
     pos: usize,
+    /// Samples per VBlank at the current mix rate — the offset to the second (nearer) tap.
+    vblank_samples: usize,
     /// The 7-bit song reverb amount (`soundInfo.reverb`); `0` disables the stage.
     amount: u8,
     /// The mixer rate `buf` was sized for (0 = not yet configured).
@@ -37,6 +62,7 @@ impl Reverb {
         Self {
             buf: vec![0.0; 1],
             pos: 0,
+            vblank_samples: 1,
             amount: 0,
             rate: 0.0,
         }
@@ -47,46 +73,42 @@ impl Reverb {
         self.amount = amount;
     }
 
-    /// (Re)sizes the delay buffer for `mixer_rate` (one VBlank of samples), clearing it. Called when
-    /// the mixer sample rate changes; a no-op when the rate is unchanged.
+    /// (Re)sizes the delay ring for `mixer_rate` (one full PCM buffer = `PCM_DMA_PERIOD` VBlanks of
+    /// samples), clearing it. Called when the mixer sample rate changes; a no-op when unchanged.
     pub fn set_rate(&mut self, mixer_rate: f64) {
         if self.rate == mixer_rate {
             return;
         }
-        let delay = (mixer_rate * VBLANK_SECONDS).round().max(1.0) as usize;
-        self.buf = vec![0.0; delay];
+        let vblank = (mixer_rate * VBLANK_SECONDS).round().max(1.0) as usize;
+        self.vblank_samples = vblank;
+        self.buf = vec![0.0; vblank * PCM_DMA_PERIOD];
         self.pos = 0;
         self.rate = mixer_rate;
     }
 
-    /// The effective feedback gain: `amount / 128`, or 0 when disabled by `enabled`.
-    #[inline]
-    fn feedback(&self, enabled: bool) -> Sample {
-        if enabled {
-            Sample::from(self.amount) / 128.0
-        } else {
-            0.0
-        }
-    }
-
     /// Processes one mixer-rate stereo sample. When the stage is disabled (`enabled` false or amount
-    /// 0) this is a bit-exact pass-through (the buffer is left untouched). Otherwise it adds the
-    /// mono reverb tail to both channels and feeds the summed output back into the delay line.
+    /// 0) this is a bit-exact pass-through (the ring is left untouched). Otherwise it adds the mono
+    /// reverb tail (two full-buffer-delayed taps) to both channels and feeds the summed output back.
     #[inline]
     pub fn process(&mut self, dry_l: Sample, dry_r: Sample, enabled: bool) -> Frame {
-        let fb = self.feedback(enabled);
-        if fb == 0.0 {
+        if !enabled || self.amount == 0 {
             return (dry_l, dry_r);
         }
-        let delayed = self.buf[self.pos];
-        let wet = delayed * fb;
-        // Accumulate the mono output (dry + tail) so the echo decays by `fb` each VBlank.
-        self.buf[self.pos] = (dry_l + dry_r) * 0.5 + wet;
+        let len = self.buf.len();
+        // Tap 1 = this slot's content from one full ring ago (`dst`, delay = whole buffer).
+        // Tap 2 = the slot one VBlank ahead (`src`, delay = buffer − one VBlank), still unread this
+        // cycle. Both are L+R sums, matching the hardware's `dstL+dstR + srcL+srcR`.
+        let tap1 = self.buf[self.pos];
+        let tap2 = self.buf[(self.pos + self.vblank_samples) % len];
+        let seed = (tap1 + tap2) * Sample::from(self.amount) / REVERB_SHIFT_DIV;
+        let (out_l, out_r) = (dry_l + seed, dry_r + seed);
+        // Store the L+R sum of what this slot now holds (mono seed on both channels + stereo dry).
+        self.buf[self.pos] = out_l + out_r;
         self.pos += 1;
-        if self.pos >= self.buf.len() {
+        if self.pos >= len {
             self.pos = 0;
         }
-        (dry_l + wet, dry_r + wet)
+        (out_l, out_r)
     }
 }
 
@@ -107,26 +129,52 @@ mod tests {
     }
 
     #[test]
-    fn impulse_decays_at_one_vblank_spacing() {
+    fn echo_delay_is_a_full_pcm_buffer_not_one_vblank() {
         let mut r = Reverb::new();
         let rate = 13_379.0;
         r.set_rate(rate);
-        r.set_amount(64); // fb = 0.5
-        let delay = (rate * VBLANK_SECONDS).round() as usize;
+        r.set_amount(64);
+        let vblank = (rate * VBLANK_SECONDS).round() as usize; // ≈ 224
+        let buffer = vblank * PCM_DMA_PERIOD; // ≈ 1568
 
         // One mono impulse, then silence.
         r.process(1.0, 1.0, true);
-        let mut echoes = Vec::new();
-        for i in 0..(delay * 3 + 5) {
+        let mut first_echo = None;
+        for i in 1..(buffer + 5) {
             let (l, right) = r.process(0.0, 0.0, true);
             assert_eq!(l, right, "reverb tail must be mono (L == R)");
-            if l != 0.0 {
-                echoes.push((i + 1, l));
+            if l != 0.0 && first_echo.is_none() {
+                first_echo = Some(i);
             }
         }
-        // First echo lands one VBlank after the impulse, next at two VBlanks, decaying by fb.
-        assert_eq!(echoes[0].0, delay);
-        assert_eq!(echoes[1].0, delay * 2);
-        assert!(echoes[1].1 < echoes[0].1 && echoes[1].1 > 0.0);
+        // The first tap (`src`) lands a full buffer minus one VBlank after the impulse — a ~100 ms
+        // echo, i.e. many VBlanks out, NOT the ~16.7 ms one-VBlank comb the old port produced.
+        assert_eq!(first_echo, Some(buffer - vblank));
+        assert!(
+            buffer - vblank > 5 * vblank,
+            "echo delay must be many VBlanks, not one"
+        );
+    }
+
+    #[test]
+    fn two_taps_one_vblank_apart() {
+        let mut r = Reverb::new();
+        let rate = 13_379.0;
+        r.set_rate(rate);
+        r.set_amount(64); // seed gain = 2 taps * 64/512
+        let vblank = (rate * VBLANK_SECONDS).round() as usize;
+        let buffer = vblank * PCM_DMA_PERIOD;
+
+        r.process(1.0, 1.0, true);
+        let mut echoes = Vec::new();
+        for i in 1..(buffer + 5) {
+            let (l, _) = r.process(0.0, 0.0, true);
+            if l != 0.0 {
+                echoes.push(i);
+            }
+        }
+        // Both taps of the single impulse fire: `src` at buffer−VBlank, `dst` at the full buffer.
+        assert_eq!(echoes[0], buffer - vblank);
+        assert_eq!(echoes[1], buffer);
     }
 }
