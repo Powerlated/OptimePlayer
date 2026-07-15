@@ -348,9 +348,9 @@ impl PerDeviceSettings {
             },
             shelf: HighShelf {
                 enabled: true,
-                order: 2,
+                order: 6,
                 q: 0.5,
-                cutoff_hz: 12700.0,
+                cutoff_hz: 15000.0,
                 gain_db: -20.0,
             },
             track_enables: all_tracks_enabled(),
