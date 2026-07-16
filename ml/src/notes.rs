@@ -130,6 +130,10 @@ impl Song {
 /// A random transposition covering all 12 pitch-class rotations while keeping the
 /// register shift small (`[-5, +6]` semitones, so notes rarely hit the MIDI range
 /// limits). Use per song per epoch for on-the-fly key augmentation.
+/// Distinct shifts [`random_transpose`] draws from (-5..=6) — every pitch-class
+/// rotation exactly once, so augmentation multiplies the reachable data by this.
+pub const N_TRANSPOSITIONS: usize = 12;
+
 pub fn random_transpose<R: Rng>(rng: &mut R) -> i32 {
     let r = rng.gen_range(0..12);
     if r <= 6 {

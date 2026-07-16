@@ -22,9 +22,9 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use std::path::Path;
 
-use crate::backbone;
+use crate::backbone::{self, Backbone};
 use crate::backend::{Back, Inner, MlDevice};
-use crate::dashboard::{self, EpochPoint, RunMeta};
+use crate::dashboard::{self, ContextWindow, DataStats, EpochPoint, RunMeta};
 use crate::data::Example;
 use crate::features::{FEATURE_DIM, PITCH_BLOCK_DIM};
 use crate::m00_frame::{KeyChordModel, ModelConfig};
@@ -154,6 +154,12 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
         val.len(),
         config.mask_fraction * 100.0
     );
+    let transpositions = if config.augment {
+        crate::notes::N_TRANSPOSITIONS
+    } else {
+        1
+    };
+    let data = DataStats::measure(train, val, transpositions);
     dashboard::start(RunMeta {
         stage: format!(
             "masked-frame pretrain ({:.0}% masked)",
@@ -165,10 +171,15 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
             dashboard::backend_label(std::any::type_name::<Back>())
         ),
         epochs: config.epochs,
-        batch_size: config.batch_size,
-        lr: config.lr,
-        train_windows: train.len(),
-        val_windows: val.len(),
+        context: ContextWindow::from_frames(seq),
+        data,
+        params: model.num_params(),
+        flops_per_window: <KeyChordModel<Back> as Backbone<Back>>::flops_per_window(
+            &config.model,
+            data.notes_per_window.round() as usize,
+        ),
+        model_config: serde_json::to_value(&config.model).unwrap_or(serde_json::Value::Null),
+        train_config: serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
     });
 
     let n_total = indices.len().div_ceil(config.batch_size);
@@ -232,6 +243,13 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
             config.epochs,
         );
         dashboard::record_epoch(EpochPoint::pretext(epoch, train_loss, val_loss, secs));
+        backbone::save_epoch::<KeyChordModel<Back>, Back>(
+            &model,
+            &config.model,
+            &backbone::artifact_dir::<KeyChordModel<Back>, Back>(out_dir),
+            "pretrained",
+            epoch,
+        );
     }
 
     let dir = backbone::artifact_dir::<KeyChordModel<Back>, Back>(out_dir);

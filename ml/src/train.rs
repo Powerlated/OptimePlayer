@@ -17,7 +17,7 @@ use std::path::Path;
 
 use crate::backbone::{self, Backbone};
 use crate::backend::{Back, Inner, MlDevice};
-use crate::dashboard::{self, EpochPoint, RunMeta};
+use crate::dashboard::{self, ContextWindow, DataStats, EpochPoint, RunMeta};
 use crate::notes::{random_transpose, Song};
 use crate::parallel::{default_shards, dp_step};
 use crate::progress::TrainProgress;
@@ -119,6 +119,12 @@ pub fn run<M>(
         val.len(),
         config.chord_smoothness_weight,
     );
+    let transpositions = if config.augment {
+        crate::notes::N_TRANSPOSITIONS
+    } else {
+        1
+    };
+    let data = DataStats::measure(train, val, transpositions);
     dashboard::start(RunMeta {
         stage: "supervised fine-tune".to_string(),
         backbone: M::NAME.to_string(),
@@ -127,10 +133,12 @@ pub fn run<M>(
             dashboard::backend_label(std::any::type_name::<Back>())
         ),
         epochs: config.epochs,
-        batch_size: config.batch_size,
-        lr: config.lr,
-        train_windows: train.len(),
-        val_windows: val.len(),
+        context: ContextWindow::from_frames(seq),
+        data,
+        params: model.num_params(),
+        flops_per_window: M::flops_per_window(model_cfg, data.notes_per_window.round() as usize),
+        model_config: serde_json::to_value(model_cfg).unwrap_or(serde_json::Value::Null),
+        train_config: serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
     });
 
     let n_total = indices.len().div_ceil(config.batch_size);
@@ -203,6 +211,13 @@ pub fn run<M>(
         dashboard::record_epoch(EpochPoint::supervised(
             epoch, train_loss, key_acc, chord_acc, changes, secs,
         ));
+        backbone::save_epoch::<M, Back>(
+            &model,
+            model_cfg,
+            &backbone::artifact_dir::<M, Back>(out_dir),
+            "model",
+            epoch,
+        );
     }
 
     let dir = backbone::artifact_dir::<M, Back>(out_dir);

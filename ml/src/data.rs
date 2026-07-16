@@ -18,7 +18,9 @@ use std::path::Path;
 pub struct GenConfig {
     pub n_train: usize,
     pub n_val: usize,
-    /// Frames per song (fixed sequence length for batching).
+    /// Frames per song (fixed sequence length for batching). Must match the
+    /// backbones' positional-embedding table size — 256 frames = 64 beats = 32s at
+    /// 120bpm. A dataset built at one window can't train a model built for another.
     pub seq_len: usize,
     pub seed: u64,
 }
@@ -28,7 +30,7 @@ impl Default for GenConfig {
         GenConfig {
             n_train: 4000,
             n_val: 500,
-            seq_len: 128,
+            seq_len: 256,
             seed: 0xC0FFEE,
         }
     }

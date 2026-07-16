@@ -29,8 +29,9 @@ pub struct ModelConfig {
     #[config(default = 4)]
     pub n_layers: usize,
     /// Positional-embedding table size. Equal to the training/inference window
-    /// (128 frames = 32 beats); the model never sees more frames than this.
-    #[config(default = 128)]
+    /// (256 frames = 64 beats = 32s at 120bpm); the model never sees more frames
+    /// than this, and the harvested data must be windowed to match.
+    #[config(default = 256)]
     pub max_seq_len: usize,
     #[config(default = 0.1)]
     pub dropout: f64,

@@ -18,6 +18,7 @@ use burn::prelude::*;
 use burn::tensor::{Bool, IndexingUpdateOp};
 
 use crate::backbone::{ArBackbone, ArOutput, Backbone, ModelOutput};
+use crate::flops;
 use crate::m02_hier::batch::{HierBatchData, MAX_POLY};
 use crate::notes::Song;
 use crate::theory::{N_KEY_CLASSES, N_QUALITY_CLASSES, N_ROOT_CLASSES};
@@ -47,7 +48,9 @@ pub struct HierModelConfig {
     pub n_sub_layers: usize,
     #[config(default = 0.1)]
     pub dropout: f64,
-    #[config(default = 128)]
+    /// Window length in frames (256 = 64 beats = 32s at 120bpm). Must match the
+    /// dataset's windowing.
+    #[config(default = 256)]
     pub n_frames: usize,
 }
 
@@ -216,6 +219,19 @@ impl<B: Backend> Backbone<B> for HierEventModel<B> {
 
     fn key_labels(data: &HierBatchData) -> &[usize] {
         &data.key_labels
+    }
+
+    /// Two stacked transformers: the set encoder runs once per frame over the dense
+    /// `MAX_POLY + 1` slot grid (CLS + slots) — a fixed cost, since the grid is
+    /// materialised padded regardless of real polyphony — then the trunk over the
+    /// frame tokens.
+    fn flops_per_window(cfg: &HierModelConfig, _notes_per_window: usize) -> u64 {
+        let seq = cfg.n_frames;
+        let set_encoder = seq as u64
+            * flops::transformer_encoder(cfg.n_sub_layers, MAX_POLY + 1, cfg.d_model, cfg.sub_d_ff);
+        set_encoder
+            + flops::transformer_encoder(cfg.n_layers, seq, cfg.d_model, cfg.d_ff)
+            + flops::chord_key_heads(seq, cfg.d_model)
     }
 
     /// Supervised forward (bidirectional) → shared [`ModelOutput`].

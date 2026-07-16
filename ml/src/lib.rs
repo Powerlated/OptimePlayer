@@ -31,6 +31,7 @@
 //! * [`progression`] — chord-progression generation (templates + Markov walk).
 //! * [`notes`]       — arrangement/voicing into note events + per-frame labels.
 //! * [`features`]    — note events → per-frame feature grid (generation 00's input).
+//! * [`flops`]       — analytic matmul FLOP estimates for a forward pass.
 //! * [`tokenize`]    — note events → per-note field indices (the learned-token input).
 //! * [`data`]        — synthetic dataset generation, retention, example shape.
 //! * [`train`]       — the one supervised multi-task loop, generic over a backbone.
@@ -51,6 +52,7 @@ pub mod dashboard;
 pub mod data;
 pub mod estimate;
 pub mod features;
+pub mod flops;
 #[cfg(feature = "harvest")]
 pub mod harvest;
 pub mod infer;

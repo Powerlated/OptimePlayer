@@ -23,8 +23,8 @@ use std::path::Path;
 
 use crate::backbone::{self, ArBackbone, ArOutput, Backbone};
 use crate::backend::{Back, Inner, MlDevice};
-use crate::dashboard::{self, EpochPoint, RunMeta};
-use crate::notes::{random_transpose, Song};
+use crate::dashboard::{self, ContextWindow, DataStats, EpochPoint, RunMeta};
+use crate::notes::{random_transpose, Song, N_TRANSPOSITIONS};
 use crate::parallel::{default_shards, dp_step};
 use crate::progress::TrainProgress;
 use crate::tokenize::{N_CHANNELS, N_PC};
@@ -100,6 +100,26 @@ where
     M::build_batch(&picked)
 }
 
+/// Window length of the dataset — every song in a split shares `n_frames`.
+fn n_frames(songs: &[Song]) -> usize {
+    songs.first().map(|s| s.n_frames).unwrap_or(0)
+}
+
+/// Distinct transpositions augmentation reaches; 1 when it is off.
+fn transpositions(augment: bool) -> usize {
+    if augment {
+        N_TRANSPOSITIONS
+    } else {
+        1
+    }
+}
+
+/// A `Config` as JSON for the dashboard's hyperparameter table. Serializing the
+/// config itself means the table can't drift from the model.
+fn config_json<C: burn::config::Config>(cfg: &C) -> serde_json::Value {
+    serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null)
+}
+
 /// Deterministic per-shard, per-epoch RNG for augmentation.
 fn shard_rng(seed: u64, first: usize, epoch: usize) -> StdRng {
     StdRng::seed_from_u64(
@@ -137,6 +157,7 @@ pub fn run<M>(
         train.len(),
         val.len()
     );
+    let data = DataStats::measure(train, val, transpositions(config.augment));
     dashboard::start(RunMeta {
         stage: "AR pretrain".to_string(),
         backbone: M::NAME.to_string(),
@@ -145,10 +166,12 @@ pub fn run<M>(
             dashboard::backend_label(std::any::type_name::<Back>())
         ),
         epochs: config.epochs,
-        batch_size: config.batch_size,
-        lr: config.lr,
-        train_windows: train.len(),
-        val_windows: val.len(),
+        context: ContextWindow::from_frames(n_frames(train)),
+        data,
+        params: model.num_params(),
+        flops_per_window: M::flops_per_window(model_cfg, data.notes_per_window.round() as usize),
+        model_config: config_json(model_cfg),
+        train_config: config_json(config),
     });
 
     let n_total = indices.len().div_ceil(config.batch_size);
@@ -192,6 +215,13 @@ pub fn run<M>(
             config.epochs,
         );
         dashboard::record_epoch(EpochPoint::pretext(epoch, train_loss, val_loss, secs));
+        backbone::save_epoch::<M, Back>(
+            &model,
+            model_cfg,
+            &backbone::artifact_dir::<M, Back>(out_dir),
+            "pretrained",
+            epoch,
+        );
     }
 
     let dir = backbone::artifact_dir::<M, Back>(out_dir);
@@ -255,15 +285,18 @@ pub fn run_single_device<M, B>(
         config.batch_size,
         config.lr
     );
+    let data = DataStats::measure(train, val, transpositions(config.augment));
     dashboard::start(RunMeta {
         stage: "AR pretrain".to_string(),
         backbone: M::NAME.to_string(),
         backend: dashboard::backend_label(std::any::type_name::<B>()),
         epochs: config.epochs,
-        batch_size: config.batch_size,
-        lr: config.lr,
-        train_windows: train.len(),
-        val_windows: val.len(),
+        context: ContextWindow::from_frames(n_frames(train)),
+        data,
+        params: model.num_params(),
+        flops_per_window: M::flops_per_window(model_cfg, data.notes_per_window.round() as usize),
+        model_config: config_json(model_cfg),
+        train_config: config_json(config),
     });
 
     for epoch in 1..=config.epochs {
@@ -292,6 +325,13 @@ pub fn run_single_device<M, B>(
             config.epochs,
         );
         dashboard::record_epoch(EpochPoint::pretext(epoch, train_loss, val_loss, secs));
+        backbone::save_epoch::<M, B>(
+            &model,
+            model_cfg,
+            &backbone::artifact_dir::<M, B>(out_dir),
+            "pretrained",
+            epoch,
+        );
     }
 
     let dir = backbone::artifact_dir::<M, B>(out_dir);

@@ -22,6 +22,7 @@
 //! is optional. Failure to bind is a warning, never fatal — a dashboard must not be
 //! able to kill a training run.
 
+use crate::notes::{Song, FRAMES_PER_BEAT};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -40,6 +41,72 @@ const INDEX_HTML: &str = include_str!("../dashboard/index.html");
 const APP_JS: &str = include_str!("../dashboard/app.js");
 const VUE_JS: &str = include_str!("../dashboard/vendor/vue.global.prod.js");
 
+/// Reference tempo for every wall-clock figure the dashboard reports.
+///
+/// The model's time axis is *beats* ([`FRAMES_PER_BEAT`] frames each), not seconds —
+/// harvested songs are resampled onto that grid and their real tempo is discarded.
+/// So "seconds" and "hours" here are only meaningful against a stated tempo; this is
+/// it. A 60 bpm song's window really is twice as long in wall time.
+pub const REFERENCE_BPM: f64 = 120.0;
+
+/// How much context one window gives the model, in the three units worth knowing.
+#[derive(Serialize, Clone, Copy, Debug)]
+pub struct ContextWindow {
+    /// Frame tokens the trunk attends over — the sequence length.
+    pub tokens: usize,
+    pub beats: f64,
+    /// Wall time at [`REFERENCE_BPM`].
+    pub seconds: f64,
+}
+
+impl ContextWindow {
+    pub fn from_frames(n_frames: usize) -> Self {
+        let beats = n_frames as f64 / FRAMES_PER_BEAT as f64;
+        Self {
+            tokens: n_frames,
+            beats,
+            seconds: beats / (REFERENCE_BPM / 60.0),
+        }
+    }
+}
+
+/// Size of the dataset, in windows and in music.
+#[derive(Serialize, Clone, Copy, Debug, Default)]
+pub struct DataStats {
+    pub train_windows: usize,
+    pub val_windows: usize,
+    /// Mean notes per training window — generation 01's φ cost scales with it.
+    pub notes_per_window: f64,
+    /// Beats of music across the training split, exactly (no tempo assumed).
+    pub train_beats: f64,
+    /// Those beats as hours at [`REFERENCE_BPM`].
+    pub train_hours: f64,
+    /// Distinct transpositions augmentation can reach (1 when augmentation is off).
+    pub transpositions: usize,
+    /// `train_hours * transpositions` — the material the model can be shown, **not**
+    /// hours of distinct recorded music. Every transposition is the same performance
+    /// shifted, so this inflates variety, not information.
+    pub augmented_hours: f64,
+}
+
+impl DataStats {
+    pub fn measure(train: &[Song], val: &[Song], transpositions: usize) -> Self {
+        let frames: u64 = train.iter().map(|s| s.n_frames as u64).sum();
+        let notes: u64 = train.iter().map(|s| s.notes.len() as u64).sum();
+        let beats = frames as f64 / FRAMES_PER_BEAT as f64;
+        let hours = beats / REFERENCE_BPM / 60.0;
+        Self {
+            train_windows: train.len(),
+            val_windows: val.len(),
+            notes_per_window: notes as f64 / train.len().max(1) as f64,
+            train_beats: beats,
+            train_hours: hours,
+            transpositions,
+            augmented_hours: hours * transpositions as f64,
+        }
+    }
+}
+
 /// What this run is, fixed for its lifetime. Set once by the driver via [`start`].
 #[derive(Serialize, Clone, Debug)]
 pub struct RunMeta {
@@ -49,11 +116,19 @@ pub struct RunMeta {
     pub backbone: String,
     /// Compute backend, e.g. `"wgpu"` / `"ndarray (8-way DP)"`.
     pub backend: String,
+    /// Needed for progress + ETA. Other hyperparameters live in the config blobs.
     pub epochs: usize,
-    pub batch_size: usize,
-    pub lr: f64,
-    pub train_windows: usize,
-    pub val_windows: usize,
+    pub context: ContextWindow,
+    pub data: DataStats,
+    /// Trainable parameters (`Module::num_params`).
+    pub params: usize,
+    /// Matmul-only estimate for one window's forward pass — see [`crate::flops`].
+    pub flops_per_window: u64,
+    /// Architecture hyperparameters, serialized from the backbone's own `Config` so
+    /// the dashboard never drifts from the model: new field in, new row out.
+    pub model_config: serde_json::Value,
+    /// Optimisation hyperparameters, serialized from the driver's own `Config`.
+    pub train_config: serde_json::Value,
 }
 
 /// One completed epoch. The two stages report different held-out metrics — a

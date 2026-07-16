@@ -14,6 +14,7 @@ use burn::tensor::activation::gelu;
 use burn::tensor::IndexingUpdateOp;
 
 use crate::backbone::{ArBackbone, ArOutput, Backbone, ModelOutput};
+use crate::flops;
 use crate::m01_event::batch::EventBatchData;
 use crate::notes::Song;
 use crate::theory::{N_KEY_CLASSES, N_QUALITY_CLASSES, N_ROOT_CLASSES};
@@ -31,7 +32,9 @@ pub struct EventModelConfig {
     pub n_layers: usize,
     #[config(default = 0.1)]
     pub dropout: f64,
-    #[config(default = 128)]
+    /// Window length in frames (256 = 64 beats = 32s at 120bpm). Must match the
+    /// dataset's windowing.
+    #[config(default = 256)]
     pub n_frames: usize,
 }
 
@@ -165,6 +168,15 @@ impl<B: Backend> Backbone<B> for EventKeyChordModel<B> {
 
     fn key_labels(data: &EventBatchData) -> &[usize] {
         &data.key_labels
+    }
+
+    /// φ runs **per note**, so this generation's cost genuinely depends on how many
+    /// notes the window holds; the trunk and heads are fixed.
+    fn flops_per_window(cfg: &EventModelConfig, notes_per_window: usize) -> u64 {
+        let seq = cfg.n_frames;
+        flops::matmul(notes_per_window, cfg.d_model, cfg.d_model)
+            + flops::transformer_encoder(cfg.n_layers, seq, cfg.d_model, cfg.d_ff)
+            + flops::chord_key_heads(seq, cfg.d_model)
     }
 
     /// Supervised forward (bidirectional): per-frame factored chord logits + pooled

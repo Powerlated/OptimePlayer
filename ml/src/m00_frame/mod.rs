@@ -1,4 +1,4 @@
-//! **Generation 00** — the hand-engineered frame-feature backbone.
+//! **Generation 00** â€” the hand-engineered frame-feature backbone.
 //!
 //! Input is [`crate::features`]'s 57-dim per-frame vector (chroma / bass / melody /
 //! onset pitch-class blocks + scalars), projected and run through a bidirectional
@@ -14,10 +14,11 @@ pub use model::{KeyChordModel, ModelConfig};
 use burn::prelude::*;
 
 use crate::backbone::{Backbone, ModelOutput};
+use crate::flops;
 use crate::notes::Song;
 
 /// Generation-00 model, named for the [`Backbone`] it implements. A type alias, so
-/// it is the same type as [`KeyChordModel`] — persisted records are unaffected.
+/// it is the same type as [`KeyChordModel`] â€” persisted records are unaffected.
 pub type FrameModel<B> = KeyChordModel<B>;
 
 impl<B: Backend> Backbone<B> for KeyChordModel<B> {
@@ -53,5 +54,15 @@ impl<B: Backend> Backbone<B> for KeyChordModel<B> {
 
     fn forward_output(&self, batch: &FrameBatch, device: &B::Device) -> ModelOutput<B> {
         self.forward(batch.tensor(device))
+    }
+
+    /// Fixed-cost: a `[max_seq_len, n_features]` grid through one projection, the
+    /// trunk, and the heads. Independent of note count — the features are already
+    /// pooled per frame. The recon + is-music heads are not on this path.
+    fn flops_per_window(cfg: &ModelConfig, _notes_per_window: usize) -> u64 {
+        let seq = cfg.max_seq_len;
+        flops::matmul(seq, cfg.n_features, cfg.d_model)
+            + flops::transformer_encoder(cfg.n_layers, seq, cfg.d_model, cfg.d_ff)
+            + flops::chord_key_heads(seq, cfg.d_model)
     }
 }

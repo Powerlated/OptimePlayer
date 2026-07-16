@@ -17,7 +17,7 @@ use burn::config::Config;
 use burn::module::Module;
 use burn::prelude::*;
 use burn::record::CompactRecorder;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::notes::Song;
 
@@ -79,6 +79,19 @@ pub trait Backbone<B: Backend>: Module<B> + Clone + Send + Sync + 'static {
 
     /// Supervised forward: per-frame factored chord logits + pooled key logits.
     fn forward_output(&self, batch: &Self::Batch, device: &B::Device) -> ModelOutput<B>;
+
+    /// Estimated FLOPs to push **one window** through [`forward_output`], under the
+    /// matmul-only convention in [`crate::flops`].
+    ///
+    /// `notes_per_window` is the mean note count of the data, because generation 01
+    /// applies its φ projection per *note* — its cost is data-dependent. The other
+    /// generations ignore it (00 reads a fixed feature grid; 02's set transformer
+    /// runs over a dense `MAX_POLY`-wide grid whether or not the slots are filled).
+    ///
+    /// The AR pretraining path ([`ArBackbone::ar_forward`]) differs only in swapping
+    /// the chord/key heads for the two AR heads — well under 1% of the trunk — so
+    /// this stands in for both stages rather than splitting the contract.
+    fn flops_per_window(cfg: &Self::Cfg, notes_per_window: usize) -> u64;
 }
 
 /// A backbone that supports **autoregressive next-frame** pretraining: predict the
@@ -126,6 +139,21 @@ where
         .unwrap_or_else(|e| panic!("save weights {}: {e}", dir.display()));
     cfg.save(dir.join(format!("{name}.json")))
         .unwrap_or_else(|e| panic!("save config {}: {e}", dir.display()));
+}
+
+/// Per-epoch checkpoint: `<dir>/<name>-ep007(.mpk)` + `.json`, alongside the final
+/// `<name>`. Zero-padded so a lexical sort is a chronological one.
+///
+/// Takes the model by reference and clones — a driver must keep training after the
+/// write, unlike [`save`], which consumes the model at the end of a run.
+pub fn save_epoch<M, B>(model: &M, cfg: &M::Cfg, dir: &Path, name: &str, epoch: usize) -> PathBuf
+where
+    B: Backend,
+    M: Backbone<B>,
+{
+    let stem = format!("{name}-ep{epoch:03}");
+    save::<M, B>(model.clone(), cfg, dir, &stem);
+    dir.join(stem)
 }
 
 /// Artifact directory for a backbone: `<root>/<DIR>` (e.g. `models/02-hier`).
