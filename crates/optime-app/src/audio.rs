@@ -308,6 +308,12 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
     let st = &mut *guard;
     // Heartbeat for the web stall detector (see `AudioEngine::callback_age`).
     st.last_callback = t0;
+    // Annotation owns the output while a bounce is installed: the playlist stays idle (no fade, no
+    // decode, no advancement) and the buffer is played by index instead.
+    if st.bounce.buffer.is_some() {
+        write_bounce(data, channels, st, t0);
+        return;
+    }
     // Advance the playlist (fade trigger + lazy decode) before rendering; keeps working while
     // the UI is frozen. May install a new controller.
     step_playback(st);
@@ -355,6 +361,54 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         let n = block.len() / frames_per_call;
         let frames = &mut scratch[..n];
         resampler.process(frames, &mut || controller.next_sample(config));
+        for (frame, &(l, r)) in block.chunks_mut(frames_per_call).zip(frames.iter()) {
+            let g = ramp.next();
+            let (l, r) = (l * g, r * g);
+            match frame.len() {
+                0 => {}
+                1 => frame[0] = (l + r) * 0.5,
+                _ => {
+                    frame[0] = l;
+                    frame[1] = r;
+                    for s in &mut frame[2..] {
+                        *s = 0.0;
+                    }
+                }
+            }
+        }
+    }
+    ramp.store(st);
+    update_meters(st, t0, data.len() / frames_per_call);
+}
+
+/// Fills the device buffer from the annotation [`Bounce`] instead of the live controller.
+///
+/// The bounce is rendered at [`ENGINE_SAMPLE_RATE_HZ`], so it feeds the *same* output resampler the
+/// live path uses and sounds identical — only the sample source differs. The master/pause ramps
+/// still apply (so scrubbing and pausing don't click), but there is no fade policy and no playlist:
+/// a looped bar must repeat bit-identically.
+///
+/// Uses the general channel-mapping loop rather than `write_audio`'s stereo fast path; annotation is
+/// a maintainer tool and never runs in the hot playback case.
+fn write_bounce(data: &mut [f32], channels: usize, st: &mut crate::player::AudioState, t0: f64) {
+    let device_rate = st.sample_rate as f32;
+    let mut ramp = GainRamp::new(st);
+    // Disjoint field borrows: the resampler and the transport are separate members of `st`.
+    let resampler = &mut st.resampler;
+    let bounce = &mut st.bounce;
+    resampler.set(
+        ENGINE_SAMPLE_RATE_HZ as f32,
+        device_rate,
+        InstrumentResampleMode::SincSampleNyquist { half_taps: 8 },
+    );
+
+    const CHUNK: usize = 256;
+    let mut scratch = [(0.0f32, 0.0f32); CHUNK];
+    let frames_per_call = channels.max(1);
+    for block in data.chunks_mut(frames_per_call * CHUNK) {
+        let n = block.len() / frames_per_call;
+        let frames = &mut scratch[..n];
+        resampler.process(frames, &mut || bounce.next_frame());
         for (frame, &(l, r)) in block.chunks_mut(frames_per_call).zip(frames.iter()) {
             let g = ramp.next();
             let (l, r) = (l * g, r * g);

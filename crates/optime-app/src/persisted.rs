@@ -136,6 +136,15 @@ pub struct Persisted {
     pub sort_mode: SortMode,
     /// Whether the sort runs in descending order.
     pub sort_descending: bool,
+
+    /// Hand-authored chord labels, keyed by source archive — **web only**.
+    ///
+    /// Native keeps these in `ml/annotations/*.json` in the source tree, which is the training data
+    /// of record. The browser has no source tree, so eframe storage is the working copy: without it
+    /// a refresh would silently destroy hours of listening, and "Save" there can only offer a
+    /// download. Defaulted so existing stored blobs (and the native build) load unchanged.
+    #[serde(default)]
+    pub annotations: std::collections::HashMap<String, crate::annotation::model::GameAnnotations>,
 }
 
 impl Default for Persisted {
@@ -151,6 +160,7 @@ impl Default for Persisted {
             // Native song-list order, ascending, until the user sorts.
             sort_mode: SortMode::Default,
             sort_descending: false,
+            annotations: std::collections::HashMap::new(),
 
             // The high-quality presets are owned by the engine (so offline tools share them); the
             // app's runtime-only piano-roll track mutes are injected per frame over these.
