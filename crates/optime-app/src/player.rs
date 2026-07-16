@@ -146,8 +146,8 @@ pub struct AudioState {
     pub last_callback: f64,
     /// Audio-thread-owned playlist + advancement (see [`Playback`]).
     pub playback: Playback,
-    /// Annotation transport (see [`BounceTransport`]). When a bounce is installed the callback
-    /// plays *it* instead of the live controller, and the playlist stays idle.
+    /// Annotation transport (see [`BounceTransport`]). While it is `active` the callback runs the
+    /// annotation mixer instead of the live controller, and the playlist stays idle.
     pub bounce: BounceTransport,
     /// Final-stage resampler from the fixed engine render rate ([`crate::audio::ENGINE_SAMPLE_RATE_HZ`])
     /// to the device's actual output rate.
@@ -155,7 +155,7 @@ pub struct AudioState {
 }
 
 impl AudioState {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             controller: None,
             config: PerDeviceSettings::neutral(),
@@ -185,7 +185,13 @@ impl AudioState {
 /// an index assignment, so there is no transition to schedule and no command queue to arbitrate.
 #[derive(Default)]
 pub struct BounceTransport {
-    /// The rendered song. `None` = annotation is off and the live controller plays as usual.
+    /// Whether the annotation mixer owns the output. Set for as long as annotation mode is on —
+    /// **not** merely while [`Self::buffer`] exists. The mixer is what plays chords, so gating it on
+    /// the buffer would mean a right-clicked chord made no sound until the multi-second bounce
+    /// finished rendering. While it is set the live playlist stays idle entirely.
+    pub active: bool,
+    /// The rendered song, once [`crate::app::OptimeApp::poll_bounce`] finishes it. `None` = nothing
+    /// to play under the chords yet (still rendering); the mixer runs regardless.
     pub buffer: Option<Arc<Bounce>>,
     /// Playback position, in bounce frames.
     pub pos: usize,

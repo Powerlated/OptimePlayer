@@ -964,6 +964,22 @@ impl OptimeApp {
     /// Restarts the currently-playing entry from the top.
     fn restart(&mut self) {
         self.paused = false;
+        // Annotation mode parks the playlist entirely, so a `PlayAt` would just sit in the queue
+        // unread: restarting there means rewinding the bounce, which is an index.
+        if self.annotation.enabled {
+            self.annotation_seek(0.0);
+            if let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+            {
+                st.paused = false;
+                // The chord under the top of the song must strike again even if the playhead was
+                // already inside that same section.
+                if let Some(c) = &mut st.bounce.chords {
+                    c.reset();
+                }
+            }
+            return;
+        }
         let config = self.config();
         if let Some(audio) = &self.audio
             && let Ok(mut st) = audio.shared.lock()
@@ -1245,8 +1261,9 @@ impl OptimeApp {
                 if rolling {
                     c.set_chord(chord);
                 } else {
-                    // Stopped: don't strike, but forget what rang so resuming re-sounds it.
-                    c.reset();
+                    // Stopped: let go of the section chord (it is held until the section changes,
+                    // and a stopped playhead never will) and forget it, so resuming re-sounds it.
+                    c.stop_following();
                 }
             }
         }
@@ -1378,8 +1395,8 @@ impl OptimeApp {
             self.annotation.picker_just_opened = true;
             // Right-clicking a labelled bar plays its chord: the fastest possible check of whether
             // what you wrote is what you meant.
-            if let Some(c) = self.chord_at(song_id, step) {
-                self.strike_chord(c);
+            if let Some(section) = self.chord_at(song_id, step) {
+                self.strike_chord(section);
             }
             return;
         }
@@ -1734,14 +1751,16 @@ impl OptimeApp {
             .set_selection(Some((next_s as f64, next_e as f64)));
     }
 
-    /// Sounds `chord` now through the audition voice.
-    fn strike_chord(&mut self, chord: crate::annotation::model::Chord) {
+    /// Sounds `section`'s chord now through the audition voice. Passing the span, not just the
+    /// chord, lets the voice recognise the playhead arriving at the same section and hold it rather
+    /// than restrike it.
+    fn strike_chord(&mut self, section: (u32, crate::annotation::model::Chord)) {
         if let Some(audio) = &self.audio
             && let Ok(mut st) = audio.shared.lock()
         {
             st.bounce.chords_on = true; // an explicit audition overrides the toggle
             if let Some(c) = &mut st.bounce.chords {
-                c.strike(chord);
+                c.strike(section);
             }
         }
     }
@@ -1805,6 +1824,16 @@ impl OptimeApp {
         if on {
             self.load_annotations();
             self.capture_chord_instrument();
+            // Hand the output to the annotation mixer up front, not when the bounce lands: chord
+            // playback has to work while the render is still going.
+            if let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+            {
+                st.bounce.active = true;
+                st.bounce.buffer = None;
+                st.bounce.pos = 0;
+                st.bounce.loop_range = None;
+            }
             self.request_bounce();
             if let Some(ov) = &self.overview {
                 let total = ov.total_steps;
@@ -1819,6 +1848,7 @@ impl OptimeApp {
             if let Some(audio) = &self.audio
                 && let Ok(mut st) = audio.shared.lock()
             {
+                st.bounce.active = false;
                 st.bounce.buffer = None;
                 st.bounce.playing = false;
                 st.bounce.loop_range = None;
@@ -1853,12 +1883,15 @@ impl OptimeApp {
         }
     }
 
-    /// The annotated chord covering `step`, if any.
-    fn chord_at(&self, song_id: u32, step: f64) -> Option<crate::annotation::model::Chord> {
+    /// The annotated chord covering `step`, if any, with the start step of the span it came from —
+    /// the voice keys its retrigger on the span, so two neighbouring bars labelled the same chord
+    /// each get struck.
+    fn chord_at(&self, song_id: u32, step: f64) -> Option<(u32, crate::annotation::model::Chord)> {
         self.annotation.song(song_id)?.spans.iter().find_map(|sp| {
             ((sp.start_step as f64) <= step && (sp.end_step as f64) > step)
                 .then_some(sp.chord)
                 .flatten()
+                .map(|c| (sp.start_step, c))
         })
     }
 
