@@ -17,6 +17,7 @@ use std::path::Path;
 
 use crate::backbone::{self, Backbone};
 use crate::backend::{Back, Inner, MlDevice};
+use crate::dashboard::{self, EpochPoint, RunMeta};
 use crate::notes::{random_transpose, Song};
 use crate::parallel::{default_shards, dp_step};
 use crate::progress::TrainProgress;
@@ -118,6 +119,19 @@ pub fn run<M>(
         val.len(),
         config.chord_smoothness_weight,
     );
+    dashboard::start(RunMeta {
+        stage: "supervised fine-tune".to_string(),
+        backbone: M::NAME.to_string(),
+        backend: format!(
+            "{}, {n_shards}-way DP",
+            dashboard::backend_label(std::any::type_name::<Back>())
+        ),
+        epochs: config.epochs,
+        batch_size: config.batch_size,
+        lr: config.lr,
+        train_windows: train.len(),
+        val_windows: val.len(),
+    });
 
     let n_total = indices.len().div_ceil(config.batch_size);
 
@@ -126,8 +140,7 @@ pub fn run<M>(
         indices.shuffle(&mut rng);
         let mut running = 0.0f64;
         let mut n_batches = 0usize;
-        let tag = format!("ep {epoch}");
-        let mut prog = TrainProgress::per_epoch();
+        let mut prog = TrainProgress::per_epoch(epoch);
 
         for chunk in indices.chunks(config.batch_size) {
             // Data-parallel step: shards differentiate the shared weights in
@@ -174,25 +187,28 @@ pub fn run<M>(
             model = m;
             running += loss;
             n_batches += 1;
-            prog.maybe_log(&tag, running, n_batches, n_total);
+            prog.maybe_log(running, n_batches, n_total);
         }
 
         let (key_acc, chord_acc, changes) =
             evaluate::<M>(&model, val, config.batch_size, seq, &device);
+        let train_loss = running / n_batches.max(1) as f64;
+        let secs = epoch_start.elapsed().as_secs_f64();
         println!(
-            "epoch {epoch:>3}/{}  loss {:.4}  |  val key acc {:.1}%  chord acc {:.1}%  changes/seq {:.1}  |  {:.1}s",
+            "epoch {epoch:>3}/{}  loss {train_loss:.4}  |  val key acc {:.1}%  chord acc {:.1}%  changes/seq {changes:.1}  |  {secs:.1}s",
             config.epochs,
-            running / n_batches.max(1) as f64,
             key_acc * 100.0,
             chord_acc * 100.0,
-            changes,
-            epoch_start.elapsed().as_secs_f64()
         );
+        dashboard::record_epoch(EpochPoint::supervised(
+            epoch, train_loss, key_acc, chord_acc, changes, secs,
+        ));
     }
 
     let dir = backbone::artifact_dir::<M, Back>(out_dir);
     backbone::save::<M, Back>(model, model_cfg, &dir, "model");
     println!("saved {} model to {}", M::NAME, dir.display());
+    dashboard::finish(&dir);
 }
 
 /// Validation metrics `(key_acc, chord_acc, mean_chord_changes_per_sequence)`.

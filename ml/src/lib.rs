@@ -47,6 +47,7 @@
 pub mod backbone;
 pub mod backend;
 pub mod cli;
+pub mod dashboard;
 pub mod data;
 pub mod estimate;
 pub mod features;

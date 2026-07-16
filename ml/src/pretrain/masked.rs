@@ -24,6 +24,7 @@ use std::path::Path;
 
 use crate::backbone;
 use crate::backend::{Back, Inner, MlDevice};
+use crate::dashboard::{self, EpochPoint, RunMeta};
 use crate::data::Example;
 use crate::features::{FEATURE_DIM, PITCH_BLOCK_DIM};
 use crate::m00_frame::{KeyChordModel, ModelConfig};
@@ -153,6 +154,22 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
         val.len(),
         config.mask_fraction * 100.0
     );
+    dashboard::start(RunMeta {
+        stage: format!(
+            "masked-frame pretrain ({:.0}% masked)",
+            config.mask_fraction * 100.0
+        ),
+        backbone: "frame".to_string(),
+        backend: format!(
+            "{}, {n_shards}-way DP",
+            dashboard::backend_label(std::any::type_name::<Back>())
+        ),
+        epochs: config.epochs,
+        batch_size: config.batch_size,
+        lr: config.lr,
+        train_windows: train.len(),
+        val_windows: val.len(),
+    });
 
     let n_total = indices.len().div_ceil(config.batch_size);
 
@@ -161,8 +178,7 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
         indices.shuffle(&mut rng);
         let mut running = 0.0f64;
         let mut n_batches = 0usize;
-        let tag = format!("ep {epoch}");
-        let mut prog = TrainProgress::per_epoch();
+        let mut prog = TrainProgress::per_epoch(epoch);
 
         for chunk in indices.chunks(config.batch_size) {
             // Data-parallel step: shards of this minibatch differentiate the shared
@@ -205,22 +221,23 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
             model = m;
             running += loss;
             n_batches += 1;
-            prog.maybe_log(&tag, running, n_batches, n_total);
+            prog.maybe_log(running, n_batches, n_total);
         }
 
         let val_loss = evaluate(&model, val, config, seq, &device);
+        let train_loss = running / n_batches.max(1) as f64;
+        let secs = epoch_start.elapsed().as_secs_f64();
         println!(
-            "epoch {epoch:>3}/{}  recon loss {:.5}  |  val recon loss {:.5}  |  {:.1}s",
+            "epoch {epoch:>3}/{}  recon loss {train_loss:.5}  |  val recon loss {val_loss:.5}  |  {secs:.1}s",
             config.epochs,
-            running / n_batches.max(1) as f64,
-            val_loss,
-            epoch_start.elapsed().as_secs_f64()
         );
+        dashboard::record_epoch(EpochPoint::pretext(epoch, train_loss, val_loss, secs));
     }
 
     let dir = backbone::artifact_dir::<KeyChordModel<Back>, Back>(out_dir);
     backbone::save::<KeyChordModel<Back>, Back>(model, &config.model, &dir, "pretrained");
     println!("saved pretrained encoder to {}", dir.display());
+    dashboard::finish(&dir);
 }
 
 /// Held-out masked reconstruction loss. Uses a fixed RNG so the number is
