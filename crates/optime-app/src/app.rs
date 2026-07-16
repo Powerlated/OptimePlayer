@@ -1295,17 +1295,21 @@ impl OptimeApp {
         let Some(song_id) = self.current_song.map(|i| self.songs[i].song_id) else {
             return;
         };
-        // A lane drag paints a range; show it live, then commit on release.
-        if let (Some(a), Some(b)) = (input.drag_start_step, input.hover_step)
+        // A drag paints a range; show it live, then open the picker on release. `drag_step` (not
+        // `hover_step`) tracks the pointer, so a drag that wanders off the roll still resolves.
+        if let (Some(a), Some(b)) = (input.drag_start_step, input.drag_step)
             && (input.dragging || input.drag_stopped)
         {
             let (s, e) = (self.snap_step(a), self.snap_step(b));
             let (s, e) = (s.min(e), s.max(e));
-            // A click (no movement) still selects one whole snap unit.
+            // A drag with no movement still selects one whole snap unit.
             let e = if e > s { e } else { self.snap_next(s) };
             self.piano_roll.set_selection(Some((s, e)));
             if input.drag_stopped {
                 self.select_or_create_span(song_id, s, e);
+                // The picker comes to the region just dragged, rather than making the eye travel to
+                // a toolbar and back for every bar.
+                self.annotation.picker_at = input.pointer_pos;
             }
             return;
         }
@@ -1491,8 +1495,10 @@ impl OptimeApp {
         let mut pick: Option<Option<crate::annotation::model::Chord>> = None;
         let mut uncertain = self.annotation.picker_uncertain;
 
-        egui::Area::new(egui::Id::new("chord_picker"))
+        let area = egui::Area::new(egui::Id::new("chord_picker"))
             .order(egui::Order::Foreground)
+            // Keep the whole grid on screen when the drag ends near an edge.
+            .constrain(true)
             .fixed_pos(egui::pos2(px, py))
             .show(ctx, |ui| {
                 egui::Frame::popup(&ctx.style()).show(ui, |ui| {
@@ -1602,8 +1608,14 @@ impl OptimeApp {
             self.set_selected_chord(song_id, chord);
             close = true;
         }
-        // Escape, or a click anywhere outside, dismisses it.
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Escape, or a press anywhere outside the popup, dismisses it. (A *press*, not a release:
+        // the drag-release that opened the picker lands on the same frame, and testing releases
+        // would close it instantly.)
+        let rect = area.response.rect;
+        let pressed_outside = ctx.input(|i| {
+            i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p))
+        });
+        if pressed_outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             close = true;
         }
         if close {

@@ -96,6 +96,9 @@ pub struct RollInput {
     pub over_lane: bool,
     /// Step the current primary drag began at.
     pub drag_start_step: Option<f64>,
+    /// Step under the pointer *during* a drag. Unlike `hover_step` this survives the pointer
+    /// leaving the roll, so a drag that ends outside still resolves.
+    pub drag_step: Option<f64>,
     pub drag_started: bool,
     pub dragging: bool,
     pub drag_stopped: bool,
@@ -500,10 +503,21 @@ impl PianoRoll {
         input.clicked = resp.clicked();
         input.secondary_clicked = resp.secondary_clicked();
 
+        // `interact_pointer_pos` keeps reporting while a drag is held, even once the pointer has
+        // left the roll — `hover_pos` does not. A drag that ends outside the widget (easy to do:
+        // the chord lane is 20 pt tall) must still commit, and must still have somewhere to put the
+        // picker, so the drag's own position comes from here rather than from hover.
+        let drag_pos = resp.interact_pointer_pos();
+        if input.dragging || input.drag_stopped {
+            input.drag_step = drag_pos.map(|p| step_at(p.x));
+            if let Some(p) = drag_pos {
+                input.pointer_pos = Some((p.x, p.y));
+            }
+        }
         // The press position has to be latched: once a drag is under way egui reports the *current*
         // pointer, and the anchor is what a span is drawn from.
         if input.drag_started {
-            self.drag_start_step = resp.interact_pointer_pos().map(|p| step_at(p.x));
+            self.drag_start_step = drag_pos.map(|p| step_at(p.x));
         }
         input.drag_start_step = self.drag_start_step;
         if input.drag_stopped {
