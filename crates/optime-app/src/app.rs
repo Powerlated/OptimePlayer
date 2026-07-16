@@ -1274,16 +1274,37 @@ impl OptimeApp {
     /// Snaps a step to the grid: bars by default, beats when the annotator asks.
     fn snap_step(&self, step: f64) -> f64 {
         let g = self.piano_roll.grid();
-        let unit = if self.annotation.beat_snap {
-            g.steps_per_beat
-        } else {
-            g.bar_steps().unwrap_or(g.steps_per_beat)
-        };
+        let unit = self.snap_unit();
         if unit <= 0.0 {
             return step.max(0.0);
         }
         let rel = step - g.offset_steps;
         (g.offset_steps + (rel / unit).round() * unit).max(0.0)
+    }
+
+    /// The snap unit in steps: a bar, or a beat when beat-snap is on.
+    fn snap_unit(&self) -> f64 {
+        let g = self.piano_roll.grid();
+        if self.annotation.beat_snap {
+            g.steps_per_beat
+        } else {
+            g.bar_steps().unwrap_or(g.steps_per_beat)
+        }
+    }
+
+    /// The start of the snap unit *containing* `step` — floor, not round.
+    ///
+    /// Distinct from [`Self::snap_step`] on purpose: dragging an edge wants the *nearest* boundary,
+    /// but clicking a spot means "this bar", and rounding would grab the next bar over from
+    /// anywhere past its midpoint.
+    fn snap_floor(&self, step: f64) -> f64 {
+        let g = self.piano_roll.grid();
+        let unit = self.snap_unit();
+        if unit <= 0.0 {
+            return step.max(0.0);
+        }
+        let rel = step - g.offset_steps;
+        (g.offset_steps + (rel / unit).floor() * unit).max(0.0)
     }
 
     /// Interprets the roll's pointer input as annotation edits.
@@ -1310,7 +1331,32 @@ impl OptimeApp {
                 // The picker comes to the region just dragged, rather than making the eye travel to
                 // a toolbar and back for every bar.
                 self.annotation.picker_at = input.pointer_pos;
+                self.annotation.picker_just_opened = true;
             }
+            return;
+        }
+        // A plain right-click (no drag) opens the picker without needing a drag at all — the common
+        // case is one bar, and dragging a single bar to label it is busywork.
+        if input.secondary_clicked
+            && let Some(step) = input.hover_step
+        {
+            // On an existing span, take that span's whole range: right-clicking a block means "this
+            // chord", and re-labelling or clearing it should act on what you clicked, not on
+            // whichever grid unit happens to sit under the cursor.
+            let existing = self.annotation.song(song_id).and_then(|a| {
+                a.spans
+                    .iter()
+                    .find(|sp| (sp.start_step as f64) <= step && (sp.end_step as f64) > step)
+                    .map(|sp| (sp.start_step, sp.end_step))
+            });
+            let (s, e) = existing.unwrap_or_else(|| {
+                let s = self.snap_floor(step);
+                (s as u32, self.snap_next(s) as u32)
+            });
+            self.select_or_create_span(song_id, s as f64, e as f64);
+            self.piano_roll.set_selection(Some((s as f64, e as f64)));
+            self.annotation.picker_at = input.pointer_pos;
+            self.annotation.picker_just_opened = true;
             return;
         }
         // Clicking the note area parks the playhead there — the fastest way to audition a spot.
@@ -1324,13 +1370,7 @@ impl OptimeApp {
 
     /// The next snap boundary after `step`.
     fn snap_next(&self, step: f64) -> f64 {
-        let g = self.piano_roll.grid();
-        let unit = if self.annotation.beat_snap {
-            g.steps_per_beat
-        } else {
-            g.bar_steps().unwrap_or(g.steps_per_beat)
-        };
-        step + unit.max(1.0)
+        step + self.snap_unit().max(1.0)
     }
 
     /// Selects the span covering `[start, end)`, or remembers the range so the next typed chord
@@ -1614,10 +1654,17 @@ impl OptimeApp {
         // Escape, or a press anywhere outside the popup, dismisses it. (A *press*, not a release:
         // the drag-release that opened the picker lands on the same frame, and testing releases
         // would close it instantly.)
+        //
+        // Never on the opening frame: a right-click's *press* arrives in the same frame the popup
+        // first appears, and a popup constrained away from a screen edge doesn't sit under the
+        // cursor — so it would dismiss itself the instant it opened.
         let rect = area.response.rect;
-        let pressed_outside = ctx.input(|i| {
-            i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p))
-        });
+        let just_opened = std::mem::take(&mut self.annotation.picker_just_opened);
+        let pressed_outside = !just_opened
+            && ctx.input(|i| {
+                i.pointer.any_pressed()
+                    && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p))
+            });
         if pressed_outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             close = true;
         }

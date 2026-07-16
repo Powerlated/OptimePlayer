@@ -685,10 +685,11 @@ impl PianoRoll {
                     .zoom_about(roll.min.x, anchor, 1.0 / zoom_gesture as f64);
             }
         }
-        // Middle- or right-drag pans. Left-drag is reserved for editing chord spans.
-        if resp.dragged_by(egui::PointerButton::Middle)
-            || resp.dragged_by(egui::PointerButton::Secondary)
-        {
+        // Middle-drag pans. Left-drag selects a region; the right button belongs to the chord
+        // picker, so it deliberately does *not* pan — right-drag panning would turn any right-click
+        // with a few pixels of hand jitter into a pan instead of opening the picker. Panning is
+        // still reachable by middle-drag and shift+wheel.
+        if resp.dragged_by(egui::PointerButton::Middle) {
             let dx = resp.drag_delta().x as f64;
             self.view.pan_points(-dx);
             // A drag should track the hand exactly, so bypass the glide.

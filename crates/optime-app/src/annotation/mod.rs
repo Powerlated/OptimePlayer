@@ -117,10 +117,15 @@ pub struct AnnotationState {
     pub dirty: bool,
     /// Beat snap instead of the default bar snap.
     pub beat_snap: bool,
-    /// Where the chord picker is open, in screen coordinates. `Some` right after a lane drag: the
-    /// picker is the primary way to label, so it comes to the region rather than making the eye
-    /// travel to a toolbar and back for every bar.
+    /// Where the chord picker is open, in screen coordinates. `Some` right after a drag or a
+    /// right-click: the picker is the primary way to label, so it comes to the region rather than
+    /// making the eye travel to a toolbar and back for every bar.
     pub picker_at: Option<(f32, f32)>,
+    /// Set on the frame the picker opens, so the very click that opened it can't also dismiss it.
+    /// A right-click's press arrives in the same frame the popup first appears, and once the popup
+    /// is constrained away from a screen edge it no longer sits under the cursor — so "was the
+    /// press inside?" is the wrong question on frame one.
+    pub picker_just_opened: bool,
     /// Whether the picker's "quality uncertain" box is ticked; sticks across picks because
     /// ambiguity usually comes in runs (a whole sparse section, not one bar).
     pub picker_uncertain: bool,
