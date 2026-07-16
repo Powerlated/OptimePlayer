@@ -539,24 +539,6 @@ impl PianoRoll {
         let painter = painter.with_clip_rect(strip);
         let mid_y = (strip.min.y + strip.max.y) * 0.5;
 
-        // The selected span / drag preview sits under the labels so text stays readable.
-        if let Some((s, e)) = self.selection {
-            let (x0, x1) = (xt(s.min(e)), xt(s.max(e)));
-            let r = Rect::from_min_max(Pos2::new(x0, strip.min.y), Pos2::new(x1, strip.max.y));
-            painter.rect_filled(
-                r,
-                0.0,
-                Color32::from_rgba_unmultiplied(0x5a, 0x8a, 0xff, 60),
-            );
-            painter.rect_stroke(
-                r,
-                0.0,
-                Stroke::new(
-                    1.0_f32,
-                    Color32::from_rgba_unmultiplied(0x8a, 0xb0, 0xff, 200),
-                ),
-            );
-        }
         for c in &self.chords {
             let x0 = xt(c.start);
             let x1 = xt(c.end);
@@ -617,6 +599,27 @@ impl PianoRoll {
                 &c.label,
                 FontId::proportional(12.0),
                 color,
+            );
+        }
+
+        // The selection goes on top, as a translucent wash. Under the blocks it would be invisible
+        // the moment a region already had a label — which is exactly when you most need to see what
+        // you have selected (you are about to overwrite it).
+        if let Some((s, e)) = self.selection {
+            let (x0, x1) = (xt(s.min(e)), xt(s.max(e)));
+            let r = Rect::from_min_max(Pos2::new(x0, strip.min.y), Pos2::new(x1, strip.max.y));
+            painter.rect_filled(
+                r,
+                0.0,
+                Color32::from_rgba_unmultiplied(0x8a, 0xb8, 0xff, 52),
+            );
+            painter.rect_stroke(
+                r,
+                0.0,
+                Stroke::new(
+                    1.5_f32,
+                    Color32::from_rgba_unmultiplied(0xbf, 0xd8, 0xff, 235),
+                ),
             );
         }
     }

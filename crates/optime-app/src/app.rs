@@ -1517,7 +1517,10 @@ impl OptimeApp {
                                 .color(crate::theme::TEXT_DIM),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("✕").clicked() {
+                            // `❌`, not `✕`: the loaded fonts (Inter / SF Pro + egui's emoji font)
+                            // have no U+2715, so it renders as tofu. This is the glyph the Stats
+                            // window's close button already uses.
+                            if ui.small_button("❌").clicked() {
                                 close = true;
                             }
                         });
