@@ -24,28 +24,36 @@ use burn::backend::Autodiff;
 use burn::prelude::Backend;
 
 /// Inference / non-autodiff backend.
-#[cfg(not(feature = "cuda"))]
-pub type Inner = burn::backend::NdArray<f32>;
-
-/// The device type for [`Inner`].
-#[cfg(not(feature = "cuda"))]
-pub type MlDevice = burn::backend::ndarray::NdArrayDevice;
-
-/// Inference / non-autodiff backend.
 ///
-/// **The `i64` is load-bearing** — `Cuda` defaults to `IntElem = i32`, but the CPU
-/// `NdArray<f32>` uses `i64`, and code that reads an `Int` tensor back names the
-/// element concretely (`let v: Vec<i64> = t.into_data().to_vec().unwrap()`, e.g.
-/// [`crate::shared::eval_counts`]). Those reads panic with
-/// `TypeMismatch(expected I32, got I64)` under a defaulted `Cuda<f32>`. Pinning i64
-/// keeps one element type across both builds, so no call site has to be generic over
-/// `B::IntElem`. (Writes are unaffected: `Tensor::from_data` converts.)
+/// Three builds, in priority order (cuda wins over gpu if both are on, which they never should
+/// be): `cuda` → CUDA, `gpu` → WGPU (cubecl-wgsl → Vulkan/DX12/Metal), else the pure-Rust ndarray
+/// CPU backend. Every bin follows because no other module names a backend.
 #[cfg(feature = "cuda")]
 pub type Inner = burn::backend::Cuda<f32, i64>;
 
 /// The device type for [`Inner`].
 #[cfg(feature = "cuda")]
 pub type MlDevice = burn::backend::cuda::CudaDevice;
+
+/// Inference / non-autodiff backend: WGPU (cubecl-wgsl). The `i64` int element CLAUDE.md pins for
+/// CUDA isn't reachable here — WGSL has no first-class i64 — so this uses WGPU's default i32, and
+/// the eval-count reads in [`crate::shared`] are written against `B::IntElem` to match.
+#[cfg(all(feature = "gpu", not(feature = "cuda")))]
+pub type Inner = burn::backend::Wgpu;
+
+/// The device type for [`Inner`].
+#[cfg(all(feature = "gpu", not(feature = "cuda")))]
+pub type MlDevice = burn::backend::wgpu::WgpuDevice;
+
+/// Inference / non-autodiff backend: the pure-Rust `ndarray` CPU backend. Throughput comes from
+/// the data-parallel training loop in [`crate::parallel`], not from the backend: intra-op
+/// parallelism has nothing to fill on a model this small, so one stream tops out at ~2 cores.
+#[cfg(not(any(feature = "cuda", feature = "gpu")))]
+pub type Inner = burn::backend::NdArray<f32>;
+
+/// The device type for [`Inner`].
+#[cfg(not(any(feature = "cuda", feature = "gpu")))]
+pub type MlDevice = burn::backend::ndarray::NdArrayDevice;
 
 /// The autodiff training backend wrapping [`Inner`], with **gradient checkpointing**
 /// (`BalancedCheckpointing`): elementwise/activation ops are recomputed in backward

@@ -14,6 +14,14 @@ use crate::theory::{
     N_ROOT_CLASSES,
 };
 
+/// The concrete int element returned by an argmax read. burn's `TensorData::to_vec` does not
+/// cross-cast int dtypes, so this matches each backend's `IntElem`: `i32` under the WGPU build
+/// (WGSL has no first-class i64), `i64` everywhere else (ndarray and the i64-pinned CUDA backend).
+#[cfg(feature = "gpu")]
+type PredElem = i32;
+#[cfg(not(feature = "gpu"))]
+type PredElem = i64;
+
 /// Factored per-frame targets `(root_class, quality_class)` from flattened joint
 /// chord labels (`batch*seq`). No-chord → class 0 in both (plain CE over all frames).
 pub fn root_quality_targets<B: Backend>(
@@ -118,7 +126,7 @@ pub fn eval_counts<B: Backend>(
 ) -> EvalCounts {
     let mut c = EvalCounts::default();
 
-    let key_pred: Vec<i64> = out
+    let key_pred: Vec<PredElem> = out
         .key_logits
         .clone()
         .argmax(1)
@@ -133,7 +141,7 @@ pub fn eval_counts<B: Backend>(
     }
 
     let n = b * seq;
-    let root_pred: Vec<i64> = out
+    let root_pred: Vec<PredElem> = out
         .root_logits
         .clone()
         .reshape([n, N_ROOT_CLASSES])
@@ -142,7 +150,7 @@ pub fn eval_counts<B: Backend>(
         .into_data()
         .to_vec()
         .unwrap();
-    let quality_pred: Vec<i64> = out
+    let quality_pred: Vec<PredElem> = out
         .quality_logits
         .clone()
         .reshape([n, N_QUALITY_CLASSES])
