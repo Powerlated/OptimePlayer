@@ -195,6 +195,49 @@ Pipeline = **two-stage hybrid**: (1) SSL-pretrain trunk on *unlabeled real game 
 - **Training is not reproducible.** `config.seed` only seeds shuffling/augmentation; burn's param init + dropout draw from an unseeded global RNG, so identical runs differ (~0.2 loss spread at epoch 1). `Backend::seed` + `DP_SHARDS=1` makes it exact (parallel dropout draws are order-dependent). Don't build a before/after gate on exact losses.
 - **Live integration (future):** adapt live `SynthEvent` stream → `NoteEvent`s on the 4-frames/beat grid, `features::extract`, `infer::predict` on a trailing window for rolling read-out. Model + label space console-agnostic; the note representation is the only contract.
 
+### Running the pipeline by hand
+
+Order matters: each stage consumes the previous one's artifact. All commands run from `ml/`. Add
+`--features cuda` + `CUDA_PATH=/usr/local/cuda` to any training bin for the GPU (`--features "harvest cuda"`
+when a bin also needs the engine).
+
+```sh
+# 0. Data. Both clobber; the window (256) must match the model's — a dataset windowed at one
+#    length cannot train a model built for another.
+cargo run --release --bin generate_data                       # → data/{train,val}.bin  (synthetic, labelled)
+cargo run --release --features harvest --bin harvest -- ../demos 256 0.1 \
+    --annotate BPEE=../crates/optime-app/src/song_names/pokemon_emerald.json \
+    --annotate A3UJ=../crates/optime-app/src/song_names/mother_3.json   # → data/real_{train,val}.bin
+
+# 1. SSL pretrain on real songs (representation from reality).       → <dir>/<NN>/pretrained
+CUDA_PATH=/usr/local/cuda cargo run --release --features cuda --bin pretrain -- 20 32 --backbone hier
+
+# 2. Supervised fine-tune on synthetic theory labels (label semantics). → <dir>/<NN>/model
+CUDA_PATH=/usr/local/cuda cargo run --release --features cuda --bin train -- 12 32 \
+    --backbone hier --pretrained models/02-hier/pretrained
+```
+
+**3. Annotate** (the only real-music ground truth). In the app: Settings → *Data annotation mode*.
+Right-drag a region (or right-click a bar) → chord picker; left-click/drag scrubs; wheel zooms.
+Set the song's **meter** and **key**, and use *Bar 1 here* for a pickup. Save → `ml/annotations/*.json`
+(git-tracked; on web it downloads instead). A window needs **all 256 frames = 16 contiguous bars of
+4/4** *and* a song key, or it is dropped — so label contiguous stretches, not scattered bars.
+
+```sh
+# 4. Score against hand labels — THE real-music metric. Held-out songs only by default.
+cargo run --release --features harvest --bin eval_labeled -- --backbone hier
+
+# 5. Stage-3 SFT on hand labels, warm-started from the synthetic model. → <dir>/<NN>/model_sft
+cargo run --release --features harvest --bin sft -- 8 16 --backbone hier
+cargo run --release --features harvest --bin eval_labeled -- --backbone hier   # re-score after
+
+# Optional: bake predictions into the app's chord lane to judge by ear (see the .ocd procedure).
+```
+
+`sft` trains on the complement of exactly the songs `eval_labeled` scores (`annotations::is_val`).
+Never report an `eval_labeled --all` number after running `sft`, and never report `eval_real`'s chord
+agreement at all.
+
 ### Training-run reports
 
 Every full training run gets a report in `ml/reports/<YYYY-MM-DD>-<short-id>.md` from `ml/reports/TEMPLATE.md`. Format: goal, dataset table (sources/counts/split), config (model+optim+epochs+augment+DP), results table (pretrain recon, fine-tune synthetic val key/chord, is-music probe, `eval_real` recon-gap + chord-agreement), then Observations / Caveats / Next. Record honest caveats (heuristic reference, any leakage, label imbalance). Write the report when a run completes; don't overwrite prior runs.

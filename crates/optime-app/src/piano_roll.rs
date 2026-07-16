@@ -94,15 +94,19 @@ pub struct RollInput {
     pub pointer_pos: Option<(f32, f32)>,
     /// Whether the pointer is over the chord lane rather than the note area.
     pub over_lane: bool,
-    /// Step the current primary drag began at.
+    /// Step the current annotation (right-button) drag began at.
     pub drag_start_step: Option<f64>,
     /// Step under the pointer *during* a drag. Unlike `hover_step` this survives the pointer
     /// leaving the roll, so a drag that ends outside still resolves.
     pub drag_step: Option<f64>,
+    /// Right-button drag: selecting a region to annotate.
     pub drag_started: bool,
     pub dragging: bool,
     pub drag_stopped: bool,
-    pub clicked: bool,
+    /// Left button: scrubbing. A click *or* a drag — dragging the playhead should scrub
+    /// continuously, the way a transport does.
+    pub scrub_step: Option<f64>,
+    /// Right-click with no drag: annotate this spot.
     pub secondary_clicked: bool,
 }
 
@@ -497,17 +501,24 @@ impl PianoRoll {
             input.over_lane = p.y <= rect.min.y + CHORD_LANE_H;
             input.pointer_pos = Some((p.x, p.y));
         }
-        input.drag_started = resp.drag_started_by(egui::PointerButton::Primary);
-        input.dragging = resp.dragged_by(egui::PointerButton::Primary);
-        input.drag_stopped = resp.drag_stopped_by(egui::PointerButton::Primary);
-        input.clicked = resp.clicked();
-        input.secondary_clicked = resp.secondary_clicked();
+        // The right button is the *only* way to annotate — by drag or by click. The left button is
+        // purely the transport, so there is never a question of which gesture a press means.
+        input.drag_started = resp.drag_started_by(egui::PointerButton::Secondary);
+        input.dragging = resp.dragged_by(egui::PointerButton::Secondary);
+        input.drag_stopped = resp.drag_stopped_by(egui::PointerButton::Secondary);
+        input.secondary_clicked = resp.clicked_by(egui::PointerButton::Secondary);
 
         // `interact_pointer_pos` keeps reporting while a drag is held, even once the pointer has
         // left the roll — `hover_pos` does not. A drag that ends outside the widget (easy to do:
         // the chord lane is 20 pt tall) must still commit, and must still have somewhere to put the
         // picker, so the drag's own position comes from here rather than from hover.
         let drag_pos = resp.interact_pointer_pos();
+        // Left click or left drag scrubs, and keeps scrubbing while held.
+        if (resp.clicked() || resp.dragged_by(egui::PointerButton::Primary))
+            && let Some(p) = drag_pos
+        {
+            input.scrub_step = Some(step_at(p.x));
+        }
         if input.dragging || input.drag_stopped {
             input.drag_step = drag_pos.map(|p| step_at(p.x));
             if let Some(p) = drag_pos {

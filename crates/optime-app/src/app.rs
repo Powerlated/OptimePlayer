@@ -1359,11 +1359,8 @@ impl OptimeApp {
             self.annotation.picker_just_opened = true;
             return;
         }
-        // Clicking the note area parks the playhead there — the fastest way to audition a spot.
-        if input.clicked
-            && !input.over_lane
-            && let Some(step) = input.hover_step
-        {
+        // Left button is purely the transport: click or drag anywhere to scrub.
+        if let Some(step) = input.scrub_step {
             self.annotation_seek(step);
         }
     }
