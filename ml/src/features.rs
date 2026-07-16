@@ -189,6 +189,7 @@ mod tests {
                 pitch: 57,
                 velocity: 1.0,
                 instrument: Instrument::Harmony,
+                track: 0,
                 pan: 0.0,
             }, // A
             NoteEvent {
@@ -197,6 +198,7 @@ mod tests {
                 pitch: 61,
                 velocity: 1.0,
                 instrument: Instrument::Harmony,
+                track: 0,
                 pan: 0.0,
             }, // C#
             NoteEvent {
@@ -205,6 +207,7 @@ mod tests {
                 pitch: 64,
                 velocity: 1.0,
                 instrument: Instrument::Harmony,
+                track: 0,
                 pan: 0.0,
             }, // E
         ];

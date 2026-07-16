@@ -142,6 +142,7 @@ mod tests {
                 pitch: p,
                 velocity: 1.0,
                 instrument: Instrument::Harmony,
+                track: 0,
                 pan: 0.0,
             })
             .collect();

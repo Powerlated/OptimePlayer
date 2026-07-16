@@ -1,7 +1,8 @@
 /target
 
 # Generated artifacts (large, regenerable): synthetic + harvested datasets and
-# trained model weights. See README for the commands that produce them.
+# trained model weights (models/<00-frame|01-event|02-hier>/). See the ML section
+# of ../CLAUDE.md for the commands that produce them.
 /data
 /models
 

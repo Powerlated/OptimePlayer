@@ -9,6 +9,9 @@ edition = "2021"
 # Enables the real-song harvester + real-song eval, which depend on the main
 # engine crate. Off by default so the pure-synthetic build stays engine-free.
 harvest = ["dep:optime-core"]
+# WGPU GPU backend (cubecl-wgsl shaders → Vulkan/DX12/Metal). Off by default so
+# the lean CPU build is unaffected; enables `hier_pretrain_gpu`.
+gpu = ["burn/webgpu"]
 
 [dependencies]
 bincode = "1"
@@ -30,3 +33,7 @@ required-features = ["harvest"]
 [[bin]]
 name = "chord_export"
 required-features = ["harvest"]
+
+[[bin]]
+name = "hier_pretrain_gpu"
+required-features = ["gpu"]

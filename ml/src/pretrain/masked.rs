@@ -1,4 +1,4 @@
-//! Self-supervised **masked-frame** pretraining.
+//! Self-supervised **masked-frame** pretraining — **generation 00 only**.
 //!
 //! The encoder is trained on *unlabeled* real game songs (harvested via
 //! [`crate::harvest`]) by hiding a random fraction of frames and reconstructing
@@ -9,23 +9,27 @@
 //!
 //! Loss is mean-squared error on the four L2-normalized pitch-class blocks
 //! ([`PITCH_BLOCK_DIM`] dims), scored **only on masked frames**.
+//!
+//! This pretext needs the hand-engineered feature grid to mask and reconstruct, so
+//! it is specific to [`crate::m00_frame`]; the learned-token generations pretrain
+//! autoregressively instead ([`super::ar`]).
 
-use crate::train::MlDevice;
-use burn::module::{AutodiffModule, Module};
+use burn::module::AutodiffModule;
 use burn::optim::{AdamConfig, GradientsParams};
 use burn::prelude::*;
-use burn::record::CompactRecorder;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use std::path::Path;
 
+use crate::backbone;
+use crate::backend::{Back, Inner, MlDevice};
 use crate::data::Example;
 use crate::features::{FEATURE_DIM, PITCH_BLOCK_DIM};
-use crate::model::{KeyChordModel, ModelConfig};
+use crate::m00_frame::{KeyChordModel, ModelConfig};
 use crate::notes::{random_transpose, Song};
 use crate::parallel::{default_shards, dp_step};
-use crate::train::{Back, Inner};
+use crate::progress::TrainProgress;
 
 #[derive(Config, Debug)]
 pub struct PretrainConfig {
@@ -124,8 +128,8 @@ fn masked_loss<B: Backend>(
     masked_sq.sum().div_scalar(denom)
 }
 
-/// Pretrain the encoder on `train`, writing `pretrained` (weights) + a matching
-/// `pretrained.json` (config) into `out_dir`.
+/// Pretrain the encoder on `train`, writing `<out_dir>/00-frame/pretrained(.mpk)` +
+/// `pretrained.json`.
 pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path) {
     let device = MlDevice::default();
     let mut model: KeyChordModel<Back> = config.model.init(&device);
@@ -134,7 +138,6 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
     let seq = train.first().map(|s| s.n_frames).unwrap_or(0);
     assert!(seq > 0, "empty pretraining set");
 
-    std::fs::create_dir_all(out_dir).expect("create out dir");
     let mut rng = StdRng::seed_from_u64(config.seed);
     let mut indices: Vec<usize> = (0..train.len()).collect();
     // Data-parallel width: `DP_SHARDS` env override, else logical-core count.
@@ -151,11 +154,15 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
         config.mask_fraction * 100.0
     );
 
+    let n_total = indices.len().div_ceil(config.batch_size);
+
     for epoch in 1..=config.epochs {
         let epoch_start = std::time::Instant::now();
         indices.shuffle(&mut rng);
         let mut running = 0.0f64;
         let mut n_batches = 0usize;
+        let tag = format!("ep {epoch}");
+        let mut prog = TrainProgress::per_epoch();
 
         for chunk in indices.chunks(config.batch_size) {
             // Data-parallel step: shards of this minibatch differentiate the shared
@@ -198,6 +205,7 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
             model = m;
             running += loss;
             n_batches += 1;
+            prog.maybe_log(&tag, running, n_batches, n_total);
         }
 
         let val_loss = evaluate(&model, val, config, seq, &device);
@@ -210,16 +218,9 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
         );
     }
 
-    let recorder = CompactRecorder::new();
-    model
-        .clone()
-        .save_file(out_dir.join("pretrained"), &recorder)
-        .expect("save pretrained weights");
-    config
-        .model
-        .save(out_dir.join("pretrained.json"))
-        .expect("save pretrained config");
-    println!("saved pretrained encoder to {}", out_dir.display());
+    let dir = backbone::artifact_dir::<KeyChordModel<Back>, Back>(out_dir);
+    backbone::save::<KeyChordModel<Back>, Back>(model, &config.model, &dir, "pretrained");
+    println!("saved pretrained encoder to {}", dir.display());
 }
 
 /// Held-out masked reconstruction loss. Uses a fixed RNG so the number is

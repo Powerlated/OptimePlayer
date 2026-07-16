@@ -9,12 +9,15 @@
 //!
 //! Usage:
 //!   cargo run --release --features harvest --bin chord_export -- \
-//!       <archive> <out.ocd> [--names <song_names.json>]
+//!       <archive> <out.ocd> [--names <song_names.json>] [--model frame|event]
 //!
 //! - `<archive>` a `.gba`/`.gbaaudio`/`.nds`/`.sdat` (gzip is transparently handled).
 //! - `<out.ocd>` output path.
 //! - `--names` optional `song_names` JSON; restricts output to its curated ids
 //!   (skips SFX/jingles). Omit to export every playable song.
+//! - `--model` backbone: `frame` (default, reads `models/model`) or `event` (reads
+//!   `models/event_model`). Both backbones share this pipeline and the `.ocd`
+//!   format, so the rest of the tool is model-agnostic.
 //!
 //! Reads the trained model from `models/` (like `bin/infer`).
 //!
@@ -40,17 +43,23 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+use burn::module::AutodiffModule;
+use optime_ml::backbone::{self, Backbone};
+use optime_ml::backend::{Back, Inner, MlDevice};
+use optime_ml::cli::{Args, Kind};
 use optime_ml::harvest::harvest_song_full;
-use optime_ml::infer::{merge_segments, predict};
+use optime_ml::infer::{merge_segments, predict, Prediction};
+use optime_ml::m00_frame::FrameModel;
+use optime_ml::m01_event::EventModel;
+use optime_ml::m02_hier::HierModel;
 use optime_ml::notes::{NoteEvent, FRAMES_PER_BEAT};
 use optime_ml::theory::Key;
-use optime_ml::train::{load_model, Back, MlDevice};
 
 use optime_core::{load_all, SoundData};
 
-/// Window length fed to the model, matching the training sequence length so the
-/// learned positional embeddings stay in-distribution (`max_seq_len` is 512, but
-/// the supervised heads were trained at 128).
+/// Window length fed to the model — the full context it has (a bidirectional
+/// encoder over this many frames, no cross-window memory). Equals the model's
+/// `max_seq_len` and the training sequence length (128 frames = 32 beats).
 const SEQ_LEN: usize = 128;
 
 /// One song's reduced chord timeline: contiguous segments as `(start_step, label)`
@@ -60,24 +69,52 @@ struct SongOut {
     segments: Vec<(u32, String)>,
 }
 
+/// Type-erased predict fn over one windowed note slice — wraps whichever backbone
+/// was loaded, so [`export_song`] is model-agnostic.
+type Predict = Box<dyn Fn(&[NoteEvent], usize) -> Prediction>;
+
+/// Load `prefix` as backbone `M` and erase it behind a [`Predict`] closure.
+fn boxed_predict<M>(prefix: &Path, device: MlDevice) -> Predict
+where
+    M: Backbone<Back> + AutodiffModule<Back>,
+    M::InnerModule: Backbone<Inner, Batch = <M as Backbone<Back>>::Batch>,
+{
+    let model = backbone::load::<M, Back>(prefix, &device);
+    Box::new(move |notes, nf| predict::<M>(&model, notes, nf, &device))
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let positional: Vec<&String> = args[1..].iter().filter(|a| !a.starts_with("--")).collect();
-    if positional.len() < 2 {
-        eprintln!("usage: chord_export <archive> <out.ocd> [--names <song_names.json>]");
+    let args = Args::parse();
+    if args.positional.len() < 2 {
+        eprintln!(
+            "usage: chord_export <archive> <out.ocd> [--names <song_names.json>]              [--backbone frame|event|hier] [--out-dir models]"
+        );
         std::process::exit(1);
     }
-    let archive_path = positional[0];
-    let out_path = positional[1];
-    let names_filter = flag(&args, "--names").map(|p| load_curated_ids(Path::new(&p)));
+    let archive_path = args.positional[0].as_str();
+    let out_path = args.positional[1].as_str();
+    let raw: Vec<String> = std::env::args().collect();
+    let names_filter = flag(&raw, "--names").map(|p| load_curated_ids(Path::new(&p)));
 
     let device = MlDevice::default();
-    let model_dir = Path::new("models");
-    if !model_dir.join("model.json").exists() {
-        eprintln!("models/ not found — run `cargo run --release --bin train` first");
+
+    // Load the requested backbone and wrap its predict fn in a single closure so the
+    // rest of the pipeline (harvest → windowed inference → `.ocd` encode) is shared
+    // and the fragile binary format lives in exactly one place.
+    let prefix = args.out_dir.join(args.kind.dir()).join("model");
+    if !prefix.with_extension("json").exists() {
+        eprintln!(
+            "{}.json not found — run `cargo run --release --bin train -- --backbone {}` first",
+            prefix.display(),
+            args.kind.name()
+        );
         std::process::exit(1);
     }
-    let model = load_model(model_dir, &device);
+    let predict: Predict = match args.kind {
+        Kind::Frame => boxed_predict::<FrameModel<Back>>(&prefix, device),
+        Kind::Event => boxed_predict::<EventModel<Back>>(&prefix, device),
+        Kind::Hier => boxed_predict::<HierModel<Back>>(&prefix, device),
+    };
 
     let bytes = read_maybe_gzip(Path::new(archive_path));
     let archives = load_all(&bytes);
@@ -95,7 +132,7 @@ fn main() {
                     continue;
                 }
             }
-            if let Some(out) = export_song(&model, &device, data.as_ref(), id) {
+            if let Some(out) = export_song(&predict, data.as_ref(), id) {
                 println!("  song {id}: {} chord segments", out.segments.len());
                 songs.insert(id, out);
             }
@@ -113,10 +150,9 @@ fn main() {
 
 /// Harvest one song, infer chords over sliding windows, reduce to step-timed
 /// segments with baked labels. Returns `None` if the song can't be started or is
-/// empty.
-fn export_song(
-    model: &optime_ml::model::KeyChordModel<Back>,
-    device: &MlDevice,
+/// empty. `predict` runs the chosen backbone (frame or event) over one window.
+fn export_song<P: Fn(&[NoteEvent], usize) -> Prediction>(
+    predict: P,
     data: &dyn SoundData,
     id: u32,
 ) -> Option<SongOut> {
@@ -137,7 +173,7 @@ fn export_song(
         let win_start = (w * SEQ_LEN) as u32;
         let win_end = win_start + SEQ_LEN as u32;
         let win_notes = clip_window(&notes, win_start, win_end);
-        let pred = predict(model, &win_notes, SEQ_LEN, device);
+        let pred = predict(&win_notes, SEQ_LEN);
         if pred.key_confidence > best_conf {
             best_conf = pred.key_confidence;
             best_key = pred.key;

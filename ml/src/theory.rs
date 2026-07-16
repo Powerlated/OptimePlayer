@@ -183,6 +183,34 @@ pub const N_CHORD_CLASSES: usize = 1 + N_PITCH_CLASSES * Quality::ALL.len();
 /// Label index for silence / no active harmony.
 pub const NO_CHORD: usize = 0;
 
+/// Root-class count for the factored chord head: 1 (none) + 12 pitch classes.
+pub const N_ROOT_CLASSES: usize = 1 + N_PITCH_CLASSES;
+/// Quality-class count for the factored chord head: 1 (none) + the qualities.
+pub const N_QUALITY_CLASSES: usize = 1 + Quality::ALL.len();
+
+/// Split a joint chord label `[0, N_CHORD_CLASSES)` into `(root_class, quality_class)`
+/// for the two factored heads. No-chord (0) maps to `(0, 0)`; a real chord to
+/// `(root_pc + 1, quality_index + 1)`, so class 0 is reserved for "none" in both
+/// factors (letting the heads train with a plain cross-entropy over every frame).
+pub fn chord_label_to_root_quality(label: usize) -> (usize, usize) {
+    if label == NO_CHORD {
+        return (0, 0);
+    }
+    let idx = label - 1;
+    let root_pc = idx % N_PITCH_CLASSES;
+    let quality = idx / N_PITCH_CLASSES;
+    (root_pc + 1, quality + 1)
+}
+
+/// Recombine factored `(root_class, quality_class)` predictions into a joint chord
+/// label. A "none" in either factor (class 0) yields [`NO_CHORD`].
+pub fn root_quality_to_chord_label(root_class: usize, quality_class: usize) -> usize {
+    if root_class == 0 || quality_class == 0 {
+        return NO_CHORD;
+    }
+    1 + (quality_class - 1) * N_PITCH_CLASSES + (root_class - 1)
+}
+
 /// Key mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mode {
@@ -321,6 +349,23 @@ mod tests {
             Chord::new(11, Quality::HalfDiminished7).roman(&a_min),
             "iiø7"
         );
+    }
+
+    #[test]
+    fn factored_root_quality_roundtrip() {
+        // No-chord splits to (none, none) and recombines back.
+        assert_eq!(chord_label_to_root_quality(NO_CHORD), (0, 0));
+        assert_eq!(root_quality_to_chord_label(0, 0), NO_CHORD);
+        // Every real chord label round-trips through the factored representation.
+        for q in Quality::ALL {
+            for root in 0..12u8 {
+                let label = Chord::new(root, q).label();
+                let (rc, qc) = chord_label_to_root_quality(label);
+                assert!((1..=N_PITCH_CLASSES).contains(&rc));
+                assert!((1..N_QUALITY_CLASSES).contains(&qc));
+                assert_eq!(root_quality_to_chord_label(rc, qc), label);
+            }
+        }
     }
 
     #[test]
