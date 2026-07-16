@@ -408,7 +408,18 @@ fn write_bounce(data: &mut [f32], channels: usize, st: &mut crate::player::Audio
     for block in data.chunks_mut(frames_per_call * CHUNK) {
         let n = block.len() / frames_per_call;
         let frames = &mut scratch[..n];
-        resampler.process(frames, &mut || bounce.next_frame());
+        // Chords mix in *before* the output resampler, at the same engine rate as the bounce, so
+        // they are resampled by the same path the song is and can't drift against it.
+        resampler.process(frames, &mut || {
+            let (l, r) = bounce.next_frame();
+            match &mut bounce.chords {
+                Some(c) if bounce.chords_on => {
+                    let (cl, cr) = c.next_frame();
+                    (l + cl, r + cr)
+                }
+                _ => (l, r),
+            }
+        });
         for (frame, &(l, r)) in block.chunks_mut(frames_per_call).zip(frames.iter()) {
             let g = ramp.next();
             let (l, r) = (l * g, r * g);

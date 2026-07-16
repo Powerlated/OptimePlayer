@@ -10,6 +10,7 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
+use crate::annotation::chord_voice::PREFERRED_SONG as PREFERRED_CHORD_SONG;
 use crate::annotation::{AnnotationState, BounceJob};
 use crate::chord_data;
 use crate::media_controls::{self, MediaAction};
@@ -1231,6 +1232,24 @@ impl OptimeApp {
         if rolling {
             ctx.request_repaint();
         }
+        // Follow the playhead with the chord voice. Driven from the UI frame rather than the audio
+        // callback, which has no idea what a span is: chords change at most once a bar (~2 s), so
+        // 16 ms of granularity is far below anything audible.
+        if let Some(song_id) = self.current_song.map(|i| self.songs[i].song_id) {
+            let step = self.piano_roll.display_tick();
+            let chord = self.chord_at(song_id, step);
+            if let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+                && let Some(c) = &mut st.bounce.chords
+            {
+                if rolling {
+                    c.set_chord(chord);
+                } else {
+                    // Stopped: don't strike, but forget what rang so resuming re-sounds it.
+                    c.reset();
+                }
+            }
+        }
 
         // The lane shows what has been *annotated*, not what a model guessed — this set is the
         // eval data, so a prediction must never appear alongside it and get mistaken for a label.
@@ -1357,6 +1376,11 @@ impl OptimeApp {
             self.piano_roll.set_selection(Some((s as f64, e as f64)));
             self.annotation.picker_at = input.pointer_pos;
             self.annotation.picker_just_opened = true;
+            // Right-clicking a labelled bar plays its chord: the fastest possible check of whether
+            // what you wrote is what you meant.
+            if let Some(c) = self.chord_at(song_id, step) {
+                self.strike_chord(c);
+            }
             return;
         }
         // Left button is purely the transport: click or drag anywhere to scrub.
@@ -1487,6 +1511,24 @@ impl OptimeApp {
             }
             ui.checkbox(&mut self.annotation.beat_snap, "Beat snap")
                 .on_hover_text("Snap to beats instead of bars (for a bar with two chords).");
+            let mut chords_on = self
+                .audio
+                .as_ref()
+                .and_then(|a| a.shared.lock().ok().map(|st| st.bounce.chords_on))
+                .unwrap_or(false);
+            if ui
+                .checkbox(&mut chords_on, "Play chords")
+                .on_hover_text(
+                    "Play the annotated chord over the song, on a piano lifted from the ROM. \
+                     Off by default — it fights busy passages, and sometimes the track alone is \
+                     easier to judge.",
+                )
+                .changed()
+                && let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+            {
+                st.bounce.chords_on = chords_on;
+            }
             ui.separator();
         });
 
@@ -1692,6 +1734,18 @@ impl OptimeApp {
             .set_selection(Some((next_s as f64, next_e as f64)));
     }
 
+    /// Sounds `chord` now through the audition voice.
+    fn strike_chord(&mut self, chord: crate::annotation::model::Chord) {
+        if let Some(audio) = &self.audio
+            && let Ok(mut st) = audio.shared.lock()
+        {
+            st.bounce.chords_on = true; // an explicit audition overrides the toggle
+            if let Some(c) = &mut st.bounce.chords {
+                c.strike(chord);
+            }
+        }
+    }
+
     /// Re-installs the grid after the meter/offset changed.
     fn refresh_grid(&mut self, song_id: u32) {
         let spb = self
@@ -1750,6 +1804,7 @@ impl OptimeApp {
         self.piano_roll.set_selection(None);
         if on {
             self.load_annotations();
+            self.capture_chord_instrument();
             self.request_bounce();
             if let Some(ov) = &self.overview {
                 let total = ov.total_steps;
@@ -1774,6 +1829,37 @@ impl OptimeApp {
                 self.piano_roll.set_chords(self.chord_spans(a, s));
             }
         }
+    }
+
+    /// Lifts the chord-audition voice out of the ROM.
+    ///
+    /// Prefers Emerald's song 435 ("Trainers' School"), which opens on a clean piano; falls back to
+    /// the song being annotated so chord playback still works on a ROM without that id.
+    fn capture_chord_instrument(&mut self) {
+        let Some(i) = self.current_song else { return };
+        let archive_index = self.songs[i].archive_index;
+        let song_id = self.songs[i].song_id;
+        let data = &*self.archives[archive_index];
+        let instrument = crate::annotation::chord_voice::capture(data, PREFERRED_CHORD_SONG)
+            .or_else(|| crate::annotation::chord_voice::capture(data, song_id));
+        let Some(instrument) = instrument else {
+            self.annotation.status = "no sampled voice found for chord playback".into();
+            return;
+        };
+        if let Some(audio) = &self.audio
+            && let Ok(mut st) = audio.shared.lock()
+        {
+            st.bounce.chords = Some(crate::annotation::ChordVoicer::new(instrument));
+        }
+    }
+
+    /// The annotated chord covering `step`, if any.
+    fn chord_at(&self, song_id: u32, step: f64) -> Option<crate::annotation::model::Chord> {
+        self.annotation.song(song_id)?.spans.iter().find_map(|sp| {
+            ((sp.start_step as f64) <= step && (sp.end_step as f64) > step)
+                .then_some(sp.chord)
+                .flatten()
+        })
     }
 
     /// Starts rendering the current song to memory. The work is sliced across frames by

@@ -9,7 +9,7 @@ use optime_core::{
     SynthController,
 };
 
-use crate::annotation::Bounce;
+use crate::annotation::{Bounce, ChordVoicer};
 use crate::persisted::{RepeatMode, TrackRef};
 
 /// One entry of the audio-thread-owned playlist. The id to decode is `track.song_id`.
@@ -195,6 +195,12 @@ pub struct BounceTransport {
     /// Whether the transport is rolling. Scrubbing while stopped still moves [`Self::pos`], so the
     /// roll follows the cursor without sounding.
     pub playing: bool,
+    /// Plays the annotated chord over the song, so a label can be judged by ear rather than read.
+    /// `None` until an instrument has been captured from the ROM.
+    pub chords: Option<ChordVoicer>,
+    /// Whether chord playback is audible. A toggle because it genuinely fights busy passages — the
+    /// point is to check the harmony, and sometimes the track alone is easier to hear.
+    pub chords_on: bool,
 }
 
 impl BounceTransport {

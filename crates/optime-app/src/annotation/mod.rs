@@ -23,9 +23,11 @@
 //! which is the point of the format being the contract rather than the code path.
 
 mod bounce;
+pub mod chord_voice;
 pub mod model;
 
 pub use bounce::{Bounce, BounceJob};
+pub use chord_voice::ChordVoicer;
 
 use std::collections::HashMap;
 use std::sync::Arc;
