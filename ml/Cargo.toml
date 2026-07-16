@@ -12,6 +12,11 @@ harvest = ["dep:optime-core"]
 # WGPU GPU backend (cubecl-wgsl shaders → Vulkan/DX12/Metal). Off by default so
 # the lean CPU build is unaffected; enables `hier_pretrain_gpu`.
 gpu = ["burn/webgpu"]
+# CUDA backend (cubecl → nvrtc → PTX). Swaps `backend::{Inner, MlDevice}`, so every
+# bin runs on the GPU with no other change. Needs a CUDA *toolkit* (nvrtc), not just
+# a driver — cubecl compiles kernels at runtime. Off by default: the CPU build must
+# keep working on machines with no NVIDIA GPU.
+cuda = ["burn/cuda"]
 
 [dependencies]
 bincode = "1"

@@ -6,5 +6,8 @@
 /data
 /models
 
+# Training-run console logs (the reports in reports/ are the retained record).
+/logs
+
 # Compiler crash dumps.
 rustc-ice-*.txt

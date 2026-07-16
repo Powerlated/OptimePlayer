@@ -20,7 +20,15 @@ use rayon::prelude::*;
 use crate::backend::{Back, Inner, MlDevice};
 
 /// Default shard count for a data-parallel step: the machine's logical-core count.
+///
+/// **1 under `--features cuda`.** Sharding exists only to fill CPU cores the ndarray
+/// backend can't; a GPU already parallelizes *within* the batch, so splitting it into
+/// rayon-driven shards just serializes launches on the same device and adds a
+/// gradient-sum pass. One shard makes [`dp_step`] a plain single-device step.
 pub fn default_shards() -> usize {
+    if cfg!(feature = "cuda") {
+        return 1;
+    }
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(8)
