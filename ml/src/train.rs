@@ -79,6 +79,10 @@ where
 /// When `pretrained` is `Some(prefix)`, the trunk is warm-started from a
 /// self-supervised checkpoint; the supervised heads there are still random, which is
 /// exactly the warm start we want.
+/// `name` is the artifact stem written under `<out_dir>/<NN-backbone>/` — `"model"` for the
+/// synthetic fine-tune, something else for a stage that must not clobber it (the real-label SFT
+/// warm-starts *from* `model`, so writing back to it would destroy its own starting point and make
+/// a second run warm-start from itself).
 pub fn run<M>(
     config: &TrainConfig,
     model_cfg: &M::Cfg,
@@ -86,6 +90,7 @@ pub fn run<M>(
     val: &[Song],
     out_dir: &Path,
     pretrained: Option<&Path>,
+    name: &str,
 ) where
     M: Backbone<Back> + AutodiffModule<Back>,
     M::InnerModule: Backbone<Inner, Batch = <M as Backbone<Back>>::Batch>,
@@ -216,14 +221,14 @@ pub fn run<M>(
             &model,
             model_cfg,
             &backbone::artifact_dir::<M, Back>(out_dir),
-            "model",
+            name,
             epoch,
         );
     }
 
     let dir = backbone::artifact_dir::<M, Back>(out_dir);
-    backbone::save::<M, Back>(model, model_cfg, &dir, "model");
-    println!("saved {} model to {}", M::NAME, dir.display());
+    backbone::save::<M, Back>(model, model_cfg, &dir, name);
+    println!("saved {} {name} to {}", M::NAME, dir.display());
     dashboard::finish(&dir);
 }
 

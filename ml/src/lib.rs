@@ -46,6 +46,7 @@
 //! Behind the `harvest` feature (pulls in the engine crate):
 //! * [`harvest`]     — run device sequencers headlessly → unlabeled real songs.
 
+pub mod annotations;
 pub mod backbone;
 pub mod backend;
 pub mod cli;

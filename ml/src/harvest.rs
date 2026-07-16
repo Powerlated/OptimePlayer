@@ -282,7 +282,12 @@ fn push_note(finished: &mut Vec<NoteEvent>, n: OpenNote, end_frame: u32) {
 
 /// Notes overlapping `[win_start, win_end)`, clipped to the window and rebased to
 /// its start. Empty if nothing sounds in the window.
-fn clip_notes_to_window(notes: &[NoteEvent], win_start: u32, win_end: u32) -> Vec<NoteEvent> {
+/// Clip a note stream to `[win_start, win_end)`, rebasing frame indices to the window start.
+///
+/// Public because the labelled-window path ([`crate::annotations`], `eval_labeled`) has to cut the
+/// exact same windows this module's own slicing does — two different notions of "window" would
+/// silently misalign notes against their labels.
+pub fn clip_notes_to_window(notes: &[NoteEvent], win_start: u32, win_end: u32) -> Vec<NoteEvent> {
     let mut out = Vec::new();
     for n in notes {
         if n.end_frame <= win_start || n.start_frame >= win_end {

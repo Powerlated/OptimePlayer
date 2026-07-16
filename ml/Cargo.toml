@@ -40,5 +40,13 @@ name = "chord_export"
 required-features = ["harvest"]
 
 [[bin]]
+name = "eval_labeled"
+required-features = ["harvest"]
+
+[[bin]]
+name = "sft"
+required-features = ["harvest"]
+
+[[bin]]
 name = "hier_pretrain_gpu"
 required-features = ["gpu"]

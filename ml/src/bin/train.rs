@@ -66,5 +66,6 @@ where
         val_songs,
         &args.out_dir,
         args.pretrained.as_deref(),
+        "model",
     );
 }
