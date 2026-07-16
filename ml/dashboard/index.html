@@ -110,7 +110,7 @@
   /* Fact grid: a label, a headline value, and the value's qualifier underneath —
      the qualifier is where the assumption (120bpm, ×12) gets stated, never dropped. */
   .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
-  .fact { display: flex; flex-direction: column; gap: 2px; }
+  .fact { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
   .fact .k { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
   .fact .v { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
   .fact .v em { display: block; font-size: 11px; font-weight: 400; font-style: normal; color: var(--text-secondary); letter-spacing: 0; }

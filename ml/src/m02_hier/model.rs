@@ -9,7 +9,6 @@
 //! shared [`ModelOutput`] / [`ArOutput`] so it reuses `shared.rs` + the generic
 //! `dp_step` exactly like the sum-pool generation.
 
-use burn::nn::attention::generate_autoregressive_mask;
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
 };
@@ -23,6 +22,7 @@ use crate::m02_hier::batch::{HierBatchData, MAX_POLY};
 use crate::notes::Song;
 use crate::theory::{N_KEY_CLASSES, N_QUALITY_CLASSES, N_ROOT_CLASSES};
 use crate::tokenize::{DUR_BUCKETS, N_CHANNELS, N_PC, N_ROLES, PAN_BUCKETS, VEL_BUCKETS};
+use crate::transformer::{RopeEncoder, RopeEncoderConfig};
 
 #[derive(Config, Debug)]
 pub struct HierModelConfig {
@@ -58,8 +58,10 @@ impl HierModelConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> HierEventModel<B> {
         let d = self.d_model;
         let emb = |n: usize| EmbeddingConfig::new(n, d).init(device);
-        // Main trunk FFN uses `d_ff`; the sub-encoder uses the smaller `sub_d_ff`.
-        let enc = |layers: usize, d_ff: usize| {
+        // The set encoder stays a plain (position-free) transformer: a frame's notes
+        // are an unordered set, so slot index means nothing and RoPE would invent an
+        // order that isn't there. Only the frame trunk is a sequence.
+        let set_enc = |layers: usize, d_ff: usize| {
             TransformerEncoderConfig::new(d, d_ff, self.n_heads, layers)
                 .with_norm_first(true)
                 .with_dropout(self.dropout)
@@ -75,9 +77,16 @@ impl HierModelConfig {
             emb_role: emb(N_ROLES),
             emb_onset: emb(2),
             cls: emb(1),
-            sub_encoder: enc(self.n_sub_layers, self.sub_d_ff),
-            frame_pos: emb(self.n_frames),
-            encoder: enc(self.n_layers, self.d_ff),
+            sub_encoder: set_enc(self.n_sub_layers, self.sub_d_ff),
+            encoder: RopeEncoderConfig::new(
+                d,
+                self.d_ff,
+                self.n_heads,
+                self.n_layers,
+                self.n_frames,
+            )
+            .with_dropout(self.dropout)
+            .init(device),
             root_head: LinearConfig::new(d, N_ROOT_CLASSES).init(device),
             quality_head: LinearConfig::new(d, N_QUALITY_CLASSES).init(device),
             key_head: LinearConfig::new(d, N_KEY_CLASSES).init(device),
@@ -101,8 +110,7 @@ pub struct HierEventModel<B: Backend> {
     emb_onset: Embedding<B>,
     cls: Embedding<B>,
     sub_encoder: TransformerEncoder<B>,
-    frame_pos: Embedding<B>,
-    encoder: TransformerEncoder<B>,
+    encoder: RopeEncoder<B>,
     root_head: Linear<B>,
     quality_head: Linear<B>,
     key_head: Linear<B>,
@@ -177,16 +185,11 @@ impl<B: Backend> HierEventModel<B> {
         encoded.slice([0..bnf, 0..1, 0..d]).reshape([b, nf, d])
     }
 
-    /// Main trunk over frame tokens (causal for AR, bidirectional otherwise).
-    fn trunk(&self, frame_tokens: Tensor<B, 3>, causal: bool, device: &B::Device) -> Tensor<B, 3> {
-        let [b, nf, _] = frame_tokens.dims();
-        let positions = Tensor::<B, 1, Int>::arange(0..nf as i64, device).reshape([1, nf]);
-        let x = frame_tokens + self.frame_pos.forward(positions);
-        let mut input = TransformerEncoderInput::new(x);
-        if causal {
-            input = input.mask_attn(generate_autoregressive_mask::<B>(b, nf, device));
-        }
-        self.encoder.forward(input)
+    /// Main trunk over the frame tokens — causal for AR pretraining, bidirectional
+    /// for the supervised heads. Position comes from RoPE inside attention, so
+    /// there is no additive position embedding here.
+    fn trunk(&self, frame_tokens: Tensor<B, 3>, causal: bool) -> Tensor<B, 3> {
+        self.encoder.forward(frame_tokens, causal)
     }
 }
 
@@ -236,7 +239,7 @@ impl<B: Backend> Backbone<B> for HierEventModel<B> {
 
     /// Supervised forward (bidirectional) → shared [`ModelOutput`].
     fn forward_output(&self, data: &HierBatchData, device: &B::Device) -> ModelOutput<B> {
-        let hidden = self.trunk(self.frame_tokens(data, device), false, device);
+        let hidden = self.trunk(self.frame_tokens(data, device), false);
         let root_logits = self.root_head.forward(hidden.clone());
         let quality_logits = self.quality_head.forward(hidden.clone());
         let pooled = hidden.mean_dim(1).reshape([data.batch, self.d_model]);
@@ -252,7 +255,7 @@ impl<B: Backend> Backbone<B> for HierEventModel<B> {
 impl<B: Backend> ArBackbone<B> for HierEventModel<B> {
     /// AR pretraining forward (causal) → next-frame content logits.
     fn ar_forward(&self, data: &HierBatchData, device: &B::Device) -> ArOutput<B> {
-        let hidden = self.trunk(self.frame_tokens(data, device), true, device);
+        let hidden = self.trunk(self.frame_tokens(data, device), true);
         ArOutput {
             pc_logits: self.ar_pc_head.forward(hidden.clone()),
             channel_logits: self.ar_ch_head.forward(hidden),

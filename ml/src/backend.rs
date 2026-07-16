@@ -12,6 +12,7 @@
 //! loop. They have no dependency of their own, so they sit at the bottom instead.
 
 use burn::backend::Autodiff;
+use burn::prelude::Backend;
 
 /// Inference / non-autodiff backend.
 pub type Inner = burn::backend::NdArray<f32>;
@@ -28,3 +29,15 @@ pub type MlDevice = burn::backend::ndarray::NdArrayDevice;
 /// the dominant lever remains shrinking that grid (smaller sub-encoder FFN, etc.).
 pub type Back =
     Autodiff<Inner, burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing>;
+
+/// The float element `B` actually computes in, e.g. `"f32"` — read off the type, so
+/// a report can never claim a precision the run isn't using.
+///
+/// bf16 is not reachable from here: burn-ndarray implements `FloatNdArrayElement`
+/// for f32/f64 only, cubecl's WGSL compiler rejects `FloatKind::BF16` outright, and
+/// the Vulkan path registers it for storage/conversion, not arithmetic. It is a
+/// CUDA-path element.
+pub fn precision<B: Backend>() -> String {
+    let name = std::any::type_name::<B::FloatElem>();
+    name.rsplit("::").next().unwrap_or(name).to_string()
+}

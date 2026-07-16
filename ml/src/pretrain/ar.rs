@@ -22,7 +22,7 @@ use rand::SeedableRng;
 use std::path::Path;
 
 use crate::backbone::{self, ArBackbone, ArOutput, Backbone};
-use crate::backend::{Back, Inner, MlDevice};
+use crate::backend::{precision, Back, Inner, MlDevice};
 use crate::dashboard::{self, ContextWindow, DataStats, EpochPoint, RunMeta};
 use crate::notes::{random_transpose, Song, N_TRANSPOSITIONS};
 use crate::parallel::{default_shards, dp_step};
@@ -165,6 +165,7 @@ pub fn run<M>(
             "{}, {n_shards}-way DP",
             dashboard::backend_label(std::any::type_name::<Back>())
         ),
+        precision: precision::<Back>(),
         epochs: config.epochs,
         context: ContextWindow::from_frames(n_frames(train)),
         data,
@@ -290,6 +291,7 @@ pub fn run_single_device<M, B>(
         stage: "AR pretrain".to_string(),
         backbone: M::NAME.to_string(),
         backend: dashboard::backend_label(std::any::type_name::<B>()),
+        precision: precision::<B>(),
         epochs: config.epochs,
         context: ContextWindow::from_frames(n_frames(train)),
         data,

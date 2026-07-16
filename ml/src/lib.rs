@@ -35,6 +35,7 @@
 //! * [`tokenize`]    — note events → per-note field indices (the learned-token input).
 //! * [`data`]        — synthetic dataset generation, retention, example shape.
 //! * [`train`]       — the one supervised multi-task loop, generic over a backbone.
+//! * [`transformer`] — pre-norm encoder with RoPE (burn's has no rotary hook).
 //! * [`pretrain`]    — self-supervised pretexts: masked-frame (m00) + autoregressive (m01/m02).
 //! * [`parallel`]    — CPU data-parallel optimizer step.
 //! * [`probe`]       — frozen-encoder "is-music" linear probe (weak song-name labels).
@@ -69,3 +70,4 @@ pub mod shared;
 pub mod theory;
 pub mod tokenize;
 pub mod train;
+pub mod transformer;

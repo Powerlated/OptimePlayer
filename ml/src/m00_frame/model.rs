@@ -8,11 +8,10 @@
 //! is-music probe head ([`crate::probe`]), neither of which the learned-token
 //! generations have.
 
-use burn::nn::transformer::{
-    TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
-};
-use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
+use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
+
+use crate::transformer::{RopeEncoder, RopeEncoderConfig};
 
 use crate::backbone::ModelOutput;
 use crate::features::{FEATURE_DIM, PITCH_BLOCK_DIM};
@@ -60,14 +59,13 @@ impl ModelConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> KeyChordModel<B> {
         KeyChordModel {
             input_proj: LinearConfig::new(self.n_features, self.d_model).init(device),
-            pos_emb: EmbeddingConfig::new(self.max_seq_len, self.d_model).init(device),
-            encoder: TransformerEncoderConfig::new(
+            encoder: RopeEncoderConfig::new(
                 self.d_model,
                 self.d_ff,
                 self.n_heads,
                 self.n_layers,
+                self.max_seq_len,
             )
-            .with_norm_first(true)
             .with_dropout(self.dropout)
             .init(device),
             root_head: LinearConfig::new(self.d_model, self.n_root_classes).init(device),
@@ -88,8 +86,7 @@ impl ModelConfig {
 #[derive(Module, Debug)]
 pub struct KeyChordModel<B: Backend> {
     input_proj: Linear<B>,
-    pos_emb: Embedding<B>,
-    encoder: TransformerEncoder<B>,
+    encoder: RopeEncoder<B>,
     root_head: Linear<B>,
     quality_head: Linear<B>,
     key_head: Linear<B>,
@@ -99,21 +96,15 @@ pub struct KeyChordModel<B: Backend> {
 }
 
 impl<B: Backend> KeyChordModel<B> {
-    /// Shared trunk: project features, add the learned positional embedding, run
-    /// the transformer encoder. `features`: `[batch, seq, n_features]` →
-    /// `[batch, seq, d_model]`. Both the supervised heads and the self-supervised
-    /// reconstruction head sit on top of this, so pretraining and fine-tuning
-    /// share one encoder.
+    /// Shared trunk: project features, run the RoPE encoder. `features`:
+    /// `[batch, seq, n_features]` → `[batch, seq, d_model]`. Both the supervised
+    /// heads and the self-supervised reconstruction head sit on top of this, so
+    /// pretraining and fine-tuning share one encoder.
+    ///
+    /// No additive position term: RoPE injects position inside attention.
     pub fn encode(&self, features: Tensor<B, 3>) -> Tensor<B, 3> {
-        let device = features.device();
-        let [_, seq, _] = features.dims();
-
         let x = self.input_proj.forward(features); // [batch, seq, d_model]
-        let positions = Tensor::<B, 1, Int>::arange(0..seq as i64, &device).reshape([1, seq]);
-        let pos = self.pos_emb.forward(positions); // [1, seq, d_model]
-        let x = x + pos;
-
-        self.encoder.forward(TransformerEncoderInput::new(x)) // [batch, seq, d_model]
+        self.encoder.forward(x, false) // bidirectional
     }
 
     /// `features`: `[batch, seq, n_features]`.

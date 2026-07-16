@@ -132,6 +132,7 @@ pub fn run<M>(
             "{}, {n_shards}-way DP",
             dashboard::backend_label(std::any::type_name::<Back>())
         ),
+        precision: crate::backend::precision::<Back>(),
         epochs: config.epochs,
         context: ContextWindow::from_frames(seq),
         data,

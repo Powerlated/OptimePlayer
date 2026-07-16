@@ -442,6 +442,10 @@ createApp({
             <span class="v">{{ fmtFlops(meta.flops_per_window) }}<em>forward, matmuls only</em></span>
           </div>
           <div class="fact">
+            <span class="k">Precision</span>
+            <span class="v">{{ meta.precision }}<em>every tensor</em></span>
+          </div>
+          <div class="fact">
             <span class="k">FLOPs / batch</span>
             <span class="v">{{ fmtFlops(meta.flops_per_window * (meta.train_config.batch_size || 1)) }}<em>× batch of {{ meta.train_config.batch_size }}</em></span>
           </div>

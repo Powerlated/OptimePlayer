@@ -170,6 +170,7 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
             "{}, {n_shards}-way DP",
             dashboard::backend_label(std::any::type_name::<Back>())
         ),
+        precision: crate::backend::precision::<Back>(),
         epochs: config.epochs,
         context: ContextWindow::from_frames(seq),
         data,

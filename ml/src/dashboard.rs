@@ -116,6 +116,11 @@ pub struct RunMeta {
     pub backbone: String,
     /// Compute backend, e.g. `"wgpu"` / `"ndarray (8-way DP)"`.
     pub backend: String,
+    /// Float element the backend actually computes in, read off `B::FloatElem` —
+    /// measured, not asserted. (bf16 is unavailable here: the WGSL compiler rejects
+    /// it outright, the Vulkan path exposes it for storage/conversion only, and
+    /// burn-ndarray implements just f32/f64. It's a CUDA-path element.)
+    pub precision: String,
     /// Needed for progress + ETA. Other hyperparameters live in the config blobs.
     pub epochs: usize,
     pub context: ContextWindow,

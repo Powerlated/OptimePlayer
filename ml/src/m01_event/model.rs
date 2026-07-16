@@ -4,10 +4,6 @@
 //! chord/key fine-tune, and the same factored root/quality/key heads as every other
 //! generation (emits the shared [`ModelOutput`]).
 
-use burn::nn::attention::generate_autoregressive_mask;
-use burn::nn::transformer::{
-    TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
-};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::activation::gelu;
@@ -19,6 +15,7 @@ use crate::m01_event::batch::EventBatchData;
 use crate::notes::Song;
 use crate::theory::{N_KEY_CLASSES, N_QUALITY_CLASSES, N_ROOT_CLASSES};
 use crate::tokenize::{DUR_BUCKETS, N_CHANNELS, N_PC, N_ROLES, PAN_BUCKETS, VEL_BUCKETS};
+use crate::transformer::{RopeEncoder, RopeEncoderConfig};
 
 #[derive(Config, Debug)]
 pub struct EventModelConfig {
@@ -51,11 +48,15 @@ impl EventModelConfig {
             emb_dur: emb(DUR_BUCKETS),
             emb_role: emb(N_ROLES),
             phi: LinearConfig::new(d, d).init(device),
-            frame_pos: EmbeddingConfig::new(self.n_frames, d).init(device),
-            encoder: TransformerEncoderConfig::new(d, self.d_ff, self.n_heads, self.n_layers)
-                .with_norm_first(true)
-                .with_dropout(self.dropout)
-                .init(device),
+            encoder: RopeEncoderConfig::new(
+                d,
+                self.d_ff,
+                self.n_heads,
+                self.n_layers,
+                self.n_frames,
+            )
+            .with_dropout(self.dropout)
+            .init(device),
             root_head: LinearConfig::new(d, N_ROOT_CLASSES).init(device),
             quality_head: LinearConfig::new(d, N_QUALITY_CLASSES).init(device),
             key_head: LinearConfig::new(d, N_KEY_CLASSES).init(device),
@@ -77,8 +78,7 @@ pub struct EventKeyChordModel<B: Backend> {
     emb_dur: Embedding<B>,
     emb_role: Embedding<B>,
     phi: Linear<B>,
-    frame_pos: Embedding<B>,
-    encoder: TransformerEncoder<B>,
+    encoder: RopeEncoder<B>,
     root_head: Linear<B>,
     quality_head: Linear<B>,
     key_head: Linear<B>,
@@ -125,17 +125,11 @@ impl<B: Backend> EventKeyChordModel<B> {
             .reshape([b, nf, d])
     }
 
-    /// Add frame positions and run the trunk (causal for AR pretraining,
-    /// bidirectional for the supervised heads).
-    fn trunk(&self, frame_tokens: Tensor<B, 3>, causal: bool, device: &B::Device) -> Tensor<B, 3> {
-        let [b, nf, _] = frame_tokens.dims();
-        let positions = Tensor::<B, 1, Int>::arange(0..nf as i64, device).reshape([1, nf]);
-        let x = frame_tokens + self.frame_pos.forward(positions);
-        let mut input = TransformerEncoderInput::new(x);
-        if causal {
-            input = input.mask_attn(generate_autoregressive_mask::<B>(b, nf, device));
-        }
-        self.encoder.forward(input)
+    /// Main trunk over the frame tokens — causal for AR pretraining, bidirectional
+    /// for the supervised heads. Position comes from RoPE inside attention, so
+    /// there is no additive position embedding here.
+    fn trunk(&self, frame_tokens: Tensor<B, 3>, causal: bool) -> Tensor<B, 3> {
+        self.encoder.forward(frame_tokens, causal)
     }
 }
 
@@ -182,7 +176,7 @@ impl<B: Backend> Backbone<B> for EventKeyChordModel<B> {
     /// Supervised forward (bidirectional): per-frame factored chord logits + pooled
     /// key logits, as the shared [`ModelOutput`].
     fn forward_output(&self, data: &EventBatchData, device: &B::Device) -> ModelOutput<B> {
-        let hidden = self.trunk(self.frame_tokens(data, device), false, device);
+        let hidden = self.trunk(self.frame_tokens(data, device), false);
         let root_logits = self.root_head.forward(hidden.clone());
         let quality_logits = self.quality_head.forward(hidden.clone());
         let pooled = hidden.mean_dim(1).reshape([data.batch, self.d_model]);
@@ -198,7 +192,7 @@ impl<B: Backend> Backbone<B> for EventKeyChordModel<B> {
 impl<B: Backend> ArBackbone<B> for EventKeyChordModel<B> {
     /// AR pretraining forward (causal): per-frame next-frame content logits.
     fn ar_forward(&self, data: &EventBatchData, device: &B::Device) -> ArOutput<B> {
-        let hidden = self.trunk(self.frame_tokens(data, device), true, device);
+        let hidden = self.trunk(self.frame_tokens(data, device), true);
         ArOutput {
             pc_logits: self.ar_pc_head.forward(hidden.clone()),
             channel_logits: self.ar_ch_head.forward(hidden),
