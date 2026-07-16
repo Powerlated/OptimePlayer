@@ -137,12 +137,15 @@ pub struct Persisted {
     /// Whether the sort runs in descending order.
     pub sort_descending: bool,
 
-    /// Hand-authored chord labels, keyed by source archive — **web only**.
+    /// Hand-authored chord labels, keyed by source archive, kept in eframe storage as a
+    /// **session-recovery working copy**.
     ///
-    /// Native keeps these in `ml/annotations/*.json` in the source tree, which is the training data
-    /// of record. The browser has no source tree, so eframe storage is the working copy: without it
-    /// a refresh would silently destroy hours of listening, and "Save" there can only offer a
-    /// download. Defaulted so existing stored blobs (and the native build) load unchanged.
+    /// The record differs by platform: native commits `ml/annotations/*.json` in the source tree
+    /// (the training data of record); web has no source tree, so "Save" there only offers a
+    /// download. In both cases this stash captures unsaved edits — including non-label work like a
+    /// "Bar 1 here" grid/meter change — so a refresh or restart doesn't drop them. It only ever
+    /// fills in when no committed file exists (native load falls back to it on `Ok(None)`), so a
+    /// hand-edited record is never overwritten. Defaulted so existing stored blobs load unchanged.
     #[serde(default)]
     pub annotations: std::collections::HashMap<String, crate::annotation::model::GameAnnotations>,
 }

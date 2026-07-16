@@ -27,3 +27,6 @@ dist/
 
 # Fan-translation toolset (used only to source Mother 3 song titles, not redistributed).
 translation-tools/
+
+# Local pret decomp checkouts used only as accuracy references / sample sources, never redistributed.
+/pokeemerald/

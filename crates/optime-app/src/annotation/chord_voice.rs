@@ -22,18 +22,11 @@
 
 use std::sync::Arc;
 
-use optime_core::synth_controller::messages::{TickFeedback, VoiceId};
-use optime_core::{
-    PerDeviceSettings, Sample, SoundData, SynthEvent, VoicePitch, Waveform, WaveformSynthesizer,
-};
+use optime_core::biquad_filter::BiquadFilter;
+use optime_core::{PerDeviceSettings, Sample, VoicePitch, Waveform, WaveformSynthesizer};
 
 use super::model::{Chord, Quality};
 use crate::audio::ENGINE_SAMPLE_RATE_HZ;
-
-/// Pokémon Emerald song 435 ("Trainers' School") is a quiet, sparse track whose voices survey well.
-/// Falls back to the song being annotated when this id isn't present (another game, or a ROM without
-/// it), so chord playback works everywhere rather than only on Emerald.
-pub const PREFERRED_SONG: u32 = 435;
 
 /// Voices in the pool: two full four-note chords, so a chord's release tail always has somewhere to
 /// ring while the next one sustains, instead of being stolen and cut.
@@ -52,16 +45,19 @@ const AUDITION_SECONDS: f64 = 1.5;
 /// doesn't drown the very thing you're checking it against.
 pub const DEFAULT_GAIN: f32 = 0.25;
 
-/// How much of the song to survey for candidate voices. Long enough for every instrument to have
-/// played (a game track states its material in the first phrase), short enough to stay instant.
-const SURVEY_SECONDS: f64 = 20.0;
-
-/// Longest single note to record. Guards against adopting a drone as the reference envelope.
-const MAX_ENVELOPE_SECONDS: f64 = 8.0;
-
-/// Release to synthesise for a voice the game cut without ever releasing. Stepping a looping
-/// sample's gain straight to zero clicks.
-const TAIL_SECONDS: f64 = 0.05;
+/// The embedded piano sample's reference pitch — middle C (MIDI 60). The sample is the SC-88pro
+/// piano lifted from pokeemerald's source tree, shipped in `chord_data/piano_c4.wav` and
+/// `include_bytes!`'d in so the audition always has a known-good reference instrument regardless of
+/// the loaded ROM (the ROM-capture path would grab a bass thump on quiet tracks).
+const PIANO_FREQ: f64 = 261.6256;
+/// The piano's ADSR, lifted verbatim from pokeemerald's voicegroup
+/// (`sound/voicegroups/keysplits/piano.inc`: `voice_directsound 60, 0, ..., 255, 250, 0, 221` — the
+/// macro param order is `base_midi_key, pan, sample, attack, decay, sustain, release`, per
+/// `asm/macros/music_voice.inc`). Sustain is 0: a percussive envelope that decays to silence.
+const PIANO_ADSR: [u8; 4] = [255, 250, 0, 221];
+/// One envelope entry per GBA VBlank (`GBA_CLOCK_RATE / CYCLES_PER_FRAME` ≈ 59.73 Hz), the rate the
+/// m4a DirectSound envelope steps at — so the curve matches how the real hardware plays it.
+const PIANO_TICK_SECONDS: f64 = 1.0 / 59.7275;
 
 /// A voice lifted from a ROM: its waveform, the pitch it sounded at, and the game's own ADSR split
 /// at the note-off.
@@ -86,170 +82,6 @@ pub struct Instrument {
     tick_seconds: f64,
 }
 
-/// A note being followed during the survey, before it is judged against the others.
-struct Candidate {
-    track: usize,
-    key: u8,
-    waveform: Arc<Waveform>,
-    pitch: VoicePitch,
-    held: Vec<Sample>,
-    release: Vec<Sample>,
-    released: bool,
-}
-
-/// Surveys `song_id` headlessly and lifts the most **sustaining** sampled voice it plays.
-///
-/// Longest-ringing wins because a chord audition wants a voice that holds: the first note a song
-/// happens to play is usually its bass, and three pitched-up bass thumps do not read as a chord.
-/// PSG squares are skipped — they are the console's beeper channels, useless as a reference.
-///
-/// Returns `None` if the song won't start or never plays an audible sampled note.
-pub fn capture(data: &dyn SoundData, song_id: u32) -> Option<Instrument> {
-    let mut player = data.make_player(song_id)?;
-    let config = PerDeviceSettings::neutral();
-    let mut feedback = TickFeedback::default();
-    let mut events: Vec<SynthEvent> = Vec::new();
-    let tick_seconds = 1.0 / player.tick_rate();
-    let max_ticks = (MAX_ENVELOPE_SECONDS / tick_seconds).ceil() as usize;
-    let survey_ticks = (SURVEY_SECONDS / tick_seconds).ceil() as usize;
-
-    // Notes in flight, keyed by voice. A Vec, not a HashMap: at most a handful sound at once, and
-    // iteration order has to be deterministic — it decides ties between equally sustaining voices.
-    let mut live: Vec<(VoiceId, Candidate)> = Vec::new();
-    let mut done: Vec<Candidate> = Vec::new();
-
-    for _ in 0..survey_ticks {
-        events.clear();
-        player.tick(&mut feedback, &config, &mut events);
-        // Nothing is reported as ended: no synth is rendering these voices, so the device must go
-        // on believing its notes are still sounding, or it would cut the envelopes short.
-        feedback.ended_voices.clear();
-        for ev in events.drain(..) {
-            match ev {
-                SynthEvent::NoteStarted {
-                    track,
-                    voice,
-                    waveform,
-                    pitch,
-                    key,
-                    volume,
-                    ..
-                } => {
-                    if waveform.is_psg_square || waveform.data.is_empty() {
-                        continue;
-                    }
-                    live.push((
-                        voice,
-                        Candidate {
-                            track,
-                            key,
-                            waveform,
-                            pitch,
-                            held: vec![volume as Sample],
-                            release: Vec::new(),
-                            released: false,
-                        },
-                    ));
-                }
-                SynthEvent::VoiceVolume { voice, volume, .. } => {
-                    if let Some((_, c)) = live.iter_mut().find(|(v, _)| *v == voice) {
-                        if c.released {
-                            c.release.push(volume as Sample);
-                        } else {
-                            c.held.push(volume as Sample);
-                        }
-                    }
-                }
-                // Where the game let go: everything after this is release tail. `NoteReleased`
-                // addresses a key on a track rather than a voice, which is all we need — we know
-                // both for every note we are following.
-                SynthEvent::NoteReleased { track, key } => {
-                    for (_, c) in live.iter_mut() {
-                        if c.track == track && c.key == key {
-                            c.released = true;
-                        }
-                    }
-                }
-                SynthEvent::VoiceStopped { voice, .. } => {
-                    if let Some(i) = live.iter().position(|(v, _)| *v == voice) {
-                        done.push(live.remove(i).1);
-                    }
-                }
-                _ => {}
-            }
-        }
-        // Retire anything that has outstayed the cap rather than letting a drone become the
-        // reference envelope.
-        let mut i = 0;
-        while i < live.len() {
-            if live[i].1.held.len() + live[i].1.release.len() >= max_ticks {
-                done.push(live.remove(i).1);
-            } else {
-                i += 1;
-            }
-        }
-    }
-    // Notes still sounding when the survey ended are candidates too — a pad may simply be long.
-    done.extend(live.into_iter().map(|(_, c)| c));
-
-    // Longest total envelope wins; ties break on track then key so the pick is reproducible.
-    done.sort_by_key(|c| {
-        (
-            std::cmp::Reverse(c.held.len() + c.release.len()),
-            c.track,
-            c.key,
-        )
-    });
-    done.into_iter().find_map(|c| c.finish(tick_seconds))
-}
-
-impl Candidate {
-    /// Turns a surveyed note into a playable [`Instrument`], or `None` if it never made a sound.
-    fn finish(self, tick_seconds: f64) -> Option<Instrument> {
-        let Candidate {
-            key,
-            waveform,
-            pitch,
-            mut held,
-            release,
-            ..
-        } = self;
-        let peak = held.iter().cloned().fold(0.0, Sample::max);
-        if peak <= 0.0 {
-            return None;
-        }
-        for v in &mut held {
-            *v /= peak;
-        }
-
-        // The release is stored relative to the level the note was released *at*, so it can be
-        // applied from wherever a held chord happens to be sitting.
-        let from = release.first().copied().unwrap_or(0.0);
-        let mut release: Vec<Sample> = if from > 0.0 {
-            release.iter().map(|v| v / from).collect()
-        } else {
-            // The game cut this note instead of releasing it (or released it already silent): it
-            // has no tail to lift, so fall back to a short linear one.
-            Vec::new()
-        };
-        if release.last().copied().unwrap_or(1.0) > 0.0 {
-            let start = release.last().copied().unwrap_or(1.0);
-            let steps = (TAIL_SECONDS / tick_seconds).ceil().max(1.0) as usize;
-            for i in 1..=steps {
-                release.push(start * (1.0 - i as Sample / steps as Sample).max(0.0));
-            }
-        }
-        Some(Instrument {
-            waveform,
-            pitch,
-            key,
-            held,
-            release,
-            tick_seconds,
-        })
-    }
-}
-
 impl Instrument {
     /// The held level `pos` entries in, interpolated between ticks and **clamped to the sustain
     /// level** past the end of the curve: attack and decay play out, then the chord sits on sustain
@@ -267,18 +99,6 @@ impl Instrument {
     /// Entries in the release curve — how long a released chord takes to die.
     fn release_ticks(&self) -> usize {
         self.release.len()
-    }
-
-    /// Seconds of attack+decay before the sustain level is reached.
-    #[cfg(test)]
-    fn held_seconds(&self) -> f64 {
-        self.held.len() as f64 * self.tick_seconds
-    }
-
-    /// The level a held chord settles on.
-    #[cfg(test)]
-    fn sustain_level(&self) -> Sample {
-        self.held.last().copied().unwrap_or(0.0)
     }
 
     /// The pitch that sounds MIDI `note` on this voice.
@@ -335,15 +155,138 @@ impl Quality {
     }
 }
 
-/// The MIDI keys of a chord, root position from middle C.
-pub fn chord_keys(chord: &Chord) -> Vec<u8> {
+/// The MIDI keys of `chord` voiced in `inversion`, root position starting at middle C. The lowest
+/// `inversion` tones are lifted an octave, so the (0-indexed) `inversion`-th scale degree becomes
+/// the bass — 1 = first inversion, 2 = second, and so on. `inversion` is clamped to one below the
+/// tone count: lifting *every* tone would only shift the whole chord an octave, not change the bass.
+fn voiced_keys(chord: &Chord, inversion: u8) -> Vec<u8> {
     let root = ROOT_BASE_KEY + (chord.root % 12);
-    chord
-        .quality
-        .intervals()
+    let intervals = chord.quality.intervals();
+    let lift = (inversion as usize).min(intervals.len().saturating_sub(1));
+    intervals
         .iter()
-        .map(|i| root.saturating_add(*i))
+        .enumerate()
+        .map(|(i, &iv)| root.saturating_add(iv + if i < lift { 12 } else { 0 }))
         .collect()
+}
+
+/// The embedded middle-C piano sample as a playable [`Instrument`], voiced with the piano's **real
+/// ADSR** from pokeemerald's voicegroup ([`PIANO_ADSR`]), stepped through the m4a DirectSound
+/// envelope algorithm (see [`piano_envelope`]).
+///
+/// The waveform **loops end-to-end** (`looping=true`): the tones pitch the sample at different
+/// rates, so each voice's loop period differs and the per-sample attack drifts into an arpeggio —
+/// which is the intended colour here. The real ADSR (sustain 0) still makes the *envelope* decay to
+/// silence over a few seconds, so a struck chord rings out as a decaying arpeggio rather than
+/// droning forever; a section that outlasts the decay simply goes quiet.
+pub fn embedded_piano() -> Instrument {
+    const PIANO_WAV: &[u8] = include_bytes!("../chord_data/piano_c4.wav");
+    let (sample_rate, data) = find_data_chunk(PIANO_WAV).unwrap_or((13_379.0, &[][..]));
+    // GBA DirectSound stores 8-bit PCM *unsigned*, centred at 128 — not the signed 8-bit the stock
+    // `decode_pcm8` assumes, so decode it here rather than reaching for the shared decoder.
+    let samples: Vec<f32> = data
+        .iter()
+        .map(|&b| ((b as i32 - 128) as f32) / 128.0)
+        .collect();
+    let waveform = Waveform::new(samples, PIANO_FREQ, sample_rate, true, 0);
+    let (held, release) = piano_envelope(PIANO_ADSR);
+    Instrument {
+        waveform: Arc::new(waveform),
+        pitch: VoicePitch::Midi {
+            note: 60.0,
+            sample_pitch_hz: PIANO_FREQ,
+        },
+        key: 60,
+        held,
+        release,
+        tick_seconds: PIANO_TICK_SECONDS,
+    }
+}
+
+/// Walks the RIFF chunks, returning the `fmt ` sample rate and the `data` payload slice. The stock
+/// `decode_wav` assumes a fixed 44-byte header this GBA-flavoured file (with `smpl`/`agbp`/`agbl`
+/// chunks) doesn't have, so this finds the chunks by tag. Returns `None` if it isn't a WAVE file.
+fn find_data_chunk(bytes: &[u8]) -> Option<(f64, &[u8])> {
+    if bytes.len() < 12 || &bytes[0..4] != "RIFF".as_bytes() || &bytes[8..12] != "WAVE".as_bytes() {
+        return None;
+    }
+    let mut sample_rate = 13_379.0;
+    let mut data: &[u8] = &[];
+    let mut o = 12usize;
+    while o + 8 <= bytes.len() {
+        let id = &bytes[o..o + 4];
+        let sz =
+            u32::from_le_bytes([bytes[o + 4], bytes[o + 5], bytes[o + 6], bytes[o + 7]]) as usize;
+        let body = o + 8;
+        if id == "fmt ".as_bytes() && body + 12 <= bytes.len() {
+            sample_rate = u32::from_le_bytes([
+                bytes[body + 8],
+                bytes[body + 9],
+                bytes[body + 10],
+                bytes[body + 11],
+            ]) as f64;
+        } else if id == "data".as_bytes() && body + sz <= bytes.len() {
+            data = &bytes[body..body + sz];
+        }
+        o = body + sz + (sz & 1); // chunks are word-aligned (padded to even)
+    }
+    Some((sample_rate, data))
+}
+
+/// The held + release curves for `adsr`, transcribed from the m4a DirectSound envelope stepper
+/// (`direct_sound_env` in optime-core's gba device) with pseudo-echo off (`echo_volume = 0`). The
+/// envelope is one entry per GBA VBlank ([`PIANO_TICK_SECONDS`]), stepped exactly as the hardware
+/// would: attack adds, decay and release multiply (`env = env * rate >> 8`).
+///
+/// Returns `(held, release)`:
+/// - **held** runs attack → decay down to `sustain`, peak-normalised to `1.0`; its last entry is the
+///   sustain level (0.0 for the piano → a held section settles to silence, i.e. percussive).
+/// - **release** is a relative `1.0 → 0.0` multiplier (the release rate applied from peak), applied
+///   from whatever level a chord sits at when let go.
+fn piano_envelope(adsr: [u8; 4]) -> (Vec<Sample>, Vec<Sample>) {
+    let [attack, decay, sustain, release] = adsr;
+    let peak: u32 = 0xFF;
+
+    // Held. SF_START sets env = attack (peak, if attack >= 0xFF — drops straight into decay); then
+    // the ATTACK phase adds `attack` per VBlank until peak; then DECAY multiplies.
+    let mut held: Vec<Sample> = Vec::new();
+    let mut env: u32 = attack as u32;
+    if env >= peak {
+        env = peak;
+        held.push(1.0);
+    } else {
+        held.push(env as Sample / peak as Sample);
+        while env < peak {
+            env += attack as u32;
+            if env >= peak {
+                env = peak;
+            }
+            held.push(env as Sample / peak as Sample);
+        }
+    }
+    // Decay: env = env * decay >> 8 each VBlank, until it reaches sustain (the piano's is 0).
+    let sustain = sustain as u32;
+    loop {
+        env = (env * decay as u32) >> 8;
+        held.push(env as Sample / peak as Sample);
+        if env <= sustain {
+            break;
+        }
+    }
+
+    // Release: env = env * release >> 8 each VBlank from peak until 0 — relative 1.0 → 0.0.
+    let mut rel: Vec<Sample> = Vec::new();
+    let mut env = peak;
+    loop {
+        rel.push(env as Sample / peak as Sample);
+        env = (env * release as u32) >> 8;
+        if env == 0 {
+            rel.push(0.0);
+            break;
+        }
+    }
+
+    (held, rel)
 }
 
 /// Where a sounding chord tone is in the captured ADSR.
@@ -381,11 +324,30 @@ pub struct ChordVoicer {
     /// Envelope entries advanced per output frame.
     env_step: f64,
     pub gain: f32,
+    /// Which inversion chords voice in. Clamped to `intervals.len() - 1` at voicing time, so a value
+    /// picked on a seventh still applies to a triad without putting every tone an octave up.
+    inversion: u8,
+    /// Master high-shelf on the audition output, mirroring the "Enhanced" GBA preset's shelf so the
+    /// reference piano is judged through the same top-end the user hears the song through.
+    shelf_l: BiquadFilter,
+    shelf_r: BiquadFilter,
 }
 
 impl ChordVoicer {
     pub fn new(instrument: Instrument) -> ChordVoicer {
         let env_step = 1.0 / (instrument.tick_seconds * ENGINE_SAMPLE_RATE_HZ);
+        // The audition shelf mirrors the "Enhanced" GBA preset exactly, so a label is judged through
+        // the same top-end attenuation the user hears the song through.
+        let hs = PerDeviceSettings::enhanced_gba().shelf;
+        let make_shelf = || {
+            BiquadFilter::high_shelf(
+                hs.order,
+                ENGINE_SAMPLE_RATE_HZ,
+                hs.cutoff_hz,
+                hs.q,
+                hs.gain_db,
+            )
+        };
         ChordVoicer {
             instrument,
             synth: WaveformSynthesizer::new(ENGINE_SAMPLE_RATE_HZ, VOICES),
@@ -395,6 +357,30 @@ impl ChordVoicer {
             audition_frames: None,
             env_step,
             gain: DEFAULT_GAIN,
+            inversion: 0,
+            shelf_l: make_shelf(),
+            shelf_r: make_shelf(),
+        }
+    }
+
+    /// Sets the audition gain. Takes effect on the next output frame — `next_frame` reads `gain`
+    /// every sample, so there is nothing to re-strike.
+    pub fn set_gain(&mut self, gain: f32) {
+        self.gain = gain;
+    }
+
+    /// Sets the voicing inversion, re-voicing whatever chord is currently sounding so the change is
+    /// audible at once rather than only on the next strike. A no-op (apart from storing) if nothing
+    /// is sounding, in which case the value applies to the next strike.
+    pub fn set_inversion(&mut self, inversion: u8) {
+        if self.inversion == inversion {
+            return;
+        }
+        self.inversion = inversion;
+        if let Some((_, c)) = self.current {
+            // Copy the chord out of the borrow before mutating through `self`.
+            self.release_all();
+            self.play_tones(c);
         }
     }
 
@@ -441,9 +427,13 @@ impl ChordVoicer {
         self.play_tones(section.1);
     }
 
-    /// Starts every tone of `chord` at the head of the held curve.
+    /// Starts every tone of `chord` at the head of the held curve: the triad (in the chosen
+    /// inversion) plus the root doubled an octave below as a bass note. The bass is always the root
+    /// regardless of inversion, so the chord's function reads clearly against the song.
     fn play_tones(&mut self, chord: Chord) {
-        for key in chord_keys(&chord) {
+        let mut keys = voiced_keys(&chord, self.inversion);
+        keys.push(ROOT_BASE_KEY + (chord.root % 12) - 12);
+        for key in keys {
             let pitch = self.instrument.pitch_for(key);
             let index = self.synth.play(
                 self.instrument.waveform.clone(),
@@ -496,12 +486,14 @@ impl ChordVoicer {
         self.release_all();
     }
 
-    /// One stereo frame of chord audio, already at [`DEFAULT_GAIN`].
+    /// One stereo frame of chord audio, at [`Self::gain`] and through the audition high-shelf.
     #[inline]
     pub fn next_frame(&mut self) -> (f32, f32) {
         self.advance_envelopes();
         self.synth.next_sample(&self.config);
-        (self.synth.val_l * self.gain, self.synth.val_r * self.gain)
+        let l = self.shelf_l.transform(self.synth.val_l * self.gain);
+        let r = self.shelf_r.transform(self.synth.val_r * self.gain);
+        (l, r)
     }
 
     /// Walks every ringing tone one frame along the captured ADSR, cutting it once its release has
@@ -574,13 +566,40 @@ mod tests {
     #[test]
     fn chords_voice_in_root_position_from_middle_c() {
         // C major → C4 E4 G4.
-        assert_eq!(chord_keys(&chord(0, Quality::Major)), vec![60, 64, 67]);
+        assert_eq!(voiced_keys(&chord(0, Quality::Major), 0), vec![60, 64, 67]);
         // A minor → A4 C5 E5: the root moves up from middle C, it does not wrap below it.
-        assert_eq!(chord_keys(&chord(9, Quality::Minor)), vec![69, 72, 76]);
+        assert_eq!(voiced_keys(&chord(9, Quality::Minor), 0), vec![69, 72, 76]);
         // Sevenths add a fourth tone.
         assert_eq!(
-            chord_keys(&chord(7, Quality::Dominant7)),
+            voiced_keys(&chord(7, Quality::Dominant7), 0),
             vec![67, 71, 74, 77]
+        );
+    }
+
+    #[test]
+    fn inversions_lift_the_lowest_tones() {
+        // C major [C4 E4 G4] = [60, 64, 67].
+        // 1st inversion: the root is lifted an octave → E G C5.
+        assert_eq!(voiced_keys(&chord(0, Quality::Major), 1), vec![72, 64, 67]);
+        // 2nd inversion: root and third lifted → G C5 E5.
+        assert_eq!(voiced_keys(&chord(0, Quality::Major), 2), vec![72, 76, 67]);
+        // 3rd on a triad clamps to 2nd — lifting all three tones would only shift the octave, not
+        // change the bass, so it is not a distinct voicing.
+        assert_eq!(voiced_keys(&chord(0, Quality::Major), 3), vec![72, 76, 67]);
+        // C7 [C4 E4 G4 Bb4] = [60, 64, 67, 70]. 1st inversion: C up → E G Bb C5.
+        assert_eq!(
+            voiced_keys(&chord(0, Quality::Dominant7), 1),
+            vec![72, 64, 67, 70]
+        );
+        // 3rd inversion on a seventh: three lowest lifted, the seventh becomes the bass.
+        assert_eq!(
+            voiced_keys(&chord(0, Quality::Dominant7), 3),
+            vec![72, 76, 79, 70]
+        );
+        // 4th on a seventh clamps to 3rd.
+        assert_eq!(
+            voiced_keys(&chord(0, Quality::Dominant7), 4),
+            vec![72, 76, 79, 70]
         );
     }
 
@@ -590,7 +609,7 @@ mod tests {
     fn every_quality_sounds_different() {
         let mut seen = Vec::new();
         for q in Quality::ALL {
-            let keys = chord_keys(&chord(0, q));
+            let keys = voiced_keys(&chord(0, q), 0);
             assert!(
                 !seen.contains(&keys),
                 "{q:?} voices the same pitches as another quality"
@@ -614,7 +633,7 @@ mod tests {
             loudest = loudest.max(l.abs()).max(r.abs());
         }
         assert!(loudest > 0.0, "a held chord must still sound after 2 s");
-        assert_eq!(v.ringing.len(), 3, "three tones still held");
+        assert_eq!(v.ringing.len(), 4, "four tones (triad + bass) still held");
         for r in &v.ringing {
             assert!(
                 matches!(r.phase, Phase::Held),
@@ -641,16 +660,18 @@ mod tests {
             "N.C. must release the chord"
         );
 
-        // The 4-tick (40 ms) release runs out, the tones are cut, and silence is permanent.
+        // The 4-tick (40 ms) release runs out, the tones are cut, and silence is permanent. The
+        // high-shelf is a recursive filter, so a fully-muted input can leave a denormal residual —
+        // compare against a floor rather than exact zero.
         for _ in 0..(0.2 * ENGINE_SAMPLE_RATE_HZ) as usize {
             v.next_frame();
         }
         assert!(v.ringing.is_empty(), "released voices must be freed");
         for _ in 0..1000 {
-            assert_eq!(
-                v.next_frame(),
-                (0.0, 0.0),
-                "a looping voice was left ringing"
+            let (l, r) = v.next_frame();
+            assert!(
+                l.abs() < 1e-9 && r.abs() < 1e-9,
+                "a looping voice was left ringing ({l}, {r})"
             );
         }
     }
@@ -663,26 +684,30 @@ mod tests {
         let c = chord(0, Quality::Major);
 
         v.set_chord(Some((0, c)));
-        assert_eq!(v.ringing.len(), 3, "C major strikes three tones");
+        assert_eq!(
+            v.ringing.len(),
+            4,
+            "C major strikes four tones (triad + bass)"
+        );
         for _ in 0..10 {
             v.set_chord(Some((0, c)));
         }
-        assert_eq!(v.ringing.len(), 3, "one section, one strike");
+        assert_eq!(v.ringing.len(), 4, "one section, one strike");
         assert!(
             v.ringing.iter().all(|r| matches!(r.phase, Phase::Held)),
             "the same section must keep holding"
         );
 
-        // The next bar, labelled the same chord, is a new section: three fresh tones strike while
-        // the old three release.
+        // The next bar, labelled the same chord, is a new section: four fresh tones strike while
+        // the old four release.
         v.set_chord(Some((96, c)));
-        assert_eq!(v.ringing.len(), 6, "a new section restrikes the chord");
+        assert_eq!(v.ringing.len(), 8, "a new section restrikes the chord");
         assert_eq!(
             v.ringing
                 .iter()
                 .filter(|r| matches!(r.phase, Phase::Held))
                 .count(),
-            3,
+            4,
             "exactly the new tones are held; the old ones are releasing"
         );
     }
@@ -725,7 +750,7 @@ mod tests {
         assert!(v.ringing.is_empty(), "a paused chord must not drone");
         // And resuming re-strikes it, rather than treating the section as already sounding.
         v.set_chord(Some((0, chord(0, Quality::Major))));
-        assert_eq!(v.ringing.len(), 3);
+        assert_eq!(v.ringing.len(), 4);
     }
 
     /// A right-clicked chord must survive the stopped playhead's release (auditioning while stopped
@@ -739,7 +764,7 @@ mod tests {
             v.stop_following();
             v.next_frame();
         }
-        assert_eq!(v.ringing.len(), 3, "the audition must still be ringing");
+        assert_eq!(v.ringing.len(), 4, "the audition must still be ringing");
 
         // Past the audition clock it releases itself and falls silent for good.
         for _ in 0..((AUDITION_SECONDS + 0.5) * ENGINE_SAMPLE_RATE_HZ) as usize {
@@ -759,7 +784,7 @@ mod tests {
         v.set_chord(Some((0, chord(0, Quality::Major))));
         assert_eq!(
             v.ringing.len(),
-            3,
+            4,
             "must not restrike what is already sounding"
         );
         assert!(v.audition_frames.is_none(), "the section owns it now");
@@ -768,7 +793,7 @@ mod tests {
             v.set_chord(Some((0, chord(0, Quality::Major))));
             v.next_frame();
         }
-        assert_eq!(v.ringing.len(), 3, "a section chord holds for the section");
+        assert_eq!(v.ringing.len(), 4, "a section chord holds for the section");
     }
 
     #[test]
@@ -813,72 +838,12 @@ mod tests {
         }
     }
 
-    /// The real thing: Emerald must actually yield a sampled voice with a usable ADSR. Pins the
-    /// assumptions this feature rests on — that `NoteStarted` carries a waveform and that
-    /// `VoiceVolume`/`NoteReleased` describe a real envelope — against the ROM rather than a mock.
-    #[test]
-    fn captures_a_real_voice_from_emerald() {
-        let instrument = emerald_voice();
-        assert!(
-            !instrument.waveform.data.is_empty(),
-            "voice must have sample data"
-        );
-        assert!(
-            !instrument.waveform.is_psg_square,
-            "must not be a PSG beeper"
-        );
-
-        // The release is what ends the note: this sample loops, so without a tail that reaches
-        // silence the chord would drone under the song forever.
-        assert!(instrument.waveform.looping, "premise: the ROM voice loops");
-        assert_eq!(
-            instrument.release.last().copied(),
-            Some(0.0),
-            "the release must end in silence"
-        );
-        assert!(
-            instrument.held_seconds() <= MAX_ENVELOPE_SECONDS,
-            "held curve ran {}s",
-            instrument.held_seconds()
-        );
-
-        // The split must land on a real sustain: a chord holds this level for the whole of its
-        // section, so a sustain of ~0 would mean `NoteReleased` was found in the wrong place and
-        // every chord silently died at the end of its decay.
-        assert!(
-            instrument.sustain_level() > 0.05,
-            "sustain {} is inaudible — the ADSR split is wrong",
-            instrument.sustain_level()
-        );
-
-        // Each tone of a C major triad must land on its own rate — if they collapsed, the audition
-        // would play a unison and agree with anything.
-        let rates: Vec<String> = chord_keys(&chord(0, Quality::Major))
-            .iter()
-            .map(|k| format!("{:?}", instrument.pitch_for(*k)))
-            .collect();
-        assert_eq!(
-            rates.iter().collect::<std::collections::HashSet<_>>().len(),
-            3,
-            "three tones, three pitches: {rates:?}"
-        );
-    }
-
-    fn emerald_voice() -> Instrument {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../demos/pokemon-emerald.gbaaudio");
-        let bytes = std::fs::read(path).expect("demo file should exist");
-        let archives = optime_core::load_all(&bytes);
-        let data = archives.first().expect("an archive");
-        capture(&**data, PREFERRED_SONG).expect("song 435 should yield a voice")
-    }
-
-    /// The whole point, measured: a struck C major must actually contain C, E and G. Guards the
-    /// repitching end-to-end on the real ROM voice — a chord that is merely *audible* could still be
-    /// a unison, a detuned mess, or one note.
+    /// The whole point, measured: a struck C major must actually contain C, E and G (and, below
+    /// them, the root bass). Guards the repitching end-to-end on the embedded piano — a chord that
+    /// is merely *audible* could still be a unison, a detuned mess, or one note.
     #[test]
     fn a_struck_chord_contains_its_three_pitches() {
-        let mut v = ChordVoicer::new(emerald_voice());
+        let mut v = ChordVoicer::new(embedded_piano());
         v.gain = 1.0;
         v.strike((0, chord(0, Quality::Major)));
         let n = (0.4 * ENGINE_SAMPLE_RATE_HZ) as usize;
@@ -901,10 +866,13 @@ mod tests {
         let (c4, e4, g4) = (mag(261.63), mag(329.63), mag(392.00));
         // A pitch the chord does not contain, as the noise floor to beat.
         let d4 = mag(293.66);
+        // The embedded piano is an 8-bit sample pitched up to E4/G4, then put through the audition
+        // shelf, so its upper tones don't tower over the floor the way a clean ROM voice would — a
+        // 4× clear margin still proves the tone is there rather than bleed.
         for (name, m) in [("C4", c4), ("E4", e4), ("G4", g4)] {
             assert!(
-                m > d4 * 8.0,
-                "{name} ({m:.5}) must stand well clear of the unplayed D4 ({d4:.5})"
+                m > d4 * 4.0,
+                "{name} ({m:.5}) must stand clear of the unplayed D4 ({d4:.5})"
             );
         }
     }

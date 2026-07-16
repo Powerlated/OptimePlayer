@@ -93,7 +93,6 @@ pub fn save_file(path: &std::path::Path, file: &GameAnnotations) -> Result<(), S
 }
 
 /// Session state for annotation mode.
-#[derive(Default)]
 pub struct AnnotationState {
     /// Whether the mode is on. Session-only, never persisted — it's a maintainer tool, and leaving
     /// it armed across restarts would be a trap.
@@ -131,8 +130,42 @@ pub struct AnnotationState {
     /// Whether the picker's "quality uncertain" box is ticked; sticks across picks because
     /// ambiguity usually comes in runs (a whole sparse section, not one bar).
     pub picker_uncertain: bool,
+    /// The chord under the cursor on the previous frame of the picker, so a hover only re-strikes
+    /// when the mouse moves to a *different* chord button — gliding within one cell stays silent.
+    /// Compared on `(root, quality)`, ignoring `quality_uncertain` (toggling the box isn't musical).
+    pub picker_hovered: Option<model::Chord>,
+    /// Audition gain, user-controlled so a quiet reference can be lifted or a loud one tamed without
+    /// relabelling. Defaults to [`chord_voice::DEFAULT_GAIN`]; lives here so the slider keeps its
+    /// value across songs, and is pushed to the voicer each change.
+    pub chord_gain: f32,
+    /// Which inversion auditioned chords voice in. 0 = root. Clamped to the chord's tone count by
+    /// the voicer, so a value set on a triad still does something reasonable on a seventh.
+    pub chord_inversion: u8,
     /// Last save/load message for the toolbar.
     pub status: String,
+}
+
+impl Default for AnnotationState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bounce: None,
+            bounce_for: None,
+            job: None,
+            songs: Default::default(),
+            loaded_for: None,
+            pending_range: None,
+            dirty: false,
+            beat_snap: false,
+            picker_at: None,
+            picker_just_opened: false,
+            picker_uncertain: false,
+            picker_hovered: None,
+            chord_gain: chord_voice::DEFAULT_GAIN,
+            chord_inversion: 0,
+            status: Default::default(),
+        }
+    }
 }
 
 impl AnnotationState {

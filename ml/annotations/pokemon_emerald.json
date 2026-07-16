@@ -1,0 +1,254 @@
+{
+  "schemaVersion": 1,
+  "source": "pokemon-emerald.gbaaudio",
+  "gameCode": "BPEE",
+  "stepsPerBeat": 24.0,
+  "songs": [
+    {
+      "songId": 359,
+      "beatsPerBar": 4,
+      "gridOffsetSteps": 13,
+      "spans": [
+        {
+          "startStep": 13,
+          "endStep": 109,
+          "chord": {
+            "root": 2,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 109,
+          "endStep": 205,
+          "chord": {
+            "root": 4,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 205,
+          "endStep": 301,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 301,
+          "endStep": 397,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 397,
+          "endStep": 493,
+          "chord": {
+            "root": 2,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 493,
+          "endStep": 589,
+          "chord": {
+            "root": 4,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 589,
+          "endStep": 685,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 685,
+          "endStep": 781,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 781,
+          "endStep": 877,
+          "chord": {
+            "root": 7,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 877,
+          "endStep": 973,
+          "chord": {
+            "root": 2,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 973,
+          "endStep": 1069,
+          "chord": {
+            "root": 4,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1069,
+          "endStep": 1165,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1165,
+          "endStep": 1261,
+          "chord": {
+            "root": 7,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1261,
+          "endStep": 1357,
+          "chord": {
+            "root": 6,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1357,
+          "endStep": 1453,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1453,
+          "endStep": 1549,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        }
+      ]
+    },
+    {
+      "songId": 405,
+      "beatsPerBar": 4,
+      "gridOffsetSteps": 37,
+      "spans": [
+        {
+          "startStep": 37,
+          "endStep": 133,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 133,
+          "endStep": 181,
+          "chord": {
+            "root": 9,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 181,
+          "endStep": 229,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 229,
+          "endStep": 277,
+          "chord": {
+            "root": 2,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 325,
+          "endStep": 349,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        }
+      ]
+    },
+    {
+      "songId": 413,
+      "beatsPerBar": 4,
+      "gridOffsetSteps": 25,
+      "spans": [
+        {
+          "startStep": 25,
+          "endStep": 121,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 121,
+          "endStep": 217,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 217,
+          "endStep": 313,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 313,
+          "endStep": 409,
+          "chord": {
+            "root": 3,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        }
+      ]
+    }
+  ]
+}

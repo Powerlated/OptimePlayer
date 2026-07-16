@@ -10,7 +10,6 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
-use crate::annotation::chord_voice::PREFERRED_SONG as PREFERRED_CHORD_SONG;
 use crate::annotation::{AnnotationState, BounceJob};
 use crate::chord_data;
 use crate::media_controls::{self, MediaAction};
@@ -1546,6 +1545,47 @@ impl OptimeApp {
             {
                 st.bounce.chords_on = chords_on;
             }
+            // Chord audition level — a quiet reference instrument can be lifted, a loud one tamed,
+            // without relabelling. Read on every output frame, so it needs no re-strike.
+            let prev_gain = self.annotation.chord_gain;
+            ui.add(
+                egui::Slider::new(&mut self.annotation.chord_gain, 0.0..=1.0)
+                    .fixed_decimals(2)
+                    .text("chord vol"),
+            )
+            .on_hover_text("Audition gain for chord playback.");
+            if self.annotation.chord_gain != prev_gain
+                && let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+                && let Some(c) = &mut st.bounce.chords
+            {
+                c.set_gain(self.annotation.chord_gain);
+            }
+            // Which inversion chords voice in. Re-voices the sounding chord at once, so flipping
+            // through root / 1st / 2nd / 3rd is itself an ear check.
+            let mut inv = self.annotation.chord_inversion;
+            egui::ComboBox::from_label("inversion")
+                .selected_text(match inv {
+                    1 => "1st",
+                    2 => "2nd",
+                    3 => "3rd",
+                    _ => "root",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut inv, 0, "root");
+                    ui.selectable_value(&mut inv, 1, "1st");
+                    ui.selectable_value(&mut inv, 2, "2nd");
+                    ui.selectable_value(&mut inv, 3, "3rd");
+                });
+            if inv != self.annotation.chord_inversion {
+                self.annotation.chord_inversion = inv;
+                if let Some(audio) = &self.audio
+                    && let Ok(mut st) = audio.shared.lock()
+                    && let Some(c) = &mut st.bounce.chords
+                {
+                    c.set_inversion(inv);
+                }
+            }
             ui.separator();
         });
 
@@ -1590,6 +1630,9 @@ impl OptimeApp {
         let mut close = false;
         let mut pick: Option<Option<crate::annotation::model::Chord>> = None;
         let mut uncertain = self.annotation.picker_uncertain;
+        // The chord whose button is under the cursor this frame, if any — auditioned below once it
+        // changes (so a glide within one cell doesn't re-strike, but moving to a neighbour does).
+        let mut hovered: Option<crate::annotation::model::Chord> = None;
 
         let area = egui::Area::new(egui::Id::new("chord_picker"))
             .order(egui::Order::Foreground)
@@ -1663,8 +1706,14 @@ impl OptimeApp {
                                     )
                                     .min_size(egui::vec2(34.0, 18.0))
                                     .fill(crate::piano_roll::chord_color(Some(root), true));
-                                    if ui.add(btn).clicked() {
+                                    let resp = ui.add(btn);
+                                    if resp.clicked() {
                                         pick = Some(Some(c));
+                                    }
+                                    // Hovering a cell auditions its chord, so the picker is an
+                                    // ear-led scan of the vocabulary rather than guess-and-click.
+                                    if resp.hovered() {
+                                        hovered = Some(c);
                                     }
                                 }
                                 ui.end_row();
@@ -1703,6 +1752,22 @@ impl OptimeApp {
             });
 
         self.annotation.picker_uncertain = uncertain;
+        // Audition the chord whose cell the cursor entered — only when it differs from last frame's
+        // cell, so dwelling on one button rings once and a glide across the grid plays each in turn.
+        // Compared on `(root, quality)`: `quality_uncertain` flipping isn't a musical change.
+        if let Some(c) = hovered {
+            let key = (c.root % 12, c.quality);
+            let same = self
+                .annotation
+                .picker_hovered
+                .map(|p| (p.root % 12, p.quality) == key)
+                .unwrap_or(false);
+            if !same {
+                let start = self.annotation.pending_range.map(|(s, _)| s).unwrap_or(0);
+                self.strike_chord((start, c));
+            }
+        }
+        self.annotation.picker_hovered = hovered;
         if let Some(chord) = pick {
             self.set_selected_chord(song_id, chord);
             close = true;
@@ -1726,6 +1791,7 @@ impl OptimeApp {
         }
         if close {
             self.annotation.picker_at = None;
+            self.annotation.picker_hovered = None;
         }
     }
 
@@ -1865,21 +1931,22 @@ impl OptimeApp {
     ///
     /// Prefers Emerald's song 435 ("Trainers' School"), which opens on a clean piano; falls back to
     /// the song being annotated so chord playback still works on a ROM without that id.
+    /// Arms the chord-audition voicer with the embedded piano reference instrument, inheriting the
+    /// user's current gain/inversion. The instrument ships with the app (`include_bytes!`'d from
+    /// `chord_data/piano_c4.wav`), so this no longer surveys the loaded ROM — the audition always
+    /// has a known-good piano regardless of the track, instead of grabbing a bass thump on a sparse
+    /// one.
     fn capture_chord_instrument(&mut self) {
-        let Some(i) = self.current_song else { return };
-        let archive_index = self.songs[i].archive_index;
-        let song_id = self.songs[i].song_id;
-        let data = &*self.archives[archive_index];
-        let instrument = crate::annotation::chord_voice::capture(data, PREFERRED_CHORD_SONG)
-            .or_else(|| crate::annotation::chord_voice::capture(data, song_id));
-        let Some(instrument) = instrument else {
-            self.annotation.status = "no sampled voice found for chord playback".into();
-            return;
-        };
+        let instrument = crate::annotation::chord_voice::embedded_piano();
         if let Some(audio) = &self.audio
             && let Ok(mut st) = audio.shared.lock()
         {
-            st.bounce.chords = Some(crate::annotation::ChordVoicer::new(instrument));
+            let mut v = crate::annotation::ChordVoicer::new(instrument);
+            // A freshly armed voicer must inherit the user's current audition settings, not the
+            // defaults — otherwise switching songs snaps the volume back and loses the inversion.
+            v.set_gain(self.annotation.chord_gain);
+            v.set_inversion(self.annotation.chord_inversion);
+            st.bounce.chords = Some(v);
         }
     }
 
@@ -1985,8 +2052,18 @@ impl OptimeApp {
                 self.annotation.status = format!("loaded {}", path.display());
             }
             Ok(None) => {
-                self.annotation.songs.clear();
-                self.annotation.status = "no labels yet".into();
+                // No committed JSON for this source — recover the last session's unsaved work
+                // (a "Bar 1 here" / meter edit the user didn't think to save) from the
+                // eframe-storage stash. The JSON remains the record; the stash only speaks when
+                // there is no record yet, so a hand-edited file is never overwritten.
+                if let Some(file) = self.p.annotations.get(&self.current_source).cloned() {
+                    self.annotation.songs =
+                        file.songs.into_iter().map(|s| (s.song_id, s)).collect();
+                    self.annotation.status = "recovered unsaved edits from last session".into();
+                } else {
+                    self.annotation.songs.clear();
+                    self.annotation.status = "no labels yet".into();
+                }
             }
             // Never fall back to "empty" on a bad file: that would look like no labels, and the
             // next save would overwrite them.
@@ -2053,9 +2130,13 @@ impl OptimeApp {
         }
     }
 
-    /// Web: keep the working copy in eframe storage so a refresh can't destroy hours of listening.
-    /// No-op on native, where the source-tree JSON is the record.
-    #[cfg(target_arch = "wasm32")]
+    /// Keeps the working copy in eframe storage so a refresh (web) or restart (native) can't
+    /// destroy unsaved work — most often a grid/meter edit ("Bar 1 here", meter, beat snap) the
+    /// user doesn't think to commit, since it isn't a chord label.
+    ///
+    /// This is **session recovery, not the record**: the source-tree JSON (native) and the
+    /// downloaded file (web) stay authoritative. The stash only fills in when there is no
+    /// committed file yet, so it can never silently overwrite a hand-edited record.
     fn stash_annotations(&mut self) {
         if !self.annotation.dirty {
             return;
@@ -2063,8 +2144,6 @@ impl OptimeApp {
         let file = self.annotation_file();
         self.p.annotations.insert(self.current_source.clone(), file);
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    fn stash_annotations(&mut self) {}
 
     /// Web: restore the working copy from eframe storage.
     #[cfg(target_arch = "wasm32")]

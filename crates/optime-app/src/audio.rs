@@ -492,17 +492,9 @@ mod tests {
     use crate::annotation::ChordVoicer;
     use crate::annotation::model::{Chord, Quality};
 
-    /// A state in annotation mode with a real ROM voice loaded and nothing rendered yet.
+    /// A state in annotation mode with the embedded piano voicer armed and nothing rendered yet.
     fn annotating() -> AudioState {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../demos/pokemon-emerald.gbaaudio");
-        let bytes = std::fs::read(path).expect("demo file should exist");
-        let archives = optime_core::load_all(&bytes);
-        let instrument = crate::annotation::chord_voice::capture(
-            &**archives.first().expect("an archive"),
-            crate::annotation::chord_voice::PREFERRED_SONG,
-        )
-        .expect("a voice");
+        let instrument = crate::annotation::chord_voice::embedded_piano();
         let mut st = AudioState::new();
         st.sample_rate = 48_000.0;
         st.volume = 1.0;
