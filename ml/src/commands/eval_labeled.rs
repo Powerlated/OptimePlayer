@@ -1,42 +1,36 @@
 //! Score a model against **hand-labelled** real songs — the only trustworthy real-music metric.
+//! Defaults to the held-out songs; `--model model_sft` scores the real-label stage, `--val-songs`
+//! a contrived hand-picked split, `--all` includes anything `sft` trained on (inspection only).
 //!
-//! ```sh
-//! cargo run --release --features harvest --bin eval_labeled -- \
-//!     [ann_dir] [rom_dir] [--backbone frame|event|hier] [--out-dir models] \
-//!     [--model model_sft] [--val-songs 362]
-//! #   defaults: ann_dir = ml/annotations, rom_dir = ../demos, --model model
-//! ```
-//!
-//! `--model` picks the artifact stem: the default `model` is the *synthetic* fine-tune, so scoring
-//! an `sft` run means `--model model_sft`. `--val-songs` replaces the hash holdout with a
-//! hand-picked one for contrived experiments; it prints a warning and its number is not the
-//! real-music metric.
-//!
-//! This is **not** `eval_real`. That reports agreement with `estimate.rs`, a chroma-template
-//! heuristic — not ground truth, and structurally biased toward the chroma-input backbone, so it
-//! can neither be called accuracy nor used to rank generations. This bin compares against a human
-//! who listened to the bar, so its numbers mean what they say.
-//!
-//! **Root accuracy is the primary number.** Quality is where agreement collapses — for the model
-//! (m02 scored 27% root-only vs 4% joint on the heuristic) and for human annotators alike, since
-//! sparse game voicings are genuinely ambiguous above the triad. Spans the annotator marked
-//! `qualityUncertain` are therefore scored for root only and excluded from the quality figures
-//! rather than being silently counted as wrong.
+//! **Root accuracy is primary.** Quality is where agreement collapses (for model and humans alike);
+//! spans marked `qualityUncertain` are scored for root only and excluded from the quality figures.
+//! This is not `eval-real`: that reports agreement with a heuristic, this compares against a human.
 
+use super::opts::{Backbone, ModelOpts};
 use burn::module::AutodiffModule;
+use clap::Args;
 use optime_core::load_all;
 use optime_ml::annotations::{self, Split, DEFAULT_VAL_FRAC};
-use optime_ml::backbone::{self, Backbone};
+use optime_ml::backbone;
 use optime_ml::backend::{Back, Inner, MlDevice};
-use optime_ml::cli::{Args, Kind};
 use optime_ml::harvest::harvest_song_full;
 use optime_ml::infer;
-use optime_ml::m00_frame::FrameModel;
-use optime_ml::m01_event::EventModel;
-use optime_ml::m02_hier::HierModel;
 use optime_ml::notes::NoteEvent;
 use optime_ml::theory::{chord_label_to_root_quality, NO_CHORD};
 use std::path::{Path, PathBuf};
+
+#[derive(Args, Debug)]
+pub struct EvalLabeledArgs {
+    /// Annotation directory (default `annotations`).
+    pub ann_dir: Option<PathBuf>,
+    /// ROM/archive directory (default `../demos`).
+    pub rom_dir: Option<PathBuf>,
+    /// Score every annotated song, including anything `sft` trained on (inspection only).
+    #[arg(long)]
+    pub all: bool,
+    #[command(flatten)]
+    pub opts: ModelOpts,
+}
 
 /// One window handed to the model: its notes and the truth for each frame.
 struct Cut {
@@ -91,26 +85,15 @@ fn pct(a: usize, b: usize) -> String {
     }
 }
 
-fn main() {
-    let args = Args::parse();
-    let ann_dir = PathBuf::from(
-        args.positional
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "annotations".into()),
-    );
-    let rom_dir = PathBuf::from(
-        args.positional
-            .get(1)
-            .cloned()
-            .unwrap_or_else(|| "../demos".into()),
-    );
+pub fn run(args: EvalLabeledArgs) {
+    let ann_dir = args.ann_dir.clone().unwrap_or_else(|| "annotations".into());
+    let rom_dir = args.rom_dir.clone().unwrap_or_else(|| "../demos".into());
 
     // Default to the held-out songs only. `sft` trains on the complement of exactly this split, so
     // scoring everything would report a number partly measured on the training set.
-    let score_all = std::env::args().any(|a| a == "--all");
-    let hand_picked = args.val_songs.is_some();
-    let split = match (&args.val_songs, score_all) {
+    let score_all = args.all;
+    let hand_picked = args.opts.val_songs.is_some();
+    let split = match (&args.opts.val_songs, score_all) {
         // An explicit list wins: the point of `--val-songs` is to score exactly these songs.
         (Some(ids), _) => Split::Songs(ids.clone()),
         (None, true) => Split::All,
@@ -194,7 +177,7 @@ fn main() {
         println!(
             "⚠ --val-songs {:?} is a hand-picked split, not the deterministic holdout. Nothing \
              checks that `sft` didn't train on these; not a number to report.",
-            args.val_songs.clone().unwrap_or_default()
+            args.opts.val_songs.clone().unwrap_or_default()
         );
     } else if score_all {
         println!(
@@ -213,21 +196,26 @@ fn main() {
 
     let device = MlDevice::default();
     // `--model model_sft` scores the real-label stage; the default `model` is the synthetic
-    // fine-tune that SFT warm-starts *from*, so re-scoring after an `sft` run without this flag
-    // measures the checkpoint before it, not after.
-    let prefix = args.model_prefix();
+    // fine-tune that SFT warm-starts *from*.
+    let prefix = args.opts.model_prefix();
     if !prefix.with_extension("json").exists() {
         eprintln!("{}.json not found — train first", prefix.display());
         std::process::exit(1);
     }
     println!("scoring {}", prefix.display());
-    let score = match args.kind {
-        Kind::Frame => run::<FrameModel<Back>>(&prefix, &cuts, seq_len, &device),
-        Kind::Event => run::<EventModel<Back>>(&prefix, &cuts, seq_len, &device),
-        Kind::Hier => run::<HierModel<Back>>(&prefix, &cuts, seq_len, &device),
+    let score = match args.opts.backbone {
+        Backbone::Frame => {
+            run_model::<optime_ml::m00_frame::FrameModel<Back>>(&prefix, &cuts, seq_len, &device)
+        }
+        Backbone::Event => {
+            run_model::<optime_ml::m01_event::EventModel<Back>>(&prefix, &cuts, seq_len, &device)
+        }
+        Backbone::Hier => {
+            run_model::<optime_ml::m02_hier::HierModel<Back>>(&prefix, &cuts, seq_len, &device)
+        }
     };
 
-    println!("\nvs. hand labels ({}):", args.kind.name());
+    println!("\nvs. hand labels ({}):", args.opts.backbone.name());
     println!(
         "  root            : {}  ({}/{})   ← primary",
         pct(score.root_ok, score.frames),
@@ -266,10 +254,13 @@ fn main() {
     );
 }
 
-fn run<M>(prefix: &Path, cuts: &[Cut], seq_len: usize, device: &MlDevice) -> Score
+fn run_model<M>(prefix: &Path, cuts: &[Cut], seq_len: usize, device: &MlDevice) -> Score
 where
-    M: Backbone<Back> + AutodiffModule<Back>,
-    M::InnerModule: Backbone<Inner, Batch = <M as Backbone<Back>>::Batch>,
+    M: optime_ml::backbone::Backbone<Back> + AutodiffModule<Back>,
+    M::InnerModule: optime_ml::backbone::Backbone<
+        Inner,
+        Batch = <M as optime_ml::backbone::Backbone<Back>>::Batch,
+    >,
 {
     let model = backbone::load::<M, Back>(prefix, device);
     let mut score = Score::default();

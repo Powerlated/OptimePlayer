@@ -1,23 +1,15 @@
-//! Measure the real-music gap: how well a model fits real game songs.
+//! Measure the real-music gap on held-out harvested windows: (1) SSL distribution fit (m00
+//! masked-frame MSE, real vs synthetic), (2) chord **agreement** vs the chroma-template + Viterbi
+//! reference, (3) is-music probe accuracy (m00). Missing checkpoints are skipped.
 //!
-//! ```sh
-//! cargo run --release --bin eval_real -- [real_val.bin] \
-//!     [--backbone frame|event|hier] [--out-dir models]
-//! ```
-//!
-//! Real songs are unlabeled, so this reports proxies on held-out harvested windows:
-//! (1) **SSL distribution fit** — the pretrained trunk's pretext loss on real vs. synthetic val
-//! (m00 only: masked-frame MSE, not on the AR pretext's scale); (2) **chord agreement %** vs. the
-//! chroma-template + Viterbi reference ([`optime_ml::estimate`]); (3) **is-music probe accuracy**
-//! (m00). Missing checkpoints are skipped.
-//!
-//! **This is NOT accuracy** — real songs have no ground-truth chords, and per the ml eval rule #2
-//! must never be reported as one.
+//! **NOT accuracy** — real songs have no ground-truth chords; per the ml eval rule the agreement
+//! number must never be reported as one.
 
+use super::opts::{Backbone, ModelOpts};
 use burn::module::AutodiffModule;
-use optime_ml::backbone::{self, Backbone};
+use clap::Args;
+use optime_ml::backbone;
 use optime_ml::backend::{Back, Inner, MlDevice};
-use optime_ml::cli::{Args, Kind};
 use optime_ml::data::load_songs;
 use optime_ml::m00_frame::FrameModel;
 use optime_ml::m01_event::EventModel;
@@ -28,15 +20,19 @@ use optime_ml::theory::NO_CHORD;
 use optime_ml::{estimate, infer, probe};
 use std::path::Path;
 
-fn main() {
-    let args = Args::parse();
-    let real_path = args
-        .positional
-        .first()
-        .map(String::as_str)
-        .unwrap_or("data/real_val.bin");
+#[derive(Args, Debug)]
+pub struct EvalRealArgs {
+    /// Harvested val windows to score (default `data/real_val.bin`).
+    pub real_val: Option<String>,
+    #[command(flatten)]
+    pub opts: ModelOpts,
+}
+
+pub fn run(args: EvalRealArgs) {
+    let real_path = args.real_val.as_deref().unwrap_or("data/real_val.bin");
     let device = MlDevice::default();
-    let dir = args.out_dir.join(args.kind.dir());
+    let backbone = args.opts.backbone;
+    let dir = args.opts.out_dir.join(backbone.dir());
 
     let real = load_songs(real_path).unwrap_or_else(|_| {
         eprintln!("could not load {real_path} — run `harvest` first");
@@ -45,13 +41,13 @@ fn main() {
     println!(
         "loaded {} real val windows from {real_path}; backbone {} ({})\n",
         real.len(),
-        args.kind.name(),
+        backbone.name(),
         dir.display()
     );
 
     // --- 1. SSL distribution fit (generation 00's masked-frame pretext only) ---
     let pretrained_prefix = dir.join("pretrained");
-    if args.kind == Kind::Frame && pretrained_prefix.with_extension("json").exists() {
+    if backbone == Backbone::Frame && pretrained_prefix.with_extension("json").exists() {
         let model = backbone::load::<FrameModel<Back>, Back>(&pretrained_prefix, &device);
         let cfg = PretrainConfig::default();
         let seq = real.first().map(|s| s.n_frames).unwrap_or(0);
@@ -66,7 +62,7 @@ fn main() {
         } else {
             println!();
         }
-    } else if args.kind == Kind::Frame {
+    } else if backbone == Backbone::Frame {
         println!(
             "(no {}.json — skipping recon-loss report)\n",
             pretrained_prefix.display()
@@ -76,21 +72,21 @@ fn main() {
     // --- 2. Chord agreement vs. the training-free reference ---
     let model_prefix = dir.join("model");
     if model_prefix.with_extension("json").exists() {
-        match args.kind {
-            Kind::Frame => agreement::<FrameModel<Back>>(&model_prefix, &real, &device),
-            Kind::Event => agreement::<EventModel<Back>>(&model_prefix, &real, &device),
-            Kind::Hier => agreement::<HierModel<Back>>(&model_prefix, &real, &device),
+        match backbone {
+            Backbone::Frame => agreement::<FrameModel<Back>>(&model_prefix, &real, &device),
+            Backbone::Event => agreement::<EventModel<Back>>(&model_prefix, &real, &device),
+            Backbone::Hier => agreement::<HierModel<Back>>(&model_prefix, &real, &device),
         }
     } else {
         println!(
             "(no {}.json — skipping chord-agreement report; run `train --backbone {}` first)",
             model_prefix.display(),
-            args.kind.name()
+            backbone.name()
         );
     }
 
     // --- 3. Is-music probe accuracy on the weakly-labeled real windows ---
-    let probe_prefix = args.out_dir.join("probe");
+    let probe_prefix = args.opts.out_dir.join("probe");
     if probe_prefix.with_extension("json").exists() {
         let labeled = real.iter().filter(|s| s.is_music.is_some()).count();
         if labeled == 0 {
@@ -114,8 +110,11 @@ fn main() {
 /// Per-frame chord agreement between a trained backbone and the heuristic reference.
 fn agreement<M>(prefix: &Path, real: &[Song], device: &MlDevice)
 where
-    M: Backbone<Back> + AutodiffModule<Back>,
-    M::InnerModule: Backbone<Inner, Batch = <M as Backbone<Back>>::Batch>,
+    M: optime_ml::backbone::Backbone<Back> + AutodiffModule<Back>,
+    M::InnerModule: optime_ml::backbone::Backbone<
+        Inner,
+        Batch = <M as optime_ml::backbone::Backbone<Back>>::Batch,
+    >,
 {
     let model = backbone::load::<M, Back>(prefix, device);
     let (mut total, mut agree, mut chord_total, mut chord_agree) = (0usize, 0, 0, 0);

@@ -1,15 +1,10 @@
-//! Empirically size the event tokenizer's `MAX_TOKENS` cap from the real corpus.
-//!
-//! One event token = one note-on in a 128-frame window, so tokens-per-window =
-//! notes-per-window. This prints the distribution over the harvested real windows
-//! (`data/real_{train,val}.bin`) plus how many windows a few candidate caps would
-//! truncate, so the cap can be chosen to cover ~all real music.
-//!
-//! Usage: cargo run --release --bin token_stats
+//! Empirically size the token caps from the real corpus: notes/window (= event tokens) and
+//! sounding-notes/frame (= m02's `MAX_POLY`), with truncation counts for candidate caps. Reads
+//! `data/real_{train,val}.bin`.
 
 use optime_ml::data::load_songs;
 
-fn main() {
+pub fn run() {
     let mut counts: Vec<usize> = Vec::new();
     for path in ["data/real_train.bin", "data/real_val.bin"] {
         match load_songs(path) {

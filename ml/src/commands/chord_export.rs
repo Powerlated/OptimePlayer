@@ -1,25 +1,10 @@
-//! Offline chord/key pre-inference (feature `harvest`).
+//! Offline chord/key pre-inference → the app's `.ocd` piano-roll chord table. Runs the trained
+//! model over every playable song in an archive and writes a compact bespoke binary the app draws
+//! as scrolling `<roman> (<absolute>)` labels. All music theory (roman spelling relative to the
+//! inferred key) lives here; the app just maps segment indices to interned strings.
 //!
-//! Runs the trained key/chord model over every playable song in a sound archive
-//! and writes a compact **bespoke binary** (`.ocd`) the app's piano roll consumes to
-//! draw scrolling chord labels — `<roman numeral> (<absolute>)`. The model is too
-//! heavy (and unavailable on the wasm build) to run live, so this bakes the result
-//! once on PC. All music theory (roman spelling relative to the inferred key) lives
-//! here; the app just maps segment indices to interned label strings.
-//!
-//! Usage:
-//!   cargo run --release --features harvest --bin chord_export -- \
-//!       <archive> <out.ocd> [--names <song_names.json>] [--backbone frame|event|hier] \
-//!       [--out-dir models] [--model model_sft]
-//!
-//! - `<archive>` a `.gba`/`.gbaaudio`/`.nds`/`.sdat` (gzip is transparently handled).
-//! - `<out.ocd>` output path.
-//! - `--names` optional `song_names` JSON; restricts output to its curated ids
-//!   (skips SFX/jingles). Omit to export every playable song.
-//! - `--backbone` picks the generation. All three share this pipeline and the `.ocd`
-//!   format, so the rest of the tool is model-agnostic.
-//! - `--model` picks the artifact stem under `<out-dir>/<NN-backbone>/`; the default
-//!   `model` is the synthetic fine-tune, so hearing an SFT run means `model_sft`.
+//! `--names` restricts output to a `song_names` JSON's curated ids (skips SFX/jingles). `--model`
+//! picks the artifact stem (`model_sft` to hear the real-label stage).
 //!
 //! ## `.ocd` binary format (little-endian)
 //!
@@ -37,90 +22,90 @@
 //! }
 //! ```
 //!
-//! Segments are contiguous (the model labels every frame), so only starts are
-//! stored; ends are reconstructed from the next start (last from `end_step`).
+//! Segments are contiguous (the model labels every frame), so only starts are stored; ends are
+//! reconstructed from the next start (last from `end_step`).
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use burn::module::AutodiffModule;
-use optime_ml::backbone::{self, Backbone};
+use clap::Args;
+use optime_ml::backbone;
 use optime_ml::backend::{Back, Inner, MlDevice};
-use optime_ml::cli::{Args, Kind};
 use optime_ml::harvest::harvest_song_full;
 use optime_ml::infer::{merge_segments, predict, Prediction};
-use optime_ml::m00_frame::FrameModel;
-use optime_ml::m01_event::EventModel;
-use optime_ml::m02_hier::HierModel;
 use optime_ml::notes::{NoteEvent, FRAMES_PER_BEAT};
 use optime_ml::theory::Key;
 
+use super::opts::{Backbone, ModelOpts};
 use optime_core::{load_all, SoundData};
 
-/// Window length fed to the model — the full context it has (a bidirectional
-/// encoder over this many frames, no cross-window memory). Equals the model's
-/// `max_seq_len` and the training sequence length (128 frames = 32 beats).
+/// Window length fed to the model — the full context it has (a bidirectional encoder over this
+/// many frames, no cross-window memory).
 const SEQ_LEN: usize = 128;
 
-/// One song's reduced chord timeline: contiguous segments as `(start_step, label)`
-/// plus the final boundary step.
+#[derive(Args, Debug)]
+pub struct ChordExportArgs {
+    /// Input `.gba`/`.gbaaudio`/`.nds`/`.sdat` (gzip transparently handled).
+    pub archive: PathBuf,
+    /// Output `.ocd` path.
+    pub out: PathBuf,
+    /// Optional `song_names` JSON; restricts output to its curated ids.
+    #[arg(long)]
+    pub names: Option<PathBuf>,
+    #[command(flatten)]
+    pub opts: ModelOpts,
+}
+
+/// One song's reduced chord timeline: contiguous segments as `(start_step, label)` plus the final
+/// boundary step.
 struct SongOut {
     end_step: u32,
     segments: Vec<(u32, String)>,
 }
 
-/// Type-erased predict fn over one windowed note slice — wraps whichever backbone
-/// was loaded, so [`export_song`] is model-agnostic.
+/// Type-erased predict fn over one windowed note slice — wraps whichever backbone was loaded, so
+/// [`export_song`] is model-agnostic.
 type Predict = Box<dyn Fn(&[NoteEvent], usize) -> Prediction>;
 
 /// Load `prefix` as backbone `M` and erase it behind a [`Predict`] closure.
 fn boxed_predict<M>(prefix: &Path, device: MlDevice) -> Predict
 where
-    M: Backbone<Back> + AutodiffModule<Back>,
-    M::InnerModule: Backbone<Inner, Batch = <M as Backbone<Back>>::Batch>,
+    M: optime_ml::backbone::Backbone<Back> + AutodiffModule<Back>,
+    M::InnerModule: optime_ml::backbone::Backbone<
+        Inner,
+        Batch = <M as optime_ml::backbone::Backbone<Back>>::Batch,
+    >,
 {
     let model = backbone::load::<M, Back>(prefix, &device);
     Box::new(move |notes, nf| predict::<M>(&model, notes, nf, &device))
 }
 
-fn main() {
-    let args = Args::parse();
-    if args.positional.len() < 2 {
-        eprintln!(
-            "usage: chord_export <archive> <out.ocd> [--names <song_names.json>] \
-             [--backbone frame|event|hier] [--out-dir models] [--model model_sft]"
-        );
-        std::process::exit(1);
-    }
-    let archive_path = args.positional[0].as_str();
-    let out_path = args.positional[1].as_str();
-    let raw: Vec<String> = std::env::args().collect();
-    let names_filter = flag(&raw, "--names").map(|p| load_curated_ids(Path::new(&p)));
-
+pub fn run(args: ChordExportArgs) {
+    let names_filter = args.names.as_deref().map(load_curated_ids);
     let device = MlDevice::default();
 
-    // Load the requested backbone and wrap its predict fn in a single closure so the
-    // rest of the pipeline (harvest → windowed inference → `.ocd` encode) is shared
-    // and the fragile binary format lives in exactly one place.
-    let prefix = args.model_prefix();
+    // Load the requested backbone and wrap its predict fn in a single closure so the rest of the
+    // pipeline (harvest → windowed inference → `.ocd` encode) is shared.
+    let prefix = args.opts.model_prefix();
     if !prefix.with_extension("json").exists() {
         eprintln!(
-            "{}.json not found — run `cargo run --release --bin train -- --backbone {}` first",
+            "{}.json not found — run `train --backbone {}` first",
             prefix.display(),
-            args.kind.name()
+            args.opts.backbone.name()
         );
         std::process::exit(1);
     }
-    let predict: Predict = match args.kind {
-        Kind::Frame => boxed_predict::<FrameModel<Back>>(&prefix, device),
-        Kind::Event => boxed_predict::<EventModel<Back>>(&prefix, device),
-        Kind::Hier => boxed_predict::<HierModel<Back>>(&prefix, device),
+    let predict: Predict = match args.opts.backbone {
+        Backbone::Frame => boxed_predict::<optime_ml::m00_frame::FrameModel<Back>>(&prefix, device),
+        Backbone::Event => boxed_predict::<optime_ml::m01_event::EventModel<Back>>(&prefix, device),
+        Backbone::Hier => boxed_predict::<optime_ml::m02_hier::HierModel<Back>>(&prefix, device),
     };
 
-    let bytes = read_maybe_gzip(Path::new(archive_path));
+    let bytes = read_maybe_gzip(&args.archive);
     let archives = load_all(&bytes);
     if archives.is_empty() {
-        eprintln!("no sound archives found in {archive_path}");
+        eprintln!("no sound archives found in {}", args.archive.display());
         std::process::exit(1);
     }
 
@@ -141,17 +126,17 @@ fn main() {
     }
 
     let encoded = encode(&songs);
-    std::fs::write(out_path, &encoded).expect("write output");
+    std::fs::write(&args.out, &encoded).expect("write output");
     println!(
-        "wrote {out_path} ({} songs, {} KB)",
+        "wrote {} ({} songs, {} KB)",
+        args.out.display(),
         songs.len(),
         encoded.len() / 1024
     );
 }
 
-/// Harvest one song, infer chords over sliding windows, reduce to step-timed
-/// segments with baked labels. Returns `None` if the song can't be started or is
-/// empty. `predict` runs the chosen backbone (frame or event) over one window.
+/// Harvest one song, infer chords over sliding windows, reduce to step-timed segments with baked
+/// labels. `None` if the song can't be started or is empty.
 fn export_song<P: Fn(&[NoteEvent], usize) -> Prediction>(
     predict: P,
     data: &dyn SoundData,
@@ -163,9 +148,8 @@ fn export_song<P: Fn(&[NoteEvent], usize) -> Prediction>(
         return None;
     }
 
-    // Infer window-by-window (rebasing frames), concatenating per-frame labels and
-    // remembering the most confident window's key as the song key (roman is spelled
-    // relative to it).
+    // Infer window-by-window (rebasing frames), concatenating per-frame labels and remembering the
+    // most confident window's key as the song key (roman is spelled relative to it).
     let mut labels: Vec<usize> = Vec::with_capacity(total_frames);
     let mut best_key = Key::from_label(0);
     let mut best_conf = -1.0_f32;
@@ -183,8 +167,7 @@ fn export_song<P: Fn(&[NoteEvent], usize) -> Prediction>(
         labels.extend_from_slice(&pred.chord_labels[..take]);
     }
 
-    // Frame → sequencer step (inverse of `harvest::step_to_frame`), rounded to a
-    // whole step (GBA/DS beat grids divide evenly, so this is exact in practice).
+    // Frame → sequencer step (inverse of `harvest::step_to_frame`), rounded to a whole step.
     let to_step = |frame: usize| -> u32 {
         if steps_per_beat > 0.0 {
             (frame as f64 * steps_per_beat / FRAMES_PER_BEAT as f64).round() as u32
@@ -291,10 +274,4 @@ fn read_maybe_gzip(path: &Path) -> Vec<u8> {
     } else {
         raw
     }
-}
-
-/// Value of a `--flag <value>` argument, if present.
-fn flag(args: &[String], name: &str) -> Option<String> {
-    let i = args.iter().position(|a| a == name)?;
-    args.get(i + 1).cloned()
 }

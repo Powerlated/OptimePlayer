@@ -1,28 +1,26 @@
-//! Train the frozen "is-music" linear probe on harvested, weakly-labeled songs.
-//!
-//! ```sh
-//! # First harvest with annotations so real windows carry is-music labels:
-//! cargo run --release --features harvest --bin harvest -- ../demos 128 \
-//!     --annotate BPEE=../crates/optime-app/src/song_names/pokemon_emerald.json \
-//!     --annotate A3UJ=../crates/optime-app/src/song_names/mother_3.json
-//! # Then probe on top of a (pre)trained encoder:
-//! cargo run --release --bin probe -- [start_prefix] [--out-dir models]
-//! #   start_prefix defaults to <out-dir>/00-frame/model, else .../pretrained
-//! #   → <out-dir>/probe(.mpk) + probe.json
-//! ```
-//!
-//! Generation 00 only: the probe reads that backbone's pooled encoder features and
-//! its dedicated is-music head, which the learned-token generations don't carry.
+//! Train the frozen "is-music" linear probe on harvested, weakly-labeled songs → `<out-dir>/probe`.
+//! Generation 00 only (it carries the pooled encoder features + is-music head the learned-token
+//! generations don't). `start_prefix` defaults to `<out-dir>/00-frame/model`, else `.../pretrained`.
+//! Re-harvest with `--annotate` first so real windows carry is-music labels.
 
+use super::opts::{Backbone, ModelOpts};
 use burn::config::Config;
 use burn::module::Module;
 use burn::record::CompactRecorder;
+use clap::Args;
 use optime_ml::backend::{Back, MlDevice};
-use optime_ml::cli::{Args, Kind};
 use optime_ml::data::load_songs;
 use optime_ml::m00_frame::{KeyChordModel, ModelConfig};
 use optime_ml::probe::{self, build_music_set, ProbeConfig};
 use std::path::{Path, PathBuf};
+
+#[derive(Args, Debug)]
+pub struct ProbeArgs {
+    /// Frozen encoder prefix; defaults to the frame model, else its pretrained checkpoint.
+    pub start_prefix: Option<PathBuf>,
+    #[command(flatten)]
+    pub opts: ModelOpts,
+}
 
 fn load(prefix: &Path, device: &MlDevice) -> (KeyChordModel<Back>, ModelConfig) {
     let config = ModelConfig::load(prefix.with_extension("json"))
@@ -34,14 +32,13 @@ fn load(prefix: &Path, device: &MlDevice) -> (KeyChordModel<Back>, ModelConfig) 
     (model, config)
 }
 
-fn main() {
-    let args = Args::parse();
+pub fn run(args: ProbeArgs) {
     let device = MlDevice::default();
-    let frame_dir = args.out_dir.join(Kind::Frame.dir());
+    let frame_dir = args.opts.out_dir.join(Backbone::Frame.dir());
 
     // Pick the starting encoder: explicit arg, else fine-tuned model, else pretrained.
-    let prefix: PathBuf = match args.positional.first() {
-        Some(p) => PathBuf::from(p),
+    let prefix: PathBuf = match args.start_prefix {
+        Some(p) => p,
         None if frame_dir.join("model.json").exists() => frame_dir.join("model"),
         None => frame_dir.join("pretrained"),
     };
@@ -75,6 +72,6 @@ fn main() {
         &config,
         &train,
         &val,
-        &args.out_dir,
+        &args.opts.out_dir,
     );
 }

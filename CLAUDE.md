@@ -216,8 +216,8 @@ Pipeline = **two-stage hybrid**: (1) SSL-pretrain trunk on *unlabeled real game 
 - **In-app chord labels (`.ocd`) — the real-song eval loop.** Bake predictions on PC (model is too heavy for live/wasm), embed in the app, judge by ear:
   ```sh
   cd ml
-  CUDA_PATH=/usr/local/cuda cargo build --release --features "harvest cuda" --bin chord_export
-  ./target/release/chord_export ../demos/pokemon-emerald.gbaaudio \
+  CUDA_PATH=/usr/local/cuda cargo build --release --features "harvest cuda"
+  ./target/release/optime-ml chord-export ../demos/pokemon-emerald.gbaaudio \
       ../crates/optime-app/src/chord_data/pokemon_emerald.ocd \
       --names ../crates/optime-app/src/song_names/pokemon_emerald.json --backbone hier
   cd .. && cargo test -p optime-app --lib embedded_tables_parse   # MUST run: bad .ocd is skipped SILENTLY (no chords, no error)
@@ -225,45 +225,46 @@ Pipeline = **two-stage hybrid**: (1) SSL-pretrain trunk on *unlabeled real game 
   ```
   `chord_data/mod.rs` embeds each table by `include_bytes!` keyed on **GBA game code** (`CHORDS_BY_GBA_GAME_CODE`, currently only `BPEE` → `pokemon_emerald.ocd`); `CHORDS_BY_GAME_FILENAME` exists for code-less (DS) games but is empty. **A new game needs its `.ocd` hand-wired into one of those consts** — dropping the file in does nothing. Tables are git-tracked, so regenerating overwrites the previous model's table: `git checkout crates/optime-app/src/chord_data/*.ocd` restores it, and that's how you A/B two backbones by ear. `--names` restricts to curated ids (skips SFX/jingles). Roman-numeral spelling relative to inferred key lives in `chord_export`, not the app.
 - **Synthetic data:** `theory.rs` (24 keys, 10 qualities, diatonic harmony, label space) → `progression.rs` generates progressions two ways — curated templates (I–V–vi–IV, ii–V–I, doo-wop, Pachelbel, 12-bar blues, circle-of-fifths, Andalusian, minor ii–V–i, rhythm-changes; random 7th upgrades, secondary dominants, borrowed chords) + functional-harmony Markov walk (tonic→predominant→dominant→tonic). `notes.rs` voices each into note events (block pads / rhythmic comping / arps + bass + optional melody/percussion, inversions, dynamics, pan, occasional rest → genuine no-chord frames), every frame labelled. Raw note-event songs are the retained dataset (`data/*.bin`); features derived deterministically on load. `estimate.rs` = training-free chord reference (chroma-template + Viterbi) for scoring real songs (no ground truth exists).
-- **Usage (CLI pipeline):** 9 bins. `--backbone frame|event|hier` (default `frame`; aliases `m00`/`00` etc.) selects the generation; `--out-dir` (default `models`) the artifact root — **use it for throwaway runs, or they overwrite real checkpoints**. Artifacts → `models/<00-frame|01-event|02-hier>/{pretrained,model}.{mpk,json}`. Add `--features cuda` to any bin to run it on the GPU (same args, same artifacts — `CompactRecorder` output is backend-agnostic, so a CUDA-pretrained checkpoint warm-starts a CPU fine-tune and vice versa).
-  - `generate_data <n_train> <n_val> <seq_len> [seed]` → `data/train,val.bin` (**clobbers**; deterministic from seed).
-  - `--features harvest` `harvest <rom_dir> [seq_len] [val_frac] [--annotate CODE=song_names.json ...]` → `data/real_{train,val}.bin`.
+- **Usage (CLI pipeline):** **one binary `optime-ml`** (`src/main.rs` + `commands/*`, clap subcommands — `cargo run --release -- <cmd>` or `./target/release/optime-ml <cmd>`; `--help` on any). 12 subcommands. `--backbone frame|event|hier` (default `frame`; aliases `m00`/`00` etc.) selects the generation; `--out-dir` (default `models`) the artifact root — **use it for throwaway runs, or they overwrite real checkpoints**. Artifacts → `models/<00-frame|01-event|02-hier>/{pretrained,model}.{mpk,json}`. Add `--features cuda` to any run for the GPU (same args, same artifacts — `CompactRecorder` output is backend-agnostic, so a CUDA-pretrained checkpoint warm-starts a CPU fine-tune and vice versa). Harvest-only subcommands (`harvest`/`sft`/`eval-labeled`/`chord-export`) and `pretrain-gpu` are `#[cfg]`'d in — absent unless the `harvest`/`gpu` feature is on.
+  - `generate-data <n_train> <n_val> <seq_len> [seed]` → `data/train,val.bin` (**clobbers**; deterministic from seed).
+  - `--features harvest` `harvest <rom_dir> [seq_len] [val_frac] [--coverage N] [--annotate CODE=song_names.json ...]` → `data/real_{train,val}.bin`.
   - `pretrain <epochs> <batch> [lr] [--backbone X]` → `<dir>/pretrained`. Pretext follows the backbone: `frame` = masked-frame MSE, `event`/`hier` = AR next-frame BCE.
   - `train <epochs> <batch> [lr] [--backbone X] [--pretrained <prefix>]` → `<dir>/model`.
-  - `eval_real [real_val.bin] [--backbone X]` → recon gap (frame only) + chord agreement + is-music acc. **Chord agreement is NOT an accuracy number and must never be reported as one** — see the eval rule below.
-  - `--features harvest` `eval_labeled [ann_dir] [rom_dir] [--backbone X] [--all]` → **real accuracy vs hand labels** (`annotations.rs`). THE real-music metric. **Root is primary**, quality secondary (uncertain spans score root-only). Defaults to the **held-out** songs; `--all` includes what `sft` trained on (inspection only, never report it).
+  - `eval-real [real_val.bin] [--backbone X]` → recon gap (frame only) + chord agreement + is-music acc. **Chord agreement is NOT an accuracy number and must never be reported as one** — see the eval rule below.
+  - `--features harvest` `eval-labeled [ann_dir] [rom_dir] [--backbone X] [--all]` → **real accuracy vs hand labels** (`annotations.rs`). THE real-music metric. **Root is primary**, quality secondary (uncertain spans score root-only). Defaults to the **held-out** songs; `--all` includes what `sft` trained on (inspection only, never report it).
   - `--features harvest` `sft [epochs] [batch] [lr] [--backbone X]` → **stage 3**: fine-tune on hand labels, warm-started from the synthetic `model`, saved as **`model_sft`** (never overwrites the `model` it starts from). Calls the one `train::run` — `name` param picks the artifact stem.
   - `infer [val_idx] [--backbone X]` inspect vs ground truth. `probe [start_prefix]` → `models/probe` (frame only).
-  - `chord_export <archive> <out.ocd> [--names song_names.json] [--backbone X]` → app chord-lane table (procedure below).
-  - `token_stats` (design sizing). `--features gpu` `hier_pretrain_gpu` (WGPU; calls `pretrain::ar::run_single_device`, no `dp_step` — sharding is a CPU-only trick).
+  - `chord-export <archive> <out.ocd> [--names song_names.json] [--backbone X]` → app chord-lane table (procedure below).
+  - `token-stats` (design sizing). `--features gpu` `pretrain-gpu` (WGPU; calls `pretrain::ar::run_single_device`, no `dp_step` — sharding is a CPU-only trick).
 - **Live dashboard** (`dashboard.rs` + `ml/dashboard/`): every training driver serves its own web view. No new crates — GET-only `std::net::TcpListener`, `serde_json`, Vue global build vendored at `ml/dashboard/vendor/` (MIT, credit in README); `index.html`/`app.js`/vue all `include_str!`'d into the bin → no build step, no cwd assumption, works offline. Metrics flow from the sinks that already exist: `progress::TrainProgress::maybe_log` → `dashboard::record_batch` (~1/s, bounded `MAX_BATCH_POINTS`), epoch summaries → `record_epoch(EpochPoint::{pretext,supervised})` (pretext = val loss; fine-tune = key/chord acc + changes/seq — never both). Console and web read the same numbers. Charts = hand-rolled SVG, palette from the `dataviz` skill's validated categorical slots (blue = train, green = held-out), loss and accuracy on **separate plots** (different units, never a second y-axis). Env: `ML_DASHBOARD=0` off, `ML_DASHBOARD_ADDR` bind (default `0.0.0.0:7878`), `ML_DASHBOARD_HOLD=1` keep serving after the run (else bins exit as before). Bind failure = warning, never fatal.
   - `RunMeta` also carries `precision` (`backend::precision::<B>()` off `B::FloatElem` — measured, never asserted), `ContextWindow` (tokens = trunk seq len, beats, seconds), `DataStats` (windows, mean notes/window, train beats + hours, `transpositions`, augmented hours), `params` (`Module::num_params`), `flops_per_window`, and the **configs themselves** as `serde_json::Value` (`model_config`/`train_config`) — the hyperparameter table renders from the run's own `Config`, so adding a config field adds a dashboard row for free. Never re-list a config field in `RunMeta`.
   - **`REFERENCE_BPM` = 120.** The model's time axis is beats (`FRAMES_PER_BEAT`=4), not seconds — harvest discards real tempo. Every seconds/hours figure is *at 120bpm* and must say so. Augmented hours = `train_hours × N_TRANSPOSITIONS` (12, the range `random_transpose` draws): more variety, **not** more information — label it as such.
 - **FLOP estimates** (`flops.rs` + `Backbone::flops_per_window`): matmul-only, 1 MAC = 2 FLOPs; softmax/norm/GELU/gathers/scatter excluded → a lower bound that tracks cost, not a profile (memory-bandwidth-bound in practice). `transformer_layer` = `8·seq·d²` (QKVO) + `4·seq²·d` (attention, the quadratic term) + `4·seq·d·d_ff` (FFN); head count and causal masking don't change it. `notes_per_window` arg exists because **m01's φ runs per note** (data-dependent); m00/m02 ignore it (m02's set grid is dense `MAX_POLY`-wide regardless of real polyphony). m02 @ default cfg (seq 256) ≈ **1.72 GFLOP/window** — the **set encoder (~1.18 G) dominates the main trunk (~537 M)**, because it runs a 17-token encoder once per frame. Widening the context is therefore ~linear here, not quadratic: the set encoder scales with frame count while only the trunk's `4·seq²·d` term is quadratic.
 - **Per-epoch checkpoints**: every driver calls `backbone::save_epoch` after each epoch → `<dir>/<name>-ep007(.mpk)` + `.json` (zero-padded = lexical sort is chronological), alongside the final `<name>`. `save_epoch` takes `&model` + clones; `save` consumes it at run end.
-- **Layout.** Generations: `m00_frame`/`m01_event`/`m02_hier` (each `{mod,model,batch}.rs`). Shared (unnumbered): `backbone` (the `Backbone`/`ArBackbone` contract + `ModelOutput`/`ArOutput`) · `backend` (`Back`/`Inner`/`MlDevice`; import backends from here, never from `train`) · `shared` (factored targets, `chord_key_loss`, `beat_aware_tv`, `eval_counts`) · `theory` (label space, unit-tested) · `progression`/`notes` (synth gen) · `features` (m00 grid) · `tokenize` (per-note field indices + `ar_targets`; m01+m02) · `data` (dataset/retention/`Example`) · `train` (the ONE supervised loop) · `pretrain/{masked,ar}` (two genuinely different pretexts — not merged) · `infer` (one generic `predict` + `decode_output`) · `parallel` (DP step) · `cli` (`--backbone`/`--out-dir` parsing) · `progress` (throttled log + dashboard sink) · `dashboard` (in-process web view) · `harvest` (feature-gated) · `probe` (frozen is-music) · `estimate` (heuristic ref) · `bin/*` CLIs.
+- **Layout.** Generations: `m00_frame`/`m01_event`/`m02_hier` (each `{mod,model,batch}.rs`). Shared (unnumbered): `backbone` (the `Backbone`/`ArBackbone` contract + `ModelOutput`/`ArOutput`) · `backend` (`Back`/`Inner`/`MlDevice`; import backends from here, never from `train`) · `shared` (factored targets, `chord_key_loss`, `beat_aware_tv`, `eval_counts`) · `theory` (label space, unit-tested) · `progression`/`notes` (synth gen) · `features` (m00 grid) · `tokenize` (per-note field indices + `ar_targets`; m01+m02) · `data` (dataset/retention/`Example`) · `train` (the ONE supervised loop) · `pretrain/{masked,ar}` (two genuinely different pretexts — not merged) · `infer` (one generic `predict` + `decode_output`) · `parallel` (DP step) · `progress` (throttled log + dashboard sink) · `dashboard` (in-process web view) · `harvest` (feature-gated) · `probe` (frozen is-music) · `estimate` (heuristic ref). **The CLI is one binary**: `src/main.rs` (clap `Command` enum) + `src/commands/*` (one module per subcommand, harvest/gpu ones `#[cfg]`'d) + `commands/opts.rs` (shared `--backbone`/`--out-dir`/`--model`/split flags). No `src/bin/*` and no lib `cli` module.
 - **Training is not reproducible.** `config.seed` only seeds shuffling/augmentation; burn's param init + dropout draw from an unseeded global RNG, so identical runs differ (~0.2 loss spread at epoch 1). `Backend::seed` + `DP_SHARDS=1` makes it exact (parallel dropout draws are order-dependent). Don't build a before/after gate on exact losses.
 - **Live integration (future):** adapt live `SynthEvent` stream → `NoteEvent`s on the 4-frames/beat grid, `features::extract`, `infer::predict` on a trailing window for rolling read-out. Model + label space console-agnostic; the note representation is the only contract.
 
 ### Running the pipeline by hand
 
-Order matters: each stage consumes the previous one's artifact. All commands run from `ml/`. Add
-`--features cuda` + `CUDA_PATH=/usr/local/cuda` to any training bin for the GPU (`--features "harvest cuda"`
-when a bin also needs the engine).
+Order matters: each stage consumes the previous one's artifact. All commands run from `ml/`, as
+subcommands of the one `optime-ml` binary (`cargo run --release -- <cmd>`). Add `--features cuda` +
+`CUDA_PATH=/usr/local/cuda` for the GPU (`--features "harvest cuda"` when the run also needs the
+engine — the harvest subcommands don't exist without it).
 
 ```sh
 # 0. Data. Both clobber; the window (256) must match the model's — a dataset windowed at one
 #    length cannot train a model built for another.
-cargo run --release --bin generate_data                       # → data/{train,val}.bin  (synthetic, labelled)
-cargo run --release --features harvest --bin harvest -- ../demos 256 0.1 \
+cargo run --release -- generate-data                          # → data/{train,val}.bin  (synthetic, labelled)
+cargo run --release --features harvest -- harvest ../demos 256 0.1 \
     --annotate BPEE=../crates/optime-app/src/song_names/pokemon_emerald.json \
     --annotate A3UJ=../crates/optime-app/src/song_names/mother_3.json   # → data/real_{train,val}.bin
 
 # 1. SSL pretrain on real songs (representation from reality).       → <dir>/<NN>/pretrained
-CUDA_PATH=/usr/local/cuda cargo run --release --features cuda --bin pretrain -- 20 32 --backbone hier
+CUDA_PATH=/usr/local/cuda cargo run --release --features cuda -- pretrain 20 32 --backbone hier
 
 # 2. Supervised fine-tune on synthetic theory labels (label semantics). → <dir>/<NN>/model
-CUDA_PATH=/usr/local/cuda cargo run --release --features cuda --bin train -- 12 32 \
+CUDA_PATH=/usr/local/cuda cargo run --release --features cuda -- train 12 32 \
     --backbone hier --pretrained models/02-hier/pretrained
 ```
 
@@ -275,19 +276,19 @@ Set the song's **meter** and **key**, and use *Bar 1 here* for a pickup. Save �
 
 ```sh
 # 4. Score against hand labels — THE real-music metric. Held-out songs only by default.
-cargo run --release --features harvest --bin eval_labeled -- --backbone hier
+cargo run --release --features harvest -- eval-labeled --backbone hier
 
 # 5. Stage-3 SFT on hand labels, warm-started from the synthetic model. → <dir>/<NN>/model_sft
-cargo run --release --features harvest --bin sft -- 8 16 --backbone hier
-cargo run --release --features harvest --bin eval_labeled -- --backbone hier   # re-score after
+cargo run --release --features harvest -- sft 8 16 --backbone hier
+cargo run --release --features harvest -- eval-labeled --backbone hier   # re-score after
 
 # Optional: bake predictions into the app's chord lane to judge by ear (see the .ocd procedure).
 ```
 
-`sft` trains on the complement of exactly the songs `eval_labeled` scores (`annotations::is_val`).
-Never report an `eval_labeled --all` number after running `sft`, and never report `eval_real`'s chord
+`sft` trains on the complement of exactly the songs `eval-labeled` scores (`annotations::is_val`).
+Never report an `eval-labeled --all` number after running `sft`, and never report `eval-real`'s chord
 agreement at all.
 
 ### Training-run reports
 
-Every full training run gets a report in `ml/reports/<YYYY-MM-DD>-<short-id>.md` from `ml/reports/TEMPLATE.md`. Format: goal, dataset table (sources/counts/split), config (model+optim+epochs+augment+DP), results table (pretrain recon, fine-tune synthetic val key/chord, is-music probe, `eval_real` recon-gap + chord-agreement), then Observations / Caveats / Next. Record honest caveats (heuristic reference, any leakage, label imbalance). Write the report when a run completes; don't overwrite prior runs.
+Every full training run gets a report in `ml/reports/<YYYY-MM-DD>-<short-id>.md` from `ml/reports/TEMPLATE.md`. Format: goal, dataset table (sources/counts/split), config (model+optim+epochs+augment+DP), results table (pretrain recon, fine-tune synthetic val key/chord, is-music probe, `eval-real` recon-gap + chord-agreement), then Observations / Caveats / Next. Record honest caveats (heuristic reference, any leakage, label imbalance). Write the report when a run completes; don't overwrite prior runs.

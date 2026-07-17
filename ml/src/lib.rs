@@ -11,13 +11,12 @@
 //! [`theory`] label space · [`progression`]+[`notes`] synth gen · [`features`] m00 grid ·
 //! [`tokenize`] m01/m02 tokens · [`data`] dataset · [`shared`] targets/loss/metrics ·
 //! [`transformer`] RoPE encoder · [`train`] the one supervised loop · [`pretrain`] masked+AR ·
-//! [`infer`] · [`parallel`] DP step · [`backend`]/[`backbone`]/[`cli`]/[`flops`]/[`progress`] ·
+//! [`infer`] · [`parallel`] DP step · [`backend`]/[`backbone`]/[`flops`]/[`progress`] ·
 //! [`probe`]/[`estimate`] refs · [`harvest`] (feature-gated, pulls the engine).
 
 pub mod annotations;
 pub mod backbone;
 pub mod backend;
-pub mod cli;
 pub mod dashboard;
 pub mod data;
 pub mod estimate;

@@ -21,6 +21,8 @@ cuda = ["burn/cuda"]
 [dependencies]
 bincode = "1"
 burn = { version = "0.21.0", features = ["ndarray", "autodiff", "train"] }
+# The one binary's arg parser: subcommands + `--help` for the whole pipeline.
+clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 burn-ndarray = { version = "0.21", features = ["multi-threads"] }
 rand = "0.8"
@@ -31,22 +33,6 @@ serde_json = "1.0.150"
 # game songs. Scalar gather (no `simd`) — the headless player never resamples audio.
 optime-core = { path = "../crates/optime-core", default-features = false, optional = true }
 
-[[bin]]
-name = "harvest"
-required-features = ["harvest"]
-
-[[bin]]
-name = "chord_export"
-required-features = ["harvest"]
-
-[[bin]]
-name = "eval_labeled"
-required-features = ["harvest"]
-
-[[bin]]
-name = "sft"
-required-features = ["harvest"]
-
-[[bin]]
-name = "hier_pretrain_gpu"
-required-features = ["gpu"]
+# One binary, `optime-ml` (src/main.rs), with clap subcommands for the whole pipeline.
+# Harvest- and GPU-only subcommands are `#[cfg]`'d in, so building without the feature
+# simply drops them (the old per-bin `required-features` behavior).

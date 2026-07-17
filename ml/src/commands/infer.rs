@@ -1,17 +1,12 @@
-//! Run a trained model on a song and print the predicted key + chord timeline
-//! alongside the ground truth.
-//!
-//! ```sh
-//! cargo run --release --bin infer -- [val_index] [--backbone frame|event|hier] [--out-dir models]
-//! ```
-//!
-//! With no positional arg, generates a fresh random song. With an index, uses that
-//! song from data/val.bin. Reads `<out-dir>/<backbone dir>/model`.
+//! Run a trained model on a song and print predicted key + chord timeline next to ground truth.
+//! With no index, generates a fresh random song; with an index, uses that song from `data/val.bin`.
+//! Reads `<out-dir>/<NN>/model`.
 
+use super::opts::{Backbone, ModelOpts};
 use burn::module::AutodiffModule;
-use optime_ml::backbone::{self, Backbone};
+use clap::Args;
+use optime_ml::backbone;
 use optime_ml::backend::{Back, Inner, MlDevice};
-use optime_ml::cli::{Args, Kind};
 use optime_ml::data::load_songs;
 use optime_ml::infer::{merge_segments, predict};
 use optime_ml::m00_frame::FrameModel;
@@ -22,24 +17,28 @@ use optime_ml::theory::{Chord, Key};
 use rand::{rngs::StdRng, SeedableRng};
 use std::path::Path;
 
-fn main() {
+#[derive(Args, Debug)]
+pub struct InferArgs {
+    /// Index into `data/val.bin`; omit for a fresh random song.
+    pub val_index: Option<usize>,
+    #[command(flatten)]
+    pub opts: ModelOpts,
+}
+
+pub fn run(args: InferArgs) {
     let device = MlDevice::default();
-    let args = Args::parse();
-    let prefix = args.out_dir.join(args.kind.dir()).join("model");
+    let backbone = args.opts.backbone;
+    let prefix = args.opts.out_dir.join(backbone.dir()).join("model");
     if !prefix.with_extension("json").exists() {
         eprintln!(
-            "{}.json not found — run `cargo run --release --bin train -- --backbone {}` first",
+            "{}.json not found — run `train --backbone {}` first",
             prefix.display(),
-            args.kind.name()
+            backbone.name()
         );
         std::process::exit(1);
     }
 
-    let song = if let Some(idx) = args
-        .positional
-        .first()
-        .and_then(|s| s.parse::<usize>().ok())
-    {
+    let song = if let Some(idx) = args.val_index {
         let songs = load_songs(Path::new("data").join("val.bin")).expect("load val");
         songs.get(idx).cloned().unwrap_or_else(|| {
             eprintln!("index {idx} out of range (0..{})", songs.len());
@@ -51,13 +50,13 @@ fn main() {
         render_song(&mut rng, &key, 128)
     };
 
-    let pred = match args.kind {
-        Kind::Frame => run::<FrameModel<Back>>(&prefix, &song, &device),
-        Kind::Event => run::<EventModel<Back>>(&prefix, &song, &device),
-        Kind::Hier => run::<HierModel<Back>>(&prefix, &song, &device),
+    let pred = match backbone {
+        Backbone::Frame => predict_song::<FrameModel<Back>>(&prefix, &song, &device),
+        Backbone::Event => predict_song::<EventModel<Back>>(&prefix, &song, &device),
+        Backbone::Hier => predict_song::<HierModel<Back>>(&prefix, &song, &device),
     };
 
-    println!("=== PREDICTION ({}) ===", args.kind.name());
+    println!("=== PREDICTION ({}) ===", backbone.name());
     print!("{}", pred.describe());
 
     println!("\n=== GROUND TRUTH ===");
@@ -95,10 +94,13 @@ fn main() {
     );
 }
 
-fn run<M>(prefix: &Path, song: &Song, device: &MlDevice) -> optime_ml::infer::Prediction
+fn predict_song<M>(prefix: &Path, song: &Song, device: &MlDevice) -> optime_ml::infer::Prediction
 where
-    M: Backbone<Back> + AutodiffModule<Back>,
-    M::InnerModule: Backbone<Inner, Batch = <M as Backbone<Back>>::Batch>,
+    M: optime_ml::backbone::Backbone<Back> + AutodiffModule<Back>,
+    M::InnerModule: optime_ml::backbone::Backbone<
+        Inner,
+        Batch = <M as optime_ml::backbone::Backbone<Back>>::Batch,
+    >,
 {
     let model = backbone::load::<M, Back>(prefix, device);
     predict::<M>(&model, &song.notes, song.n_frames, device)

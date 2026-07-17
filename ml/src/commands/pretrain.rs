@@ -1,28 +1,33 @@
-//! Self-supervised pretraining on harvested real game songs, for any backbone.
-//!
-//! ```sh
-//! cargo run --release --bin pretrain -- [epochs] [batch_size] [lr] \
-//!     [--backbone frame|event|hier] [--out-dir models]
-//! #   reads data/real_train.bin + data/real_val.bin (produced by `harvest`)
-//! #   → <out-dir>/<00-frame|01-event|02-hier>/pretrained (+ .json)
-//! ```
-//!
-//! Pretext follows the backbone: `frame` runs masked-frame reconstruction, `event`/`hier` run
-//! autoregressive next-frame prediction.
+//! Self-supervised pretraining on harvested real game songs → `<out-dir>/<NN>/pretrained`. Pretext
+//! follows the backbone: `frame` = masked-frame MSE, `event`/`hier` = autoregressive next-frame
+//! BCE. Reads `data/real_{train,val}.bin` (produced by `harvest`).
 
+use super::opts::{Backbone, ModelOpts};
+use clap::Args;
 use optime_ml::backend::Back;
-use optime_ml::cli::{Args, Kind};
 use optime_ml::data::load_songs;
 use optime_ml::m01_event::{EventModel, EventModelConfig};
 use optime_ml::m02_hier::{HierModel, HierModelConfig};
 use optime_ml::pretrain::ar::{self, ArPretrainConfig};
 use optime_ml::pretrain::masked::{self, PretrainConfig};
 
-fn main() {
-    let args = Args::parse();
-    let epochs: usize = args.positional_or(0, 20);
-    let batch_size: usize = args.positional_or(1, 32);
-    let lr: f64 = args.positional_or(2, 3.0e-4);
+#[derive(Args, Debug)]
+pub struct PretrainArgs {
+    /// Epochs (default 20).
+    pub epochs: Option<usize>,
+    /// Batch size (default 32).
+    pub batch_size: Option<usize>,
+    /// Learning rate (default 3e-4).
+    pub lr: Option<f64>,
+    #[command(flatten)]
+    pub opts: ModelOpts,
+}
+
+pub fn run(args: PretrainArgs) {
+    let epochs = args.epochs.unwrap_or(20);
+    let batch_size = args.batch_size.unwrap_or(32);
+    let lr = args.lr.unwrap_or(3.0e-4);
+    let out_dir = &args.opts.out_dir;
 
     // Songs are transposed on the fly during training (see the configs' `augment`).
     let train =
@@ -34,35 +39,23 @@ fn main() {
         val.len()
     );
 
-    match args.kind {
+    match args.opts.backbone {
         // Generation 00: masked-frame reconstruction over the feature grid.
-        Kind::Frame => {
+        Backbone::Frame => {
             let config = PretrainConfig::default()
                 .with_epochs(epochs)
                 .with_batch_size(batch_size)
                 .with_lr(lr);
-            masked::run(&config, &train, &val, &args.out_dir);
+            masked::run(&config, &train, &val, out_dir);
         }
         // Learned-token generations: autoregressive next-frame prediction.
-        Kind::Event => {
+        Backbone::Event => {
             let config = ar_config(epochs, batch_size, lr);
-            ar::run::<EventModel<Back>>(
-                &config,
-                &EventModelConfig::new(),
-                &train,
-                &val,
-                &args.out_dir,
-            );
+            ar::run::<EventModel<Back>>(&config, &EventModelConfig::new(), &train, &val, out_dir);
         }
-        Kind::Hier => {
+        Backbone::Hier => {
             let config = ar_config(epochs, batch_size, lr);
-            ar::run::<HierModel<Back>>(
-                &config,
-                &HierModelConfig::new(),
-                &train,
-                &val,
-                &args.out_dir,
-            );
+            ar::run::<HierModel<Back>>(&config, &HierModelConfig::new(), &train, &val, out_dir);
         }
     }
 }
