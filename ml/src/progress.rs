@@ -1,23 +1,13 @@
-//! Time-throttled in-epoch progress logging.
-//!
-//! Each training epoch's inner batch loop otherwise runs silent until the epoch
-//! summary. [`TrainProgress`] prints the running-average loss, batch progress, and
-//! throughput at most once per `interval` (default ~1s), plus once when the epoch
-//! finishes — so long epochs show live progress. The epoch summary is unaffected.
-//!
-//! The same samples feed [`crate::dashboard`], so the live web view and the console
-//! never disagree: one throttle, one set of numbers, two sinks.
+//! Time-throttled in-epoch progress logging. [`TrainProgress`] prints running-average loss +
+//! throughput at most once per `interval` (default ~1s) plus once when the epoch finishes, and
+//! feeds the same samples to [`crate::dashboard`] so console and web view never disagree.
 
 use crate::dashboard;
 use std::time::{Duration, Instant};
 
-/// Default cadence for [`TrainProgress::per_epoch`]: one line per second.
 const DEFAULT_INTERVAL_SECS: f64 = 1.0;
 
-/// Time-throttled in-epoch progress logger. One per epoch; call [`maybe_log`]
-/// after every batch.
-///
-/// [`maybe_log`]: TrainProgress::maybe_log
+/// One per epoch; call [`TrainProgress::maybe_log`] after every batch.
 pub struct TrainProgress {
     epoch: usize,
     start: Instant,
@@ -26,8 +16,7 @@ pub struct TrainProgress {
 }
 
 impl TrainProgress {
-    /// New logger for `epoch`, emitting at most every `interval_secs` (clamped to
-    /// ≥50 ms).
+    /// Emits at most every `interval_secs` (clamped to ≥50 ms).
     pub fn new(epoch: usize, interval_secs: f64) -> Self {
         let now = Instant::now();
         Self {
@@ -38,16 +27,12 @@ impl TrainProgress {
         }
     }
 
-    /// Logger for `epoch` at the default ~1s cadence.
     pub fn per_epoch(epoch: usize) -> Self {
         Self::new(epoch, DEFAULT_INTERVAL_SECS)
     }
 
-    /// Print the current running-average loss + progress if the interval has
-    /// elapsed, or if the epoch just finished (`n_batches >= n_total`), and publish
-    /// the same sample to [`crate::dashboard`]. `running` is the sum of per-batch
-    /// losses so far this epoch; `n_batches`/`n_total` are batches done / batches in
-    /// the epoch.
+    /// Log if the interval elapsed or the epoch just finished (`n_batches >= n_total`), and publish
+    /// the sample to the dashboard. `running` is the sum of per-batch losses so far this epoch.
     pub fn maybe_log(&mut self, running: f64, n_batches: usize, n_total: usize) {
         let now = Instant::now();
         let done = n_total > 0 && n_batches >= n_total;
@@ -85,8 +70,8 @@ mod tests {
 
     #[test]
     fn always_logs_when_epoch_done() {
-        let mut p = TrainProgress::new(1, 60.0); // interval long enough that time won't trigger
-                                                 // Even with a long interval, finishing the epoch must log.
+        // Long interval, so only epoch-completion can trigger the log.
+        let mut p = TrainProgress::new(1, 60.0);
         p.maybe_log(3.0, 3, 3);
     }
 

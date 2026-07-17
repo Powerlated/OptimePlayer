@@ -1,16 +1,7 @@
-//! Note-event tokenization shared by the learned-token backbones
-//! ([`crate::m01_event`], [`crate::m02_hier`]).
-//!
-//! Turns a [`Song`]'s note events into per-note bucketed field indices (pitch,
-//! pitch-class, channel, velocity, pan, duration, role) on the 128-frame window
-//! grid. How those per-note fields get pooled into a frame token is what
-//! distinguishes the generations, so pooling lives in each generation's `batch.rs` —
-//! only the per-note representation and the AR targets are shared here.
-//!
-//! This is the learned counterpart to the hand-engineered per-frame feature grid
-//! ([`crate::features`]) — same 128-frame timeline, embeddings instead of fixed
-//! scalars, plus the per-note **channel** (the only instrument cue that survives
-//! harvesting).
+//! Note-event tokenization shared by the learned-token backbones ([`crate::m01_event`],
+//! [`crate::m02_hier`]): a [`Song`]'s notes → per-note bucketed field indices (pitch, pitch-class,
+//! channel, velocity, pan, duration, role). Pooling into frame tokens is what distinguishes the
+//! generations and lives in each `batch.rs`; only the per-note representation + AR targets are here.
 
 use crate::notes::{Instrument, Song};
 
@@ -117,9 +108,8 @@ pub fn examples(songs: &[Song]) -> Vec<EventExample> {
     songs.iter().map(EventExample::from_song).collect()
 }
 
-/// AR next-frame targets (`pc[batch*nf*N_PC]`, `ch[batch*nf*N_CHANNELS]`): each
-/// example's per-frame sounding content, concatenated. Pooling-agnostic — both
-/// learned-token generations predict the same thing, so both share this.
+/// AR next-frame targets (`pc[batch*nf*N_PC]`, `ch[batch*nf*N_CHANNELS]`): per-frame sounding
+/// content concatenated. Pooling-agnostic, so both learned-token generations share it.
 pub fn ar_targets(examples: &[EventExample]) -> (Vec<f32>, Vec<f32>) {
     let mut pc = Vec::new();
     let mut ch = Vec::new();

@@ -8,6 +8,10 @@
       "songId": 359,
       "beatsPerBar": 4,
       "gridOffsetSteps": 13,
+      "key": {
+        "tonic": 2,
+        "mode": "major"
+      },
       "spans": [
         {
           "startStep": 13,
@@ -159,6 +163,10 @@
       "songId": 360,
       "beatsPerBar": 4,
       "gridOffsetSteps": 13,
+      "key": {
+        "tonic": 6,
+        "mode": "major"
+      },
       "spans": [
         {
           "startStep": 13,
@@ -355,6 +363,10 @@
       "songId": 362,
       "beatsPerBar": 4,
       "gridOffsetSteps": 1,
+      "key": {
+        "tonic": 3,
+        "mode": "major"
+      },
       "spans": [
         {
           "startStep": 97,

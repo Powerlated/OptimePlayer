@@ -1,9 +1,6 @@
-//! Note events and arrangement. Turns a chord progression into a stream of
-//! `NoteEvent`s with full synthesizer-style metadata (pitch, velocity,
-//! instrument role, pan), plus the per-frame chord/key ground truth.
-//!
-//! This mirrors what OptimePlayer's `SynthEvent` stream carries at runtime, so a
-//! model trained here consumes the same shape of data live.
+//! Note events and arrangement: a chord progression → `NoteEvent`s with synthesizer metadata
+//! (pitch, velocity, instrument role, pan) + per-frame chord/key ground truth. Mirrors the shape
+//! of OptimePlayer's `SynthEvent` stream, so a model trained here consumes the same data live.
 
 use crate::progression;
 use crate::theory::{Chord, Key, NO_CHORD};
@@ -166,13 +163,12 @@ fn pc_near(pc: u8, anchor: i32) -> u8 {
 /// Voice a chord as MIDI notes in root position starting near `base`.
 fn voice_chord(chord: &Chord, base: i32, inversion: usize) -> Vec<u8> {
     let ivs = chord.quality.intervals();
-    // Voice from the root placed near `base`, then stack the quality's intervals.
     let root_note = pc_near(chord.root, base);
     let mut notes: Vec<u8> = ivs
         .iter()
         .map(|iv| (root_note as i32 + iv).clamp(0, 127) as u8)
         .collect();
-    // Apply inversion by lifting the lowest `inversion` tones an octave.
+    // Inversion: lift the lowest `inversion` tones an octave.
     for note in notes.iter_mut().take(inversion % ivs.len()) {
         *note = (*note as i32 + 12).clamp(0, 127) as u8;
     }
@@ -207,7 +203,6 @@ pub fn render_song<R: Rng>(rng: &mut R, key: &Key, n_frames: usize) -> Song {
             break;
         }
 
-        // Label every frame in this span with the current chord.
         for f in span_start..span_end {
             chord_labels[f as usize] = chord.label();
         }

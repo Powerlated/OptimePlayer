@@ -1,12 +1,7 @@
-//! Note events -> per-frame feature grid.
-//!
-//! This is the single bridge between raw synthesizer notes and the model. The
-//! same function runs on generated [`Song`]s during training and on a live slice
-//! of OptimePlayer `NoteEvent`s during inference, so the model always sees an
-//! identical representation.
-//!
-//! Every feature is derived purely from note pitch + metadata (velocity,
-//! instrument role, pan, onset) — no audio rendering, no harmonic guessing.
+//! Note events → per-frame feature grid (generation 00's input). One extractor for both training
+//! [`Song`]s and live inference, so the model always sees an identical representation. Every
+//! feature is derived from note pitch + metadata (velocity, role, pan, onset) — no audio, no
+//! harmonic guessing.
 
 use crate::notes::{Instrument, NoteEvent, Song};
 

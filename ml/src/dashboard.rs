@@ -1,26 +1,10 @@
-//! In-process web dashboard for a training run.
+//! In-process web dashboard: every training driver publishes the metrics it already prints to a
+//! process-wide [`Hub`], served over HTTP from a background thread. Zero new crates — GET-only
+//! [`std::net::TcpListener`], `serde_json`, a Vue SPA (`ml/dashboard/`) baked in via [`include_str!`].
 //!
-//! Every training driver ([`crate::train`], [`crate::pretrain`]) publishes the same
-//! metrics it already prints — per-batch running loss, per-epoch train/val loss — to
-//! a process-wide [`Hub`], and serves them over HTTP from a background thread. Point
-//! a browser at the printed URL to watch a run live.
-//!
-//! Zero new crates: a GET-only server on [`std::net::TcpListener`], JSON via the
-//! `serde_json` already in the tree, and a Vue single-page app (`ml/dashboard/`)
-//! baked into the binary with [`include_str!`] — so a run serves its dashboard with
-//! no build step, no working-directory assumptions, and no network fetch.
-//!
-//! Environment:
-//! * `ML_DASHBOARD=0` — don't serve (the run is otherwise unchanged).
-//! * `ML_DASHBOARD_ADDR` — bind address, default `0.0.0.0:7878` (all interfaces, so
-//!   a run on a headless/remote box is reachable over a LAN or Tailscale address).
-//! * `ML_DASHBOARD_HOLD=1` — keep serving after the run finishes instead of exiting,
-//!   so the final curves survive the last epoch. Off by default: bins must still
-//!   exit on their own for scripted runs.
-//!
-//! Recording is unconditional and bounded ([`MAX_BATCH_POINTS`]); only the listener
-//! is optional. Failure to bind is a warning, never fatal — a dashboard must not be
-//! able to kill a training run.
+//! Env: `ML_DASHBOARD=0` off · `ML_DASHBOARD_ADDR` bind (default `0.0.0.0:7878`) ·
+//! `ML_DASHBOARD_HOLD=1` keep serving after the run. Recording is unconditional and bounded
+//! ([`MAX_BATCH_POINTS`]); bind failure is a warning, never fatal.
 
 use crate::notes::{Song, FRAMES_PER_BEAT};
 use serde::Serialize;

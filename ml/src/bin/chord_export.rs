@@ -9,17 +9,17 @@
 //!
 //! Usage:
 //!   cargo run --release --features harvest --bin chord_export -- \
-//!       <archive> <out.ocd> [--names <song_names.json>] [--model frame|event]
+//!       <archive> <out.ocd> [--names <song_names.json>] [--backbone frame|event|hier] \
+//!       [--out-dir models] [--model model_sft]
 //!
 //! - `<archive>` a `.gba`/`.gbaaudio`/`.nds`/`.sdat` (gzip is transparently handled).
 //! - `<out.ocd>` output path.
 //! - `--names` optional `song_names` JSON; restricts output to its curated ids
 //!   (skips SFX/jingles). Omit to export every playable song.
-//! - `--model` backbone: `frame` (default, reads `models/model`) or `event` (reads
-//!   `models/event_model`). Both backbones share this pipeline and the `.ocd`
+//! - `--backbone` picks the generation. All three share this pipeline and the `.ocd`
 //!   format, so the rest of the tool is model-agnostic.
-//!
-//! Reads the trained model from `models/` (like `bin/infer`).
+//! - `--model` picks the artifact stem under `<out-dir>/<NN-backbone>/`; the default
+//!   `model` is the synthetic fine-tune, so hearing an SFT run means `model_sft`.
 //!
 //! ## `.ocd` binary format (little-endian)
 //!
@@ -87,7 +87,8 @@ fn main() {
     let args = Args::parse();
     if args.positional.len() < 2 {
         eprintln!(
-            "usage: chord_export <archive> <out.ocd> [--names <song_names.json>]              [--backbone frame|event|hier] [--out-dir models]"
+            "usage: chord_export <archive> <out.ocd> [--names <song_names.json>] \
+             [--backbone frame|event|hier] [--out-dir models] [--model model_sft]"
         );
         std::process::exit(1);
     }
@@ -101,7 +102,7 @@ fn main() {
     // Load the requested backbone and wrap its predict fn in a single closure so the
     // rest of the pipeline (harvest → windowed inference → `.ocd` encode) is shared
     // and the fragile binary format lives in exactly one place.
-    let prefix = args.out_dir.join(args.kind.dir()).join("model");
+    let prefix = args.model_prefix();
     if !prefix.with_extension("json").exists() {
         eprintln!(
             "{}.json not found — run `cargo run --release --bin train -- --backbone {}` first",

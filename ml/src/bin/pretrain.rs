@@ -7,11 +7,8 @@
 //! #   → <out-dir>/<00-frame|01-event|02-hier>/pretrained (+ .json)
 //! ```
 //!
-//! The pretext follows the backbone, because they are genuinely different objectives:
-//! `frame` runs **masked-frame reconstruction** (it has a feature grid to mask),
-//! while `event`/`hier` run **autoregressive next-frame prediction**.
-//!
-//! Replaces the old `pretrain` / `event_pretrain` / `hier_pretrain` trio.
+//! Pretext follows the backbone: `frame` runs masked-frame reconstruction, `event`/`hier` run
+//! autoregressive next-frame prediction.
 
 use optime_ml::backend::Back;
 use optime_ml::cli::{Args, Kind};

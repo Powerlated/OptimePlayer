@@ -1,9 +1,6 @@
-//! **Generation 00** â€” the hand-engineered frame-feature backbone.
-//!
-//! Input is [`crate::features`]'s 57-dim per-frame vector (chroma / bass / melody /
-//! onset pitch-class blocks + scalars), projected and run through a bidirectional
-//! transformer. The oldest of the three generations and the only one with a
-//! masked-frame pretext ([`crate::pretrain::masked`]) and an is-music probe head.
+//! **Generation 00** — the hand-engineered frame-feature backbone: [`crate::features`]'s 57-dim
+//! per-frame vector through a bidirectional transformer. The oldest generation, and the only one
+//! with a masked-frame pretext ([`crate::pretrain::masked`]) and an is-music probe head.
 
 mod batch;
 mod model;

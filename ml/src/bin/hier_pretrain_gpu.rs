@@ -7,19 +7,9 @@
 //! #   → models/02-hier/pretrained (+ .json)
 //! ```
 //!
-//! Same pretext, model, augmentation, and output as `pretrain --backbone hier` —
-//! this bin only swaps the backend and the driver. It calls
-//! [`ar::run_single_device`] because the rayon data-parallel step is a CPU-only trick
-//! to fill cores (the ndarray backend tops out at ~2); a GPU runs one batch at a time
-//! and has nothing to shard. Gradient checkpointing keeps the set transformer's large
-//! `[batch×128, MAX_POLY, d]` activation grid off a memory-constrained iGPU.
-//!
-//! Output is backend-agnostic ([`CompactRecorder`]): weights saved here load straight
-//! into the ndarray fine-tune (`train --backbone hier --pretrained …`).
-//!
-//! Note (per `parallel.rs`): GPU was measured *not* to help the smaller frame/event
-//! backbones on this class of hardware — but the hierarchical set transformer is far
-//! heavier, so it's worth re-measuring here.
+//! Same pretext/model/output as `pretrain --backbone hier`, only swapping backend + driver: calls
+//! [`ar::run_single_device`] since a GPU has nothing to shard (DP is a CPU-only trick). Output is
+//! backend-agnostic ([`CompactRecorder`]), so it loads straight into the ndarray fine-tune.
 //!
 //! [`CompactRecorder`]: burn::record::CompactRecorder
 

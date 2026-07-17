@@ -1,13 +1,8 @@
-//! **Generation 02** — a small **set transformer** embeds each frame's
-//! variable-length set of **sounding** notes into that frame's token (learned
-//! attention pooling via a CLS token), then the **main transformer** trunk runs
-//! over the 128 frame tokens — causal for AR pretraining, bidirectional for the
-//! supervised fine-tune. The "another transformer glued onto the main transformer"
-//! variant of [`crate::m01_event`] (which pools by a param-free scatter-add sum).
-//!
-//! Per-frame set length is capped at [`MAX_POLY`] (see [`super::batch`]). Emits the
-//! shared [`ModelOutput`] / [`ArOutput`] so it reuses `shared.rs` + the generic
-//! `dp_step` exactly like the sum-pool generation.
+//! **Generation 02** — a **set transformer** embeds each frame's variable-length set of *sounding*
+//! notes into that frame's token (learned CLS-attention pooling, set capped at [`MAX_POLY`]), then
+//! the main RoPE trunk runs over the frame tokens — causal for AR pretraining, bidirectional for
+//! the fine-tune. The set-transformer variant of [`crate::m01_event`]'s scatter-add sum pool. Emits
+//! the shared [`ModelOutput`]/[`ArOutput`], reusing `shared.rs` + the generic `dp_step`.
 
 use burn::nn::transformer::{
     TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
@@ -30,10 +25,9 @@ pub struct HierModelConfig {
     pub d_model: usize,
     #[config(default = 512)]
     pub d_ff: usize,
-    /// Sub-transformer (within-frame set attention) FFN width. Smaller than the
-    /// main `d_ff`: the dominant retained activation is the sub-encoder FFN over
-    /// `[batch*n_frames, MAX_POLY, sub_d_ff]`, so shrinking it directly cuts peak
-    /// memory. The within-frame pool (≤ `MAX_POLY` notes) needs little FFN capacity.
+    /// Set-attention FFN width. Smaller than main `d_ff`: the sub-encoder FFN over
+    /// `[batch*n_frames, MAX_POLY, sub_d_ff]` is the dominant retained activation, so shrinking it
+    /// cuts peak memory, and a ≤`MAX_POLY`-note pool needs little capacity.
     #[config(default = 256)]
     pub sub_d_ff: usize,
     #[config(default = 4)]
@@ -41,9 +35,8 @@ pub struct HierModelConfig {
     /// Main (frame-level) transformer depth.
     #[config(default = 4)]
     pub n_layers: usize,
-    /// Set (within-frame) transformer depth. One layer suffices for the within-frame
-    /// pool (a light CLS-attention over ≤ [`MAX_POLY`] notes); more depth costs a full
-    /// extra pass over the `[batch*n_frames, MAX_POLY+1, d]` grid for little gain.
+    /// Set-transformer depth. One layer suffices for a light CLS-attention over ≤[`MAX_POLY`]
+    /// notes; more costs a full extra pass over the grid for little gain.
     #[config(default = 1)]
     pub n_sub_layers: usize,
     #[config(default = 0.1)]
@@ -58,9 +51,8 @@ impl HierModelConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> HierEventModel<B> {
         let d = self.d_model;
         let emb = |n: usize| EmbeddingConfig::new(n, d).init(device);
-        // The set encoder stays a plain (position-free) transformer: a frame's notes
-        // are an unordered set, so slot index means nothing and RoPE would invent an
-        // order that isn't there. Only the frame trunk is a sequence.
+        // Position-free: a frame's notes are an unordered set, so slot index is meaningless and
+        // RoPE would invent an order. Only the frame trunk is a sequence.
         let set_enc = |layers: usize, d_ff: usize| {
             TransformerEncoderConfig::new(d, d_ff, self.n_heads, layers)
                 .with_norm_first(true)
@@ -121,20 +113,16 @@ pub struct HierEventModel<B: Backend> {
 }
 
 impl<B: Backend> HierEventModel<B> {
-    /// Set-transformer pool: embed the **flat** note list (`n_snd` entries — only
-    /// real sounding notes, no padding), scatter-add each into its `(frame, pos)`
-    /// slot to build the set grid once, prepend a CLS token per frame, run the
-    /// sub-encoder (padding-masked), and take CLS as the frame token.
-    /// Returns `[batch, n_frames, d]`.
+    /// Set-transformer pool → `[batch, n_frames, d]`: embed the flat note list, scatter-add each
+    /// into its `(frame, pos)` slot to build the set grid once, prepend a CLS token per frame, run
+    /// the padding-masked sub-encoder, take CLS as the frame token.
     fn frame_tokens(&self, data: &HierBatchData, device: &B::Device) -> Tensor<B, 3> {
         let d = self.d_model;
         let (b, nf) = (data.batch, data.n_frames);
         let bnf = b * nf;
 
-        // Build the per-frame note-slot grid by scatter. The field-embedding sum runs
-        // over the SHORT note list [n_snd, d] (not the padded grid), so the per-field
-        // gathers and `+`-chain temporaries are ~MAX_POLY× smaller than the dense
-        // version's [bnf, MAX_POLY, d] intermediates.
+        // Field-embedding sum runs over the SHORT note list `[n_snd, d]`, not the padded grid, so
+        // the per-field gathers and `+`-chain temporaries are ~MAX_POLY× smaller.
         let grid = if data.n_snd == 0 {
             Tensor::<B, 2>::zeros([bnf * MAX_POLY, d], device).reshape([bnf, MAX_POLY, d])
         } else {
@@ -185,9 +173,8 @@ impl<B: Backend> HierEventModel<B> {
         encoded.slice([0..bnf, 0..1, 0..d]).reshape([b, nf, d])
     }
 
-    /// Main trunk over the frame tokens — causal for AR pretraining, bidirectional
-    /// for the supervised heads. Position comes from RoPE inside attention, so
-    /// there is no additive position embedding here.
+    /// Main trunk — causal for AR pretraining, bidirectional for the supervised heads. Position is
+    /// RoPE inside attention, so no additive position embedding.
     fn trunk(&self, frame_tokens: Tensor<B, 3>, causal: bool) -> Tensor<B, 3> {
         self.encoder.forward(frame_tokens, causal)
     }

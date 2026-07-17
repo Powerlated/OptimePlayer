@@ -1,9 +1,6 @@
-//! Music-theory core: pitch classes, chord qualities, keys, diatonic harmony,
-//! and a label vocabulary shared by the data generator and the model heads.
-//!
-//! Everything here is deterministic and dependency-free so the label space is
-//! identical between offline data generation and live inference on OptimePlayer's
-//! `SynthEvent` stream.
+//! Music-theory core: pitch classes, chord qualities, keys, diatonic harmony, and the label
+//! vocabulary shared by the data generator and the model heads. Deterministic and dependency-free,
+//! so the label space is identical between offline generation and live inference.
 
 use serde::{Deserialize, Serialize};
 

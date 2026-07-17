@@ -1,10 +1,7 @@
-//! The supervised fine-tune: per-frame factored chord cross-entropy + pooled key
-//! cross-entropy + beat-aware smoothness, optimised with Adam.
-//!
-//! **One loop for every generation.** It is generic over [`Backbone`], so adding a
-//! backbone means implementing that trait — not copying this file. A manual loop
-//! (rather than Burn's `Learner`) keeps the multi-headed objective and its metrics
-//! explicit.
+//! The supervised fine-tune: factored chord CE + pooled key CE + beat-aware smoothness, Adam.
+//! **One loop for every generation** (generic over [`Backbone`] — adding a backbone means
+//! implementing the trait, not copying this). Manual loop, not Burn's `Learner`, to keep the
+//! multi-headed objective explicit.
 
 use burn::config::Config;
 use burn::module::AutodiffModule;

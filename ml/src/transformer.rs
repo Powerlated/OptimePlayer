@@ -1,28 +1,11 @@
-//! Pre-norm transformer encoder with **rotary position embeddings** (RoPE).
+//! Pre-norm transformer encoder with **rotary position embeddings** (RoPE), written out because
+//! burn's `MultiHeadAttention`/`TransformerEncoder` expose no hook to apply [`RotaryEncoding`].
 //!
-//! ## Why this exists instead of `burn::nn::transformer::TransformerEncoder`
-//!
-//! burn ships [`RotaryEncoding`], but neither its `MultiHeadAttention` nor its
-//! `TransformerEncoder` exposes a hook to apply it. RoPE has to rotate **Q and K
-//! inside attention**, after the head split — that is what makes a dot product
-//! `qᵢ·kⱼ` depend only on the *relative* offset `i-j`.
-//!
-//! Rotating the layer input instead would not be RoPE: Q and K are arbitrary linear
-//! projections of `x`, and a rotation does not commute with them, so `rot(x)Wq ·
-//! rot(x)Wk` carries no relative-position guarantee. That shortcut is a different
-//! (and much weaker) operation wearing RoPE's name. So the attention block is
-//! written out here.
-//!
-//! ## What it replaces
-//!
-//! The learned position embedding every generation used to add to its frame tokens
-//! (`m00`'s `pos_emb`, `m01`/`m02`'s `frame_pos`). RoPE injects position inside
-//! attention instead, so there is no additive position term and no position table:
-//! the trunk generalises past the window it trained on, and relative offsets are
-//! encoded directly rather than learned per absolute slot.
-//!
-//! Only **sequence** trunks use this. `m02`'s within-frame set encoder must NOT:
-//! a frame's notes are an unordered set, and slot index carries no order.
+//! RoPE must rotate **Q and K after the head split** — that's what makes `qᵢ·kⱼ` depend only on the
+//! relative offset `i-j`. Rotating the layer input instead is *not* RoPE: rotation doesn't commute
+//! with the Q/K projections, so the relative-position property is lost. Replaces the learned
+//! position table each generation used to add (no position term, generalises past the trained
+//! window). Only **sequence** trunks use it; m02's within-frame set encoder must not (unordered).
 
 use burn::config::Config;
 use burn::module::Module;
@@ -179,8 +162,7 @@ impl<B: Backend> RopeEncoderLayer<B> {
     ) -> Tensor<B, 3> {
         let [b, n, d] = x.dims();
         let head_dim = d / n_heads;
-        // [b, n, d] -> [b, heads, n, head_dim]: rope::apply reads the last two dims
-        // as (seq, hidden), so the rotation lands per head exactly as intended.
+        // → [b, heads, n, head_dim] so the rotation lands per head (rope reads the last two dims).
         let split = |t: Tensor<B, 3>| t.reshape([b, n, n_heads, head_dim]).swap_dims(1, 2);
 
         let q = rope.forward(split(self.query.forward(x.clone())));
@@ -218,14 +200,9 @@ mod tests {
         assert_eq!(enc.forward(x, false).dims(), [2, 16, 32]);
     }
 
-    /// **The** property that makes this RoPE rather than a position table: after
-    /// rotation, `q_i · k_j` depends only on the relative offset `i - j`. Pinned at
-    /// the rotation itself (an encoder's outputs can't show it directly — token `i`
-    /// of a shifted sequence sees a different *set* of predecessors, so its output
-    /// legitimately differs).
-    ///
-    /// Uses `head_dim`, not `d_model`, which is the thing easy to get wrong: the
-    /// rotation must be per head.
+    /// **The** RoPE property: after rotation `q_i · k_j` depends only on the relative offset `i-j`.
+    /// Pinned at the rotation itself (an encoder's outputs can't show it — token `i` of a shifted
+    /// sequence sees different predecessors). Uses `head_dim`, not `d_model`: rotation is per head.
     #[test]
     fn rope_dot_product_depends_only_on_relative_offset() {
         let device = MlDevice::default();

@@ -1,12 +1,6 @@
-//! Training-free chord reference: chroma-template matching + Viterbi smoothing.
-//!
-//! This is the classic MIREX-style chord estimator — no neural net, no labels. It
-//! scores each frame's (already L2-normalized) chroma against the pitch-class
-//! template of every chord and Viterbi-smooths across time with a switch penalty.
-//! Used as a *pseudo-reference* to score trained models against on unlabeled real
-//! game songs (see the `eval_real` binary): it is not ground truth, but it gives a
-//! single comparable "agreement %" number for the synthetic-only baseline vs. the
-//! SSL-pretrained model.
+//! Training-free chord reference: chroma-template matching + Viterbi smoothing (classic
+//! MIREX-style, no net, no labels). A *pseudo-reference* for the `eval_real` binary — **not ground
+//! truth**, and per the ml eval rule its agreement % must never be reported as accuracy.
 
 use crate::features::{self, FeatureGrid};
 use crate::notes::NoteEvent;

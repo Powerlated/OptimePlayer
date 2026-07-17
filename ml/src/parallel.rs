@@ -1,16 +1,7 @@
-//! CPU data parallelism for training.
-//!
-//! burn's `ndarray` CPU backend can't spread a small transformer's autodiff across
-//! many cores — intra-op parallelism has nothing to fill (most of the wall time is
-//! tiny matmuls plus serial elementwise / softmax / layernorm / autodiff-graph
-//! work), so a single training stream tops out at ~2 cores no matter the batch
-//! size (threaded-CPU and GPU backends were measured too and don't help this model
-//! size). We parallelize *across the batch* instead: each
-//! optimizer step splits the minibatch into shards, differentiates the **shared**
-//! weights on every shard concurrently (rayon), sums the per-shard gradients, and
-//! takes one step. Summed gradients over disjoint shards equal the full-batch
-//! gradient, so this is exact synchronous data-parallel SGD — and it scales to all
-//! cores regardless of how small the model is.
+//! CPU data parallelism for training. The ndarray backend can't fill many cores on a model this
+//! small (intra-op parallelism tops out ~2 cores), so each optimizer step shards the minibatch,
+//! differentiates the shared weights per shard concurrently (rayon), sums the gradients, and takes
+//! one step. Summed grads over disjoint shards = the full-batch gradient: exact synchronous DP-SGD.
 
 use burn::module::{AutodiffModule, Module, ModuleVisitor, Param};
 use burn::optim::{GradientsParams, Optimizer};
@@ -19,12 +10,9 @@ use rayon::prelude::*;
 
 use crate::backend::{Back, Inner, MlDevice};
 
-/// Default shard count for a data-parallel step: the machine's logical-core count.
-///
-/// **1 under `--features cuda`/`gpu`.** Sharding exists only to fill CPU cores the ndarray
-/// backend can't; a GPU already parallelizes *within* the batch, so splitting it into
-/// rayon-driven shards just serializes launches on the same device and adds a
-/// gradient-sum pass. One shard makes [`dp_step`] a plain single-device step.
+/// Default shard count = logical-core count, but **1 under `--features cuda`/`gpu`**: a GPU already
+/// parallelizes within the batch, so sharding would just serialize launches. One shard makes
+/// [`dp_step`] a plain single-device step.
 pub fn default_shards() -> usize {
     if cfg!(feature = "cuda") || cfg!(feature = "gpu") {
         return 1;
@@ -34,9 +22,8 @@ pub fn default_shards() -> usize {
         .unwrap_or(8)
 }
 
-/// Adds one gradient set into an accumulator in place. burn stores gradients
-/// rank-erased, but calls [`ModuleVisitor::visit_float`] with each parameter's
-/// concrete rank `D`, which lets us fetch and sum the matching tensors generically.
+/// Sums one gradient set into an accumulator. burn stores gradients rank-erased but visits each
+/// param at its concrete rank `D`, which lets us fetch and sum matching tensors generically.
 struct GradAdder {
     acc: GradientsParams,
     other: GradientsParams,
@@ -55,7 +42,6 @@ impl ModuleVisitor<Back> for GradAdder {
 }
 
 /// Add `other`'s gradients into `acc`, walking `model`'s params to recover ranks.
-/// Generic over the module type so both the frame and event models reuse it.
 fn add_grads<M: Module<Back>>(
     model: &M,
     acc: GradientsParams,
@@ -66,16 +52,9 @@ fn add_grads<M: Module<Back>>(
     adder.acc
 }
 
-/// One data-parallel optimizer step.
-///
-/// `indices` is the minibatch, split into up to `n_shards` roughly-equal shards.
-/// Each shard's gradient is computed on a clone of `model` (clones share the same
-/// weight tensors, so all shards differentiate the *same* parameters) via
-/// `shard_grads`, in parallel across rayon threads. The closure returns each
-/// shard's `GradientsParams` and its scalar loss contribution; it must scale so
-/// that the **sum** over shards is the intended full-batch quantity (e.g. divide
-/// each shard's loss by `n_shards` for a batch-mean objective). Returns the updated
-/// model and the summed loss.
+/// One data-parallel optimizer step. `indices` is split into up to `n_shards` shards, each
+/// differentiated in parallel by `shard_grads`; the closure must scale so the **sum** over shards
+/// is the intended full-batch quantity (e.g. divide each shard loss by `n_shards` for a batch mean).
 pub fn dp_step<M, O, F>(
     model: M,
     optim: &mut O,
@@ -94,11 +73,9 @@ where
     let shard_size = indices.len().div_ceil(n_shards).max(1);
     let shards: Vec<&[usize]> = indices.chunks(shard_size).collect();
 
-    // Per shard, in parallel: `fork` an **independent** copy of the weights (same
-    // `ParamId`s, fresh autodiff leaves — cloning instead deadlocks, since clones
-    // share the parameter tensors every thread differentiates), compute the shard
-    // gradient, and reduce. Forking and the tree-reduction are parallel too, so the
-    // only serial work per step is the single Adam update.
+    // `fork` gives each shard an independent copy of the weights (same `ParamId`s, fresh autodiff
+    // leaves — a plain clone deadlocks, sharing the tensors every thread differentiates). Only the
+    // single Adam update is serial.
     let (grads, loss) = shards
         .into_par_iter()
         .map(|shard| {

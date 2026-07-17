@@ -1,12 +1,7 @@
-//! **Generation 00** — transformer encoder over the hand-engineered per-frame
-//! feature grid ([`crate::features`]), mapping it to a per-frame **chord**
-//! distribution and a single pooled **key** distribution for the whole excerpt.
-//!
-//! Positional information is supplied by a learned position embedding; the encoder
-//! is a standard pre-norm multi-head transformer. This generation also carries the
-//! masked-frame reconstruction head ([`crate::pretrain::masked`]) and the frozen
-//! is-music probe head ([`crate::probe`]), neither of which the learned-token
-//! generations have.
+//! **Generation 00** — RoPE transformer encoder over the hand-engineered per-frame feature grid
+//! ([`crate::features`]) → per-frame chord + pooled key. The only generation carrying the
+//! masked-frame reconstruction head ([`crate::pretrain::masked`]) and the frozen is-music probe
+//! head ([`crate::probe`]).
 
 use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;

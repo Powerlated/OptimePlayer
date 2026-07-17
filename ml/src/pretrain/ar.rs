@@ -1,16 +1,9 @@
-//! Autoregressive next-frame pretraining, generic over [`ArBackbone`].
+//! Autoregressive next-frame pretraining, generic over [`ArBackbone`]: the causal trunk predicts
+//! the **next** frame's sounding pitch-classes + channels (multi-label BCE-with-logits) on
+//! *unlabeled* real songs; the trunk warm-starts the fine-tune (AR heads discarded).
 //!
-//! The causal trunk reads frames left-to-right and, at each frame, predicts the
-//! **next** frame's content — which pitch-classes and which channels are sounding
-//! (multi-label, binary-cross-entropy-with-logits). A generative pretext on
-//! *unlabeled* real songs; the trained trunk warm-starts the supervised fine-tune,
-//! where the AR heads are discarded.
-//!
-//! Two drivers over the same loss:
-//! * [`run`] — the CPU path, sharding each batch across cores via [`dp_step`].
-//! * [`run_single_device`] — one batch at a time on any autodiff backend. The rayon
-//!   data-parallel step is a CPU-only trick to fill cores (the ndarray backend tops
-//!   out at ~2); a GPU has nothing to shard, so the `gpu` feature's bin uses this.
+//! Two drivers over the same loss: [`run`] shards each batch across cores via [`dp_step`] (CPU);
+//! [`run_single_device`] does one batch at a time on any backend (a GPU has nothing to shard).
 
 use burn::config::Config;
 use burn::module::AutodiffModule;

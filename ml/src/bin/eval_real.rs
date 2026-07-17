@@ -5,24 +5,14 @@
 //!     [--backbone frame|event|hier] [--out-dir models]
 //! ```
 //!
-//! Real game songs are unlabeled, so this reports comparable proxies on a held-out
-//! set of harvested real windows:
+//! Real songs are unlabeled, so this reports proxies on held-out harvested windows:
+//! (1) **SSL distribution fit** — the pretrained trunk's pretext loss on real vs. synthetic val
+//! (m00 only: masked-frame MSE, not on the AR pretext's scale); (2) **chord agreement %** vs. the
+//! chroma-template + Viterbi reference ([`optime_ml::estimate`]); (3) **is-music probe accuracy**
+//! (m00). Missing checkpoints are skipped.
 //!
-//! 1. **SSL distribution fit** — the pretrained trunk's pretext loss on real windows
-//!    vs. on the synthetic validation set (`data/val.bin`). The direct domain-gap
-//!    number. Generation 00 only: it is the masked-frame MSE, and the AR pretext's
-//!    loss is not on the same scale, so mixing them would compare nothing.
-//! 2. **Chord agreement %** — the trained model vs. the training-free chroma-template
-//!    + Viterbi reference ([`optime_ml::estimate`]).
-//! 3. **Is-music probe accuracy** on the weakly-labeled real windows (generation 00).
-//!
-//! Missing checkpoints are skipped with a note, so this is safe to run at any stage
-//! of the pipeline.
-//!
-//! **This is not accuracy.** Real songs have no ground-truth chords; #2 is a
-//! disagreement-between-estimators number against a heuristic reference.
-//!
-//! Replaces the old `eval_real` / `event_eval_real` / `hier_eval_real` trio.
+//! **This is NOT accuracy** — real songs have no ground-truth chords, and per the ml eval rule #2
+//! must never be reported as one.
 
 use burn::module::AutodiffModule;
 use optime_ml::backbone::{self, Backbone};

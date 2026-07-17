@@ -7,13 +7,9 @@
 //! #   → <out-dir>/<00-frame|01-event|02-hier>/model (+ .json)
 //! ```
 //!
-//! With `--pretrained <prefix>` the trunk is warm-started from a self-supervised
-//! checkpoint; without it the run is a from-scratch synthetic-only baseline.
-//! `CHORD_SMOOTH=<w>` overrides the beat-aware smoothness weight (0 = control);
-//! `DP_SHARDS=<n>` overrides the data-parallel width.
-//!
-//! Replaces the old `train` / `event_train` / `hier_train` trio — the loop is generic
-//! over the backbone, so this bin only picks the concrete type.
+//! `--pretrained <prefix>` warm-starts the trunk from an SSL checkpoint; without it the run is a
+//! from-scratch synthetic-only baseline. `CHORD_SMOOTH=<w>` overrides the smoothness weight
+//! (0 = control); `DP_SHARDS=<n>` the data-parallel width.
 
 use burn::module::AutodiffModule;
 use optime_ml::backbone::Backbone;

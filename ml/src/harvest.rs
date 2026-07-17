@@ -1,16 +1,8 @@
-//! Real game-song harvesting (feature `harvest`).
-//!
-//! Runs a device sequencer **headlessly** — the same trick
-//! [`optime_core::FsVisController`] / `SongOverview::overview` use for the
-//! visualizer — and turns its `SynthEvent` stream into unlabeled ml [`Song`]s on
-//! the *same* 4-frames-per-beat grid the synthetic generator uses ([`notes`]).
-//!
-//! These songs carry no chord/key ground truth (`chord_labels` are all
-//! [`NO_CHORD`]); they exist to teach the encoder the *real* note-event
-//! distribution during self-supervised pretraining. The chord/key label mapping
-//! still comes from the synthetic set at fine-tune time.
-//!
-//! [`notes`]: crate::notes
+//! Real game-song harvesting (feature `harvest`): run a device sequencer **headlessly** and turn
+//! its `SynthEvent` stream into unlabeled ml [`Song`](crate::notes::Song)s on the same
+//! 4-frames-per-beat grid as the synthetic generator. No chord/key ground truth (`chord_labels`
+//! all [`NO_CHORD`]) — these teach the encoder the *real* note-event distribution during SSL
+//! pretraining; the label mapping still comes from synthetic at fine-tune time.
 
 use crate::notes::{Instrument, NoteEvent, Song, FRAMES_PER_BEAT};
 use crate::theory::NO_CHORD;

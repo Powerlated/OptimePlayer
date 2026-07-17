@@ -1,13 +1,8 @@
-//! **Generation 02** — learned frame tokens, pooled by a set transformer.
-//!
-//! A second, smaller transformer embeds each frame's variable-length set of sounding
-//! notes into that frame's CLS token via learned pad-masked attention; the main trunk
-//! then runs over the 128 frame tokens. The bet over [`crate::m01_event`]'s sum pool:
-//! attention can weight a frame's notes against each other (bass vs. top voice)
-//! rather than collapsing them additively.
-//!
-//! The [`crate::backbone::Backbone`] / [`crate::backbone::ArBackbone`] impls live in
-//! [`model`], next to the private fields they read.
+//! **Generation 02** — learned frame tokens, set-transformer pooling: a smaller transformer embeds
+//! each frame's sounding-note set into that frame's CLS token via pad-masked attention, then the
+//! main trunk runs over the frame tokens. The bet over [`crate::m01_event`]'s sum pool: attention
+//! can weight a frame's notes against each other rather than collapsing them additively.
+//! `Backbone`/`ArBackbone` impls live in [`model`].
 
 mod batch;
 mod model;

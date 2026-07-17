@@ -1,10 +1,5 @@
-//! Generation 00's CPU-side batch: the hand-engineered feature grid plus flattened
-//! labels.
-//!
-//! Shaped deliberately like the learned-token generations' batches
-//! ([`crate::m01_event::EventBatchData`], [`crate::m02_hier::HierBatchData`]) —
-//! flattened `chord_labels` / `key_labels` — so [`crate::shared`] builds targets and
-//! scores metrics for all three the same way.
+//! Generation 00's CPU-side batch: the feature grid + flattened `chord_labels`/`key_labels`,
+//! shaped like the learned-token batches so [`crate::shared`] handles all three the same way.
 
 use burn::prelude::*;
 

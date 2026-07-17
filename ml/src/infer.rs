@@ -1,10 +1,6 @@
-//! Inference: run a trained model on a note-event stream and produce a predicted
-//! global key + a per-frame chord timeline, then merge frames into chord segments
-//! suitable for driving a circle-of-fifths / annotated-chord display.
-//!
-//! Generic over [`Backbone`] — every generation emits the same
-//! [`ModelOutput`](crate::backbone::ModelOutput), so decoding it into a
-//! [`Prediction`] is written once here rather than once per generation.
+//! Inference: run a trained model on a note-event stream → predicted global key + per-frame chord
+//! timeline, merged into chord segments for a display. Generic over [`Backbone`] (every generation
+//! emits the same [`ModelOutput`](crate::backbone::ModelOutput)), so decoding lives here once.
 
 use burn::module::AutodiffModule;
 

@@ -1,8 +1,6 @@
-//! **Generation 01** — frame-token transformer: one token per frame (a scatter-add
-//! pool of the notes onsetting in that frame), a shared trunk used **causally** for
-//! autoregressive next-frame pretraining and **bidirectionally** for the supervised
-//! chord/key fine-tune, and the same factored root/quality/key heads as every other
-//! generation (emits the shared [`ModelOutput`]).
+//! **Generation 01** — frame-token transformer: one token per frame (scatter-add pool of the notes
+//! onsetting there), a RoPE trunk run causally for AR pretraining and bidirectionally for the
+//! fine-tune, and the shared factored root/quality/key heads ([`ModelOutput`]).
 
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::*;

@@ -1,18 +1,10 @@
-//! Hand-authored chord labels — the app's annotation dev-tool output (`ml/annotations/*.json`).
-//!
-//! **This is the only ground truth that exists for real music.** The heuristic in [`crate::estimate`]
-//! is a chroma-template matcher, not labels, and scoring against it is structurally biased toward
-//! the chroma-input backbone; synthetic validation measures a generator the learned-token backbones
-//! can nearly invert. A human listening to a bar is the only source that measures the thing we care
-//! about, so these files are the eval set — and, once there are enough of them, the final SFT stage.
-//!
-//! The JSON is the contract with the app, which deliberately owns none of the mapping into the label
-//! space: `theory` stays the single source of that (per the ml conventions), so the app never has to
-//! depend on this crate. This module is the *only* place the two meet, and the roundtrip test below
-//! is what keeps them honest — if the app's vocabulary and [`theory::Quality`] ever drift apart, it
-//! fails here rather than silently mislabelling a training set.
+//! Hand-authored chord labels — the app's annotation dev-tool output (`ml/annotations/*.json`), the
+//! **only real-music ground truth** (the [`crate::estimate`] heuristic and synthetic val are not).
+//! The JSON is the contract with the app; `theory` owns the label mapping (the app must not depend
+//! on this crate), so this is the *only* place the two meet — the roundtrip test below pins them 1:1.
 
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
 use std::path::Path;
 
 use crate::notes::FRAMES_PER_BEAT;
@@ -237,7 +229,7 @@ impl SongAnnotation {
 pub const DEFAULT_VAL_FRAC: f64 = 0.25;
 
 /// Which half of the hand-labelled set a consumer wants.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Split {
     /// Songs to train on.
     Train(f64),
@@ -246,6 +238,11 @@ pub enum Split {
     /// Everything, ignoring the split. Only legitimate for inspection — **never** report a number
     /// from this after training on the same files.
     All,
+    /// Hand-picked song ids — a contrived split for experiments wanting a specific song on a
+    /// specific side. Songs in neither list are excluded. **Not comparable to a default run**: it
+    /// bypasses [`is_val`], so disjointness is the caller's job. Matches on song id alone (one
+    /// annotation file today; qualify by `source` if a second game reuses ids).
+    Songs(Vec<u32>),
 }
 
 impl Split {
@@ -254,20 +251,15 @@ impl Split {
             Split::Train(f) => !is_val(source, song_id, *f),
             Split::Val(f) => is_val(source, song_id, *f),
             Split::All => true,
+            Split::Songs(ids) => ids.contains(&song_id),
         }
     }
 }
 
-/// Whether a song belongs to the **held-out** half, decided from its identity alone.
-///
-/// `sft` and `eval_labeled` both call this, which is the entire point: hand labels are scarce, and
-/// the temptation to train on all of them and then score on all of them is enormous — and would
-/// make the only trustworthy number we have meaningless. A song-level split (not window-level) also
-/// keeps two windows of the same track from straddling it.
-///
-/// FNV-1a rather than `DefaultHasher`: the standard hasher's output is explicitly not stable across
-/// Rust releases, and a split that silently reshuffles on a toolchain upgrade would leak the eval
-/// set into training without anyone noticing.
+/// Whether a song is in the **held-out** half, from its identity alone. `sft` and `eval_labeled`
+/// both call this so training and scoring can't overlap; song-level (not window-level) keeps two
+/// windows of one track from straddling. FNV-1a, not `DefaultHasher` (unstable across Rust
+/// releases → a silent reshuffle would leak the eval set into training).
 pub fn is_val(source: &str, song_id: u32, val_frac: f64) -> bool {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in source.as_bytes().iter().chain(song_id.to_le_bytes().iter()) {
@@ -298,6 +290,33 @@ impl Coverage {
     }
 }
 
+/// Every fully-annotated `seq_len`-frame window, cut from the **labelled runs** rather than an
+/// absolute frame-0 grid: songs open with a pickup (Route 110 at frame 2, Petalburg at 16), so a
+/// frame-0 grid drops the very window the annotator filled. A gap splits runs (a window never
+/// straddles unheard frames); windows don't overlap, so tail leftovers are the caller's to report.
+pub fn complete_windows(labels: &[Option<FrameLabel>], seq_len: usize) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    if seq_len == 0 {
+        return out;
+    }
+    let mut i = 0;
+    while i < labels.len() {
+        if labels[i].is_none() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < labels.len() && labels[i].is_some() {
+            i += 1;
+        }
+        for k in 0..((i - start) / seq_len) {
+            let a = start + k * seq_len;
+            out.push(a..a + seq_len);
+        }
+    }
+    out
+}
+
 /// Build labeled [`Song`](crate::notes::Song) windows from annotation files plus the real note
 /// streams they describe. Needs the engine, so it lives behind `harvest` like the rest of the
 /// real-song path.
@@ -308,33 +327,28 @@ pub mod build {
     use crate::notes::Song;
     use optime_core::{load_all, SoundData};
 
-    /// Windows dropped while building, and why — the numbers that tell you whether annotating is
-    /// actually producing training data or quietly going nowhere.
+    /// What the build made of the labels, and what it couldn't use — the numbers that tell you
+    /// whether annotating is actually producing training data or quietly going nowhere.
     #[derive(Debug, Default, Clone, Copy)]
     pub struct BuildStats {
         pub windows_kept: usize,
-        pub dropped_incomplete: usize,
         pub dropped_uncertain: usize,
         pub dropped_no_notes: usize,
         pub songs_missing_key: usize,
+        /// Labelled frames no kept window covers: the tail of a run too short to fill one, plus
+        /// everything under a dropped window. Listening that hasn't turned into data yet.
+        pub leftover_frames: usize,
     }
 
-    /// Turns one game's annotations into fixed-length labeled windows.
-    ///
-    /// **Only fully-annotated windows are emitted.** A window with any unlabeled frame is dropped
-    /// rather than back-filled with `NO_CHORD`: an unheard bar is not a rest, and teaching the model
-    /// that it is would be worse than having no data at all. (Partial windows could be salvaged by
-    /// masking the loss per frame — deliberately not done yet; it touches the one shared training
-    /// loop, and correctness here matters more than squeezing out the last few windows.)
-    ///
-    /// **Windows containing an uncertain quality are dropped too.** Those labels are real, but only
-    /// their root is — they stay in the eval set (scored root-only) rather than teaching the
-    /// quality head a guess.
+    /// Turns one game's annotations into fixed-length labeled windows. Only fully-annotated windows
+    /// are emitted ([`complete_windows`] cuts them from the labelled runs, never back-filling
+    /// `NO_CHORD` — an unheard bar is not a rest). Windows containing an uncertain quality are
+    /// dropped too: those stay in the eval set (scored root-only) rather than teaching a guess.
     pub fn songs_from_annotations(
         file: &GameAnnotations,
         data: &dyn SoundData,
         seq_len: usize,
-        want: Split,
+        want: &Split,
     ) -> (Vec<Song>, BuildStats) {
         let mut out = Vec::new();
         let mut stats = BuildStats::default();
@@ -354,16 +368,13 @@ pub mod build {
             };
             let total_frames = notes.iter().map(|n| n.end_frame).max().unwrap_or(0) as usize;
             let labels = ann.frame_labels(file.steps_per_beat, total_frames);
+            let labeled_frames = labels.iter().filter(|l| l.is_some()).count();
+            let kept_before = stats.windows_kept;
 
-            for w in 0..(total_frames / seq_len) {
-                let (a, b) = (w * seq_len, (w + 1) * seq_len);
+            for win in complete_windows(&labels, seq_len) {
+                let (a, b) = (win.start, win.end);
                 let win = &labels[a..b];
-                let cov = Coverage::of(win);
-                if !cov.is_complete() {
-                    stats.dropped_incomplete += 1;
-                    continue;
-                }
-                if !cov.all_quality_certain {
+                if !Coverage::of(win).all_quality_certain {
                     stats.dropped_uncertain += 1;
                     continue;
                 }
@@ -381,6 +392,8 @@ pub mod build {
                 });
                 stats.windows_kept += 1;
             }
+            stats.leftover_frames +=
+                labeled_frames.saturating_sub((stats.windows_kept - kept_before) * seq_len);
         }
         (out, stats)
     }
@@ -393,7 +406,7 @@ pub mod build {
         ann_dir: &Path,
         rom_dir: &Path,
         seq_len: usize,
-        want: Split,
+        want: &Split,
     ) -> Result<(Vec<Song>, BuildStats), String> {
         let files = load_dir(ann_dir)?;
         let mut all = Vec::new();
@@ -414,10 +427,10 @@ pub mod build {
             let (songs, s) = songs_from_annotations(file, &**data, seq_len, want);
             all.extend(songs);
             total.windows_kept += s.windows_kept;
-            total.dropped_incomplete += s.dropped_incomplete;
             total.dropped_uncertain += s.dropped_uncertain;
             total.dropped_no_notes += s.dropped_no_notes;
             total.songs_missing_key += s.songs_missing_key;
+            total.leftover_frames += s.leftover_frames;
         }
         Ok((all, total))
     }
@@ -532,6 +545,72 @@ mod tests {
         }]);
         let cov = Coverage::of(&s.frame_labels(24.0, 8));
         assert!(cov.is_complete() && cov.all_quality_certain);
+    }
+
+    fn labeled() -> Option<FrameLabel> {
+        Some(FrameLabel {
+            chord: NO_CHORD,
+            quality_certain: true,
+        })
+    }
+
+    /// The regression that emptied the hand-label set when the window went 128→256: every song
+    /// opens with a pickup, so its labels start a frame or two in. A grid anchored at frame 0 finds
+    /// an unlabeled frame in window `[0, 256)` and drops it — discarding a run the annotator
+    /// deliberately made exactly one window long. This is Route 110's and Petalburg's real shape.
+    #[test]
+    fn windows_align_to_the_labelled_run_not_the_absolute_grid() {
+        let mut labels = vec![None; 300];
+        for slot in labels[2..258].iter_mut() {
+            *slot = labeled();
+        }
+        assert_eq!(complete_windows(&labels, 256), vec![2..258]);
+        // The old frame-0 grid found nothing here at all.
+        assert!(!Coverage::of(&labels[0..256]).is_complete());
+    }
+
+    /// A run yields as many whole windows as it holds; the remainder is left over rather than
+    /// stretched to fit.
+    #[test]
+    fn a_run_yields_consecutive_windows_and_leaves_the_remainder() {
+        let mut labels = vec![None; 40];
+        for slot in labels[1..35].iter_mut() {
+            *slot = labeled();
+        }
+        assert_eq!(complete_windows(&labels, 16), vec![1..17, 17..33]);
+    }
+
+    /// Frames nobody listened to must never end up inside a window, so a gap starts a new run
+    /// rather than being spanned.
+    #[test]
+    fn a_gap_splits_runs_and_each_is_windowed_from_its_own_start() {
+        let mut labels = vec![None; 40];
+        for slot in labels[1..9].iter_mut() {
+            *slot = labeled();
+        }
+        // frames 9..12 unheard
+        for slot in labels[12..30].iter_mut() {
+            *slot = labeled();
+        }
+        assert_eq!(complete_windows(&labels, 8), vec![1..9, 12..20, 20..28]);
+    }
+
+    #[test]
+    fn a_run_shorter_than_a_window_yields_nothing() {
+        let mut labels = vec![None; 20];
+        for slot in labels[3..15].iter_mut() {
+            *slot = labeled();
+        }
+        assert!(complete_windows(&labels, 16).is_empty());
+    }
+
+    /// The hand-picked split is membership only — a song in neither list is in neither half.
+    #[test]
+    fn hand_picked_split_accepts_only_the_listed_songs() {
+        let s = Split::Songs(vec![360]);
+        assert!(s.accepts("pokemon-emerald.gbaaudio", 360));
+        assert!(!s.accepts("pokemon-emerald.gbaaudio", 362));
+        assert!(!s.accepts("pokemon-emerald.gbaaudio", 359));
     }
 
     #[test]

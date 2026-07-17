@@ -1,8 +1,6 @@
-//! Backbone-agnostic training pieces that operate on the shared [`ModelOutput`]
-//! (factored root + quality + key logits). Both the frame model ([`crate::train`])
-//! and the event model ([`crate::event`]) build the same targets, compute the same
-//! multi-task loss (+ beat-aware smoothness), and score the same metrics — so those
-//! live here once rather than being duplicated per backbone.
+//! Backbone-agnostic training pieces over the shared [`ModelOutput`] (factored root + quality + key
+//! logits): targets, multi-task loss (+ beat-aware smoothness), and metrics, once for every
+//! generation rather than duplicated per backbone.
 
 use burn::nn::loss::CrossEntropyLoss;
 use burn::prelude::*;
@@ -48,10 +46,9 @@ pub fn key_targets<B: Backend>(labels: &[usize], device: &B::Device) -> Tensor<B
     Tensor::<B, 1, Int>::from_data(TensorData::new(data, [labels.len()]), device)
 }
 
-/// **Beat-aware** temporal-smoothness penalty on a `[batch, seq, classes]` logit
-/// tensor: mean absolute frame-to-frame change of the softmax distribution over
-/// **intra-beat** transitions only (a change on a beat boundary is free), so more
-/// than one chord change per beat is penalised. Differentiable regulariser.
+/// **Beat-aware** temporal-smoothness penalty: mean absolute frame-to-frame change of the softmax,
+/// masked to **intra-beat** transitions (a change on a beat boundary is free), so >1 chord change
+/// per beat is penalised. Differentiable regulariser.
 pub fn beat_aware_tv<B: Backend>(logits: Tensor<B, 3>) -> Tensor<B, 1> {
     let [b, seq, c] = logits.dims();
     let device = logits.device();
@@ -77,9 +74,8 @@ pub fn beat_aware_tv<B: Backend>(logits: Tensor<B, 3>) -> Tensor<B, 1> {
     (diff * mask).sum().div_scalar(denom)
 }
 
-/// Multi-task supervised loss on the shared output: factored root + quality CE +
-/// key CE (weighted) + beat-aware smoothness (weighted). Not yet scaled by `1/k` —
-/// the data-parallel caller does that.
+/// Multi-task loss: factored root + quality CE + key CE (weighted) + beat-aware smoothness
+/// (weighted). Not scaled by `1/k` — the data-parallel caller does that.
 #[allow(clippy::too_many_arguments)]
 pub fn chord_key_loss<B: Backend>(
     ce: &CrossEntropyLoss<B>,
@@ -113,10 +109,9 @@ pub struct EvalCounts {
     pub chord_changes: usize,
 }
 
-/// Score one batch's shared output against ground-truth labels: key accuracy,
-/// chord accuracy (non-no-chord frames), and predicted chord transitions per
-/// sequence. Reconstructs the joint chord label from root + quality argmax
-/// (quality restricted to a real quality), matching inference.
+/// Score one batch: key accuracy, chord accuracy (non-no-chord frames), and predicted chord
+/// transitions per sequence. Reconstructs the joint label from root + quality argmax (quality
+/// restricted to a real quality), matching inference.
 pub fn eval_counts<B: Backend>(
     out: &ModelOutput<B>,
     chord_labels: &[usize],

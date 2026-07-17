@@ -1,18 +1,8 @@
-//! Self-supervised **masked-frame** pretraining — **generation 00 only**.
-//!
-//! The encoder is trained on *unlabeled* real game songs (harvested via
-//! [`crate::harvest`]) by hiding a random fraction of frames and reconstructing
-//! their pitch-class content from the surrounding context — a BERT-style masked
-//! objective on the note-event grid. No chord/key labels are used here; this
-//! stage only teaches the encoder the *real* note-event distribution. The
-//! resulting weights warm-start the supervised fine-tune ([`crate::train`]).
-//!
-//! Loss is mean-squared error on the four L2-normalized pitch-class blocks
-//! ([`PITCH_BLOCK_DIM`] dims), scored **only on masked frames**.
-//!
-//! This pretext needs the hand-engineered feature grid to mask and reconstruct, so
-//! it is specific to [`crate::m00_frame`]; the learned-token generations pretrain
-//! autoregressively instead ([`super::ar`]).
+//! Self-supervised **masked-frame** pretraining — **generation 00 only**. Hides a random fraction
+//! of frames and reconstructs their pitch-class content from context (BERT-style), MSE on the four
+//! L2-normalized pitch-class blocks scored **only on masked frames**. Needs the hand-engineered
+//! feature grid to mask/reconstruct, so it's m00-specific; learned-token generations pretrain AR
+//! ([`super::ar`]). Warm-starts the fine-tune ([`crate::train`]).
 
 use burn::module::AutodiffModule;
 use burn::optim::{AdamConfig, GradientsParams};

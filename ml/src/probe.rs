@@ -1,13 +1,6 @@
-//! "Is-music" linear probe on a **frozen** SSL encoder.
-//!
-//! The self-supervised encoder (pretrained, and optionally fine-tuned) already
-//! carries a representation of the note-event distribution. This module trains
-//! *only* a small pooled binary head on top of it — the encoder is run once and
-//! its pooled features are cached, so the shared representation never moves. The
-//! weak labels come from the app's curated `song_names` JSON (see
-//! [`crate::harvest::Annotations`]): curated GBA tracks are music, unlisted
-//! song-table entries are not. This is the "SSL learns what's music; the
-//! annotations only train the decoder" design.
+//! "Is-music" linear probe on a **frozen** SSL encoder: trains only a pooled binary head, with the
+//! encoder run once and its features cached so the representation never moves. Weak labels from the
+//! app's curated `song_names` JSON (curated GBA tracks = music, unlisted = not).
 
 use crate::backend::MlDevice;
 use burn::module::{AutodiffModule, Module};

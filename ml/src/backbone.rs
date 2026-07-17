@@ -1,17 +1,8 @@
-//! The contract every model generation implements, and the head outputs they all
-//! emit.
-//!
-//! Three backbones — [`crate::m00_frame`] (hand-engineered per-frame features),
-//! [`crate::m01_event`] (learned frame tokens, scatter-add pooled), and
-//! [`crate::m02_hier`] (learned frame tokens, set-transformer pooled) — differ only
-//! in how a window of note events becomes a `[batch, n_frames, d_model]` hidden
-//! state. Everything downstream of that (factored root/quality/key heads, the
-//! multi-task loss in [`crate::shared`], the training loop, inference) is identical,
-//! so it lives once and is generic over this trait.
-//!
-//! [`ModelOutput`] and [`ArOutput`] live here rather than inside a backbone: every
-//! generation produces them, so the newer ones would otherwise import their own
-//! output type from generation 00.
+//! The `Backbone`/`ArBackbone` contract every generation implements, plus the head outputs they
+//! emit. The three backbones differ only in how a window of note events becomes a
+//! `[batch, n_frames, d_model]` hidden state; everything downstream (heads, loss, training,
+//! inference) is generic over this trait. [`ModelOutput`]/[`ArOutput`] live here, not in a
+//! backbone, since every generation produces them.
 
 use burn::config::Config;
 use burn::module::Module;
@@ -41,12 +32,8 @@ pub struct ArOutput<B: Backend> {
     pub channel_logits: Tensor<B, 3>,
 }
 
-/// A chord/key model generation.
-///
-/// `Batch` is the CPU-side batch representation (index/label vectors, never
-/// tensors), so it is backend-independent — the same `Batch` type serves a model on
-/// the autodiff backend and its inner counterpart. That is what lets the training
-/// loop build a batch once and use it for both the gradient step and evaluation.
+/// A chord/key model generation. `Batch` is backend-independent (index/label vectors, never
+/// tensors), so one batch serves both the autodiff gradient step and inner-backend evaluation.
 pub trait Backbone<B: Backend>: Module<B> + Clone + Send + Sync + 'static {
     /// CPU-side batch: flattened labels + whatever index arrays the backbone needs.
     type Batch: Send + Sync;
@@ -64,8 +51,7 @@ pub trait Backbone<B: Backend>: Module<B> + Clone + Send + Sync + 'static {
     /// Instantiate from a config.
     fn init(cfg: &Self::Cfg, device: &B::Device) -> Self;
 
-    /// Tokenize / featurize a slice of songs into one batch. All songs must share
-    /// `n_frames`.
+    /// Tokenize / featurize a slice of songs into one batch. All must share `n_frames`.
     fn build_batch(songs: &[Song]) -> Self::Batch;
 
     /// `(batch, n_frames)`.
@@ -80,41 +66,25 @@ pub trait Backbone<B: Backend>: Module<B> + Clone + Send + Sync + 'static {
     /// Supervised forward: per-frame factored chord logits + pooled key logits.
     fn forward_output(&self, batch: &Self::Batch, device: &B::Device) -> ModelOutput<B>;
 
-    /// Estimated FLOPs to push **one window** through [`forward_output`], under the
-    /// matmul-only convention in [`crate::flops`].
-    ///
-    /// `notes_per_window` is the mean note count of the data, because generation 01
-    /// applies its φ projection per *note* — its cost is data-dependent. The other
-    /// generations ignore it (00 reads a fixed feature grid; 02's set transformer
-    /// runs over a dense `MAX_POLY`-wide grid whether or not the slots are filled).
-    ///
-    /// The AR pretraining path ([`ArBackbone::ar_forward`]) differs only in swapping
-    /// the chord/key heads for the two AR heads — well under 1% of the trunk — so
-    /// this stands in for both stages rather than splitting the contract.
+    /// Estimated FLOPs for **one window** through [`forward_output`] ([`crate::flops`] convention).
+    /// `notes_per_window` matters only to m01 (its φ runs per note); m00/m02 ignore it. Stands in
+    /// for the AR path too (it only swaps heads, <1% of the trunk).
     fn flops_per_window(cfg: &Self::Cfg, notes_per_window: usize) -> u64;
 }
 
-/// A backbone that supports **autoregressive next-frame** pretraining: predict the
-/// next frame's sounding pitch-classes + channels from the causal hidden state.
-///
-/// Generation 00 deliberately does not implement this — its pretext is masked-frame
-/// reconstruction ([`crate::pretrain::masked`]), a genuinely different objective
-/// rather than the same loop in disguise.
+/// A backbone supporting **autoregressive next-frame** pretraining. m00 deliberately doesn't
+/// implement this — its pretext is masked-frame reconstruction ([`crate::pretrain::masked`]), a
+/// genuinely different objective.
 pub trait ArBackbone<B: Backend>: Backbone<B> {
     /// Causal forward → next-frame content logits.
     fn ar_forward(&self, batch: &Self::Batch, device: &B::Device) -> ArOutput<B>;
 
-    /// Per-frame sounding-content multi-hots `(pc, channel)` for the AR target. The
-    /// pretrain loss shifts these by one frame.
+    /// Per-frame sounding-content multi-hots `(pc, channel)`; the pretrain loss shifts by one frame.
     fn ar_targets(batch: &Self::Batch) -> (Vec<f32>, Vec<f32>);
 }
 
-/// Load a checkpoint written by [`save`]: weights at `prefix`, config at
-/// `prefix.json`.
-///
-/// Used both to warm-start a fine-tune from a pretrained trunk (the supervised heads
-/// are freshly initialised by [`Backbone::init`] and simply overwritten by whatever
-/// the record holds) and to load a finished model for inference.
+/// Load a checkpoint written by [`save`]: weights at `prefix`, config at `prefix.json`. Serves both
+/// warm-starting a fine-tune (fresh heads are overwritten by the record) and inference.
 pub fn load<M, B>(prefix: &Path, device: &B::Device) -> M
 where
     B: Backend,
@@ -141,11 +111,8 @@ where
         .unwrap_or_else(|e| panic!("save config {}: {e}", dir.display()));
 }
 
-/// Per-epoch checkpoint: `<dir>/<name>-ep007(.mpk)` + `.json`, alongside the final
-/// `<name>`. Zero-padded so a lexical sort is a chronological one.
-///
-/// Takes the model by reference and clones — a driver must keep training after the
-/// write, unlike [`save`], which consumes the model at the end of a run.
+/// Per-epoch checkpoint: `<dir>/<name>-ep007(.mpk)` + `.json` (zero-padded → lexical sort is
+/// chronological). Clones rather than consuming, since a driver keeps training after the write.
 pub fn save_epoch<M, B>(model: &M, cfg: &M::Cfg, dir: &Path, name: &str, epoch: usize) -> PathBuf
 where
     B: Backend,
@@ -204,9 +171,8 @@ mod tests {
         }
     }
 
-    /// The contract that makes one training loop / one `predict` possible for all
-    /// three generations: identical output shapes and label accessors from an
-    /// identical `&[Song]` input.
+    /// One training loop / one `predict` for all three generations: identical output shapes and
+    /// label accessors from identical `&[Song]` input.
     fn check_shapes<M: Backbone<Inner>>() {
         let device = MlDevice::default();
         let songs = [small_song(8), small_song(8)];

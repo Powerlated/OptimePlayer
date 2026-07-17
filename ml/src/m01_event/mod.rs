@@ -1,12 +1,7 @@
-//! **Generation 01** — learned frame tokens, pooled by a param-free scatter-add sum.
-//!
-//! Each frame token is the summed field embeddings of the notes onsetting in that
-//! frame, passed through a nonlinear φ. The first generation to read the note stream
-//! directly rather than a hand-engineered feature vector, and the first with an
-//! autoregressive next-frame pretext ([`crate::pretrain::ar`]).
-//!
-//! The [`crate::backbone::Backbone`] / [`crate::backbone::ArBackbone`] impls live in
-//! [`model`], next to the private fields they read.
+//! **Generation 01** — learned frame tokens, param-free scatter-add sum pooling: each token is the
+//! summed field embeddings of the frame's onsetting notes through a nonlinear φ. First generation
+//! to read the note stream directly, and first with an AR next-frame pretext ([`crate::pretrain::ar`]).
+//! `Backbone`/`ArBackbone` impls live in [`model`].
 
 mod batch;
 mod model;

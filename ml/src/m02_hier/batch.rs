@@ -1,10 +1,7 @@
-//! Generation 02's pooling input: each frame's variable-length set of **sounding**
-//! notes (onset..onset+duration), capped at [`MAX_POLY`].
-//!
-//! Contrast [`crate::m01_event`], which pools only the notes *onsetting* in a frame
-//! and leans on the per-note `dur` field to carry sustain. Here a held note is a
-//! member of every frame it sounds through, flagged attack-vs-held, and the set
-//! transformer in [`super::model`] attends over that set.
+//! Generation 02's pooling input: each frame's variable-length set of **sounding** notes
+//! (onset..onset+duration), capped at [`MAX_POLY`]. A held note is a member of every frame it
+//! sounds through, flagged attack-vs-held — contrast [`crate::m01_event`], which pools only the
+//! *onsetting* notes and leans on `dur` for sustain.
 
 use crate::notes::Song;
 use crate::tokenize::{self, EventExample, NoteToken};

@@ -1,9 +1,6 @@
-//! Chord-progression generation. Produces a sequence of `(Chord, beats)` spans
-//! in a given key, either from a library of real-world progressions (pop, jazz,
-//! blues, Pachelbel, Andalusian, ...) or from a functional-harmony Markov walk.
-//!
-//! Secondary dominants and borrowed chords are injected so the model sees
-//! chromatic harmony that still belongs to a single global key.
+//! Chord-progression generation → `(Chord, beats)` spans in a key, from either a library of
+//! real-world progressions (pop, jazz, blues, Pachelbel, Andalusian, …) or a functional-harmony
+//! Markov walk. Secondary dominants + borrowed chords add chromatic harmony inside one global key.
 
 use crate::theory::{Chord, Key, Mode, Quality};
 use rand::seq::SliceRandom;

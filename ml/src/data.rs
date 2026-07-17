@@ -1,8 +1,6 @@
-//! Synthetic dataset: generation, on-disk retention, and the training example
-//! shape. The *raw note-event songs* are the canonical retained data (they hold
-//! all pitch + metadata); per-frame features are derived deterministically on
-//! load via [`crate::features`], so the same extractor serves training and live
-//! inference.
+//! Synthetic dataset: generation, on-disk retention, example shape. The raw note-event songs are
+//! the canonical retained data; features are derived deterministically on load via
+//! [`crate::features`].
 
 use crate::features::{self, FEATURE_DIM};
 use crate::notes::{render_song, Song};

@@ -59,8 +59,30 @@ pub struct Args {
     pub out_dir: PathBuf,
     /// `--pretrained <prefix>` — warm-start weights.
     pub pretrained: Option<PathBuf>,
+    /// `--model <stem>` — artifact stem to load, under `<out_dir>/<DIR>/`. `None` = `model`, the
+    /// synthetic fine-tune. Point it at `model_sft` to score the real-label stage: without this the
+    /// eval bins can only ever load the checkpoint SFT *starts from*, so an SFT run cannot be
+    /// measured.
+    pub model: Option<String>,
+    /// `--train-songs <id,...>` / `--val-songs <id,...>` — hand-picked song ids, overriding the
+    /// deterministic hash holdout with a contrived split. See [`crate::annotations::Split::Songs`]:
+    /// numbers from one are not comparable to a default run.
+    pub train_songs: Option<Vec<u32>>,
+    pub val_songs: Option<Vec<u32>>,
     /// Everything not consumed as a flag, in order.
     pub positional: Vec<String>,
+}
+
+/// `360,362` → `[360, 362]`.
+fn song_ids(v: &str, flag: &str) -> Vec<u32> {
+    v.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse()
+                .unwrap_or_else(|e| panic!("{flag}: {s:?} is not a song id: {e:?}"))
+        })
+        .collect()
 }
 
 impl Args {
@@ -74,6 +96,9 @@ impl Args {
             kind: Kind::default(),
             out_dir: PathBuf::from("models"),
             pretrained: None,
+            model: None,
+            train_songs: None,
+            val_songs: None,
             positional: Vec::new(),
         };
         let mut it = args.into_iter();
@@ -91,6 +116,21 @@ impl Args {
                     out.pretrained = Some(PathBuf::from(
                         it.next().expect("--pretrained needs a path prefix"),
                     ));
+                }
+                "--model" => {
+                    out.model = Some(it.next().expect("--model needs an artifact stem"));
+                }
+                "--train-songs" => {
+                    let v = it
+                        .next()
+                        .expect("--train-songs needs a comma-separated id list");
+                    out.train_songs = Some(song_ids(&v, "--train-songs"));
+                }
+                "--val-songs" => {
+                    let v = it
+                        .next()
+                        .expect("--val-songs needs a comma-separated id list");
+                    out.val_songs = Some(song_ids(&v, "--val-songs"));
                 }
                 _ => out.positional.push(a),
             }
@@ -114,6 +154,26 @@ impl Args {
     /// Default warm-start prefix for this backbone: `<out_dir>/<DIR>/pretrained`.
     pub fn default_pretrained(&self) -> PathBuf {
         self.out_dir.join(self.kind.dir()).join("pretrained")
+    }
+
+    /// Prefix of the checkpoint to load: `<out_dir>/<DIR>/<--model or "model">`.
+    pub fn model_prefix(&self) -> PathBuf {
+        self.out_dir
+            .join(self.kind.dir())
+            .join(self.model.as_deref().unwrap_or("model"))
+    }
+
+    /// The hand-picked split, if either song-list flag was given. `Split::Songs` on each side; a
+    /// song named by neither is in neither half.
+    pub fn explicit_split(&self) -> Option<(crate::annotations::Split, crate::annotations::Split)> {
+        use crate::annotations::Split;
+        if self.train_songs.is_none() && self.val_songs.is_none() {
+            return None;
+        }
+        Some((
+            Split::Songs(self.train_songs.clone().unwrap_or_default()),
+            Split::Songs(self.val_songs.clone().unwrap_or_default()),
+        ))
     }
 }
 
@@ -153,6 +213,35 @@ mod tests {
         assert_eq!(a.positional_or(0, 0usize), 12);
         assert_eq!(a.positional_or(1, 0usize), 64);
         assert_eq!(a.positional_or(9, 7usize), 7);
+    }
+
+    #[test]
+    fn parses_the_hand_picked_split_and_model_stem() {
+        let a = args(&[
+            "--train-songs",
+            "360",
+            "--val-songs",
+            "362, 359",
+            "--model",
+            "model_sft",
+            "--backbone",
+            "hier",
+        ]);
+        assert_eq!(a.train_songs, Some(vec![360]));
+        assert_eq!(a.val_songs, Some(vec![362, 359]));
+        assert_eq!(a.model_prefix(), PathBuf::from("models/02-hier/model_sft"));
+        let (train, val) = a.explicit_split().expect("both flags given");
+        assert!(train.accepts("x", 360) && !train.accepts("x", 362));
+        assert!(val.accepts("x", 362) && !val.accepts("x", 360));
+    }
+
+    /// Without the flags nothing changes: the deterministic hash holdout stays the default, and the
+    /// eval bins keep loading `model`.
+    #[test]
+    fn no_song_flags_means_no_explicit_split() {
+        let a = args(&["--backbone", "hier"]);
+        assert!(a.explicit_split().is_none());
+        assert_eq!(a.model_prefix(), PathBuf::from("models/02-hier/model"));
     }
 
     #[test]

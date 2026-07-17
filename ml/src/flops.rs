@@ -1,31 +1,15 @@
-//! Analytic FLOP estimates for one forward pass.
-//!
-//! **Convention.** One multiply-accumulate counts as 2 FLOPs, and only **matmuls**
-//! are counted: the Q/K/V/O projections, the two attention products, the FFN, the
-//! input projection, and the output heads. Softmax, LayerNorm, GELU, dropout,
-//! residual adds, embedding gathers, and scatter-adds are elementwise or
-//! memory-movement work rather than arithmetic on the matmul critical path, and are
-//! excluded.
-//!
-//! So this is a **lower bound that tracks the real cost**, not a profile. Use it to
-//! compare generations, window sizes, and configs against each other — not to
-//! predict wall time. On a memory-bandwidth-bound machine (see [`crate::parallel`])
-//! measured throughput will be far below what these numbers alone would suggest.
+//! Analytic FLOP estimates for one forward pass. 1 MAC = 2 FLOPs, **matmuls only** (softmax/norm/
+//! GELU/gathers/scatter excluded) → a lower bound that tracks cost for comparing generations/window
+//! sizes/configs, not a profile: the machine is memory-bandwidth-bound (see [`crate::parallel`]).
 
 /// Dense matmul `[n, k] × [k, m]` = `2·n·k·m`.
 pub fn matmul(n: usize, k: usize, m: usize) -> u64 {
     2 * n as u64 * k as u64 * m as u64
 }
 
-/// One pre-norm transformer encoder layer over `seq` tokens:
-///
-/// * Q/K/V/O projections — `8·seq·d²`
-/// * attention `QKᵀ` then `AV` — `4·seq²·d` (the term that makes context quadratic)
-/// * FFN up then down — `4·seq·d·d_ff`
-///
-/// Head count doesn't appear: heads repartition the same `d`, so the arithmetic is
-/// unchanged. A causal mask doesn't either — the masked half is computed and then
-/// discarded.
+/// One pre-norm encoder layer over `seq` tokens: Q/K/V/O projections `8·seq·d²` + attention
+/// `4·seq²·d` (the quadratic term) + FFN `4·seq·d·d_ff`. Head count and causal masking don't change
+/// it (heads repartition `d`; the masked half is computed then discarded).
 pub fn transformer_layer(seq: usize, d_model: usize, d_ff: usize) -> u64 {
     let proj = 4 * matmul(seq, d_model, d_model);
     let attn = matmul(seq, d_model, seq) + matmul(seq, seq, d_model);

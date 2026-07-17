@@ -1,5 +1,4 @@
-//! Harvest real game songs into unlabeled note-event datasets for
-//! self-supervised pretraining.
+//! Harvest real game songs into unlabeled note-event datasets for SSL pretraining.
 //!
 //! ```sh
 //! cargo run --release --features harvest --bin harvest -- <rom_dir> [seq_len] [val_fraction] \
@@ -7,19 +6,10 @@
 //! #   → data/real_train.bin, data/real_val.bin
 //! ```
 //!
-//! Each ROM/audio archive in `<rom_dir>` is parsed with the engine's `load_all`,
-//! every playable song is run headlessly, and its `SynthEvent` stream is turned
-//! into `NoteEvent` windows on the same 4-frames-per-beat grid the synthetic
-//! generator uses. Songs are shuffled deterministically and split at the **song**
-//! level (no window straddles the split).
-//!
-//! **Windowing** differs per split to maximize pretraining coverage without
-//! corrupting the val metric:
-//! - **train** → `--coverage ×` random-offset overlapping windows (each starts at a
-//!   uniformly random beat phase, so the encoder sees phrase context from every
-//!   phase, not just fixed `seq_len` boundaries). Default `4×` (~4× the data).
-//! - **val** → fixed consecutive tiling (non-overlapping), an honest,
-//!   non-redundant held-out loss.
+//! Each archive in `<rom_dir>` is run headlessly → `NoteEvent` windows on the synthetic grid,
+//! shuffled deterministically and split at the **song** level. Windowing differs per split:
+//! **train** → `--coverage ×` random-offset overlapping windows (default `4×`); **val** → fixed
+//! non-overlapping tiling for an honest held-out loss.
 //!
 //! `--annotate` (repeatable) supplies weak is-music labels for a GBA game code
 //! from the app's `song_names` JSON, e.g.

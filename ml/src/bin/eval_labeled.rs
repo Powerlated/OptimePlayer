@@ -2,9 +2,15 @@
 //!
 //! ```sh
 //! cargo run --release --features harvest --bin eval_labeled -- \
-//!     [ann_dir] [rom_dir] [--backbone frame|event|hier] [--out-dir models]
-//! #   defaults: ann_dir = ml/annotations, rom_dir = ../demos
+//!     [ann_dir] [rom_dir] [--backbone frame|event|hier] [--out-dir models] \
+//!     [--model model_sft] [--val-songs 362]
+//! #   defaults: ann_dir = ml/annotations, rom_dir = ../demos, --model model
 //! ```
+//!
+//! `--model` picks the artifact stem: the default `model` is the *synthetic* fine-tune, so scoring
+//! an `sft` run means `--model model_sft`. `--val-songs` replaces the hash holdout with a
+//! hand-picked one for contrived experiments; it prints a warning and its number is not the
+//! real-music metric.
 //!
 //! This is **not** `eval_real`. That reports agreement with `estimate.rs`, a chroma-template
 //! heuristic — not ground truth, and structurally biased toward the chroma-input backbone, so it
@@ -19,7 +25,7 @@
 
 use burn::module::AutodiffModule;
 use optime_core::load_all;
-use optime_ml::annotations::{self, Coverage, Split, DEFAULT_VAL_FRAC};
+use optime_ml::annotations::{self, Split, DEFAULT_VAL_FRAC};
 use optime_ml::backbone::{self, Backbone};
 use optime_ml::backend::{Back, Inner, MlDevice};
 use optime_ml::cli::{Args, Kind};
@@ -103,10 +109,12 @@ fn main() {
     // Default to the held-out songs only. `sft` trains on the complement of exactly this split, so
     // scoring everything would report a number partly measured on the training set.
     let score_all = std::env::args().any(|a| a == "--all");
-    let split = if score_all {
-        Split::All
-    } else {
-        Split::Val(DEFAULT_VAL_FRAC)
+    let hand_picked = args.val_songs.is_some();
+    let split = match (&args.val_songs, score_all) {
+        // An explicit list wins: the point of `--val-songs` is to score exactly these songs.
+        (Some(ids), _) => Split::Songs(ids.clone()),
+        (None, true) => Split::All,
+        (None, false) => Split::Val(DEFAULT_VAL_FRAC),
     };
 
     let files = match annotations::load_dir(&ann_dir) {
@@ -130,7 +138,6 @@ fn main() {
     let seq_len = 256;
     let mut cuts: Vec<Cut> = Vec::new();
     let mut labeled_frames = 0usize;
-    let mut skipped_partial = 0usize;
     for file in &files {
         let path = rom_dir.join(&file.source);
         let Ok(bytes) = std::fs::read(&path) else {
@@ -152,13 +159,10 @@ fn main() {
             let total = notes.iter().map(|n| n.end_frame).max().unwrap_or(0) as usize;
             let truth = ann.frame_labels(file.steps_per_beat, total);
             labeled_frames += truth.iter().filter(|t| t.is_some()).count();
-            for w in 0..(total / seq_len) {
-                let (a, b) = (w * seq_len, (w + 1) * seq_len);
-                let win = truth[a..b].to_vec();
-                if !Coverage::of(&win).is_complete() {
-                    skipped_partial += 1;
-                    continue;
-                }
+            // Windows come from the labelled runs, not an absolute grid: a song opens with a pickup,
+            // so its labels start a frame or two in and a frame-0 grid would drop every one of them.
+            for win in annotations::complete_windows(&truth, seq_len) {
+                let (a, b) = (win.start, win.end);
                 let win_notes =
                     optime_ml::harvest::clip_notes_to_window(&notes, a as u32, b as u32);
                 if win_notes.is_empty() {
@@ -166,24 +170,33 @@ fn main() {
                 }
                 cuts.push(Cut {
                     notes: win_notes,
-                    truth: win,
+                    truth: truth[a..b].to_vec(),
                 });
             }
         }
     }
 
+    let leftover = labeled_frames.saturating_sub(cuts.len() * seq_len);
     println!(
         "{} annotation file(s), {labeled_frames} labelled frames → {} complete {seq_len}-frame \
-         window(s) ({skipped_partial} partial skipped) [{}]",
+         window(s) ({leftover} labelled frame(s) left over) [{}]",
         files.len(),
         cuts.len(),
-        if score_all {
+        if hand_picked {
+            "CONTRIVED hand-picked songs"
+        } else if score_all {
             "ALL songs — includes anything sft trained on"
         } else {
             "held-out songs only"
         }
     );
-    if score_all {
+    if hand_picked {
+        println!(
+            "⚠ --val-songs {:?} is a hand-picked split, not the deterministic holdout. Nothing \
+             checks that `sft` didn't train on these; not a number to report.",
+            args.val_songs.clone().unwrap_or_default()
+        );
+    } else if score_all {
         println!(
             "⚠ --all scores songs `sft` may have trained on. Fine for inspection; not a number to \
              report."
@@ -199,11 +212,15 @@ fn main() {
     }
 
     let device = MlDevice::default();
-    let prefix = args.out_dir.join(args.kind.dir()).join("model");
+    // `--model model_sft` scores the real-label stage; the default `model` is the synthetic
+    // fine-tune that SFT warm-starts *from*, so re-scoring after an `sft` run without this flag
+    // measures the checkpoint before it, not after.
+    let prefix = args.model_prefix();
     if !prefix.with_extension("json").exists() {
         eprintln!("{}.json not found — train first", prefix.display());
         std::process::exit(1);
     }
+    println!("scoring {}", prefix.display());
     let score = match args.kind {
         Kind::Frame => run::<FrameModel<Back>>(&prefix, &cuts, seq_len, &device),
         Kind::Event => run::<EventModel<Back>>(&prefix, &cuts, seq_len, &device),

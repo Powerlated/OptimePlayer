@@ -1,11 +1,7 @@
-//! Generation 01's pooling: each frame token is a **scatter-add sum** of the notes
-//! *onsetting* in that frame.
-//!
-//! The batch holds per-field index arrays over a flat list of onset tokens plus each
-//! token's destination frame row; the model embeds the fields and scatter-adds them
-//! into their row ([`super::model`]). Sustain is carried by the per-note `dur` field
-//! rather than by repeating a note across frames — contrast [`crate::m02_hier`],
-//! which pools the notes *sounding* in each frame.
+//! Generation 01's pooling: each frame token is a **scatter-add sum** of the notes *onsetting* in
+//! that frame. The batch holds per-field index arrays over a flat onset-token list plus each
+//! token's frame row. Sustain rides the per-note `dur` field rather than repeating a note across
+//! frames — contrast [`crate::m02_hier`], which pools the notes *sounding* in each frame.
 
 use crate::notes::Song;
 use crate::tokenize::{self, EventExample};

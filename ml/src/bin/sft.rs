@@ -2,9 +2,14 @@
 //!
 //! ```sh
 //! cargo run --release --features harvest --bin sft -- [epochs] [batch] [lr] \
-//!     [--backbone frame|event|hier] [--pretrained models/02-hier/model] [--out-dir models]
+//!     [--backbone frame|event|hier] [--pretrained models/02-hier/model] [--out-dir models] \
+//!     [--train-songs 360] [--val-songs 362]
 //! #   reads ml/annotations/*.json + ../demos → <dir>/<NN-name>/model_sft
 //! ```
+//!
+//! `--train-songs`/`--val-songs` replace the hash holdout with a hand-picked one, for contrived
+//! experiments on a specific pair of songs. They exclude every song they don't name, and a result
+//! from them is not the real-music metric — see [`Split::Songs`].
 //!
 //! The pipeline is SSL-pretrain on real songs → SFT on synthetic theory labels → **this**. Large and
 //! noisy first, small and true last, so the human labels get the final word on what the heads mean.
@@ -15,7 +20,8 @@
 //! **The held-out songs are never trained on.** `sft` takes [`Split::Train`], `eval_labeled` takes
 //! [`Split::Val`], and both derive it from the same deterministic song-level hash — the alternative
 //! (train on everything, score on everything) would quietly destroy the only trustworthy number in
-//! the project.
+//! the project. The hand-picked flags are the one way around that, which is why they check
+//! disjointness themselves and shout about it.
 //!
 //! Does not copy the training loop: it prepares a dataset and hands it to [`train::run`], the one
 //! supervised loop every generation shares.
@@ -55,30 +61,64 @@ fn main() {
         PathBuf::from(std::env::var("ML_ANNOTATIONS").unwrap_or_else(|_| "annotations".into()));
     let rom_dir = PathBuf::from(std::env::var("ML_ROMS").unwrap_or_else(|_| "../demos".into()));
 
-    let val_frac = DEFAULT_VAL_FRAC;
+    // A hand-picked split overrides the deterministic holdout. It exists for contrived experiments
+    // ("train on this song, score on that one"); it bypasses `is_val`, so the disjointness that
+    // hash guarantees for free has to be checked here instead.
+    let (train_split, val_split) = args
+        .explicit_split()
+        .unwrap_or((Split::Train(DEFAULT_VAL_FRAC), Split::Val(DEFAULT_VAL_FRAC)));
+    if let (Some(t), Some(v)) = (&args.train_songs, &args.val_songs) {
+        let both: Vec<u32> = t.iter().filter(|id| v.contains(id)).copied().collect();
+        if !both.is_empty() {
+            eprintln!(
+                "--train-songs and --val-songs both name song(s) {both:?}. That trains on the \
+                 songs it then scores, which is the one thing the split exists to prevent."
+            );
+            std::process::exit(1);
+        }
+    }
+
     let (train_songs, tstats) =
-        match build::songs_from_dir(&ann_dir, &rom_dir, SEQ_LEN, Split::Train(val_frac)) {
+        match build::songs_from_dir(&ann_dir, &rom_dir, SEQ_LEN, &train_split) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
         };
-    let (val_songs, _) = build::songs_from_dir(&ann_dir, &rom_dir, SEQ_LEN, Split::Val(val_frac))
-        .unwrap_or_default();
+    let (val_songs, _) =
+        build::songs_from_dir(&ann_dir, &rom_dir, SEQ_LEN, &val_split).unwrap_or_default();
 
+    match args.explicit_split() {
+        Some(_) => {
+            println!(
+                "hand-labelled: {} train / {} val windows (⚠ CONTRIVED hand-picked split: train \
+                 {:?}, val {:?})",
+                train_songs.len(),
+                val_songs.len(),
+                args.train_songs.clone().unwrap_or_default(),
+                args.val_songs.clone().unwrap_or_default(),
+            );
+            println!(
+                "⚠ this is not the deterministic holdout. Songs named by neither flag are excluded \
+                 entirely, and nothing here is comparable to a default run — do not report it as \
+                 the real-music metric."
+            );
+        }
+        None => println!(
+            "hand-labelled: {} train / {} val windows (song-level {:.0}% holdout)",
+            train_songs.len(),
+            val_songs.len(),
+            DEFAULT_VAL_FRAC * 100.0
+        ),
+    }
     println!(
-        "hand-labelled: {} train / {} val windows (song-level {:.0}% holdout)",
-        train_songs.len(),
-        val_songs.len(),
-        val_frac * 100.0
-    );
-    println!(
-        "dropped: {} incomplete, {} with an uncertain quality, {} with no notes; {} song(s) had no key",
-        tstats.dropped_incomplete,
+        "dropped: {} with an uncertain quality, {} with no notes; {} song(s) had no key; \
+         {} labelled frame(s) left over (no whole window)",
         tstats.dropped_uncertain,
         tstats.dropped_no_notes,
-        tstats.songs_missing_key
+        tstats.songs_missing_key,
+        tstats.leftover_frames
     );
 
     if train_songs.is_empty() {
