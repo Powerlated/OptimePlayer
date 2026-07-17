@@ -1,0 +1,7 @@
+# Metadata for nice-plug's plugin bundler (`cargo nice-plug bundle optime-plug --release`).
+#
+# Note `.cargo/config.toml` sets `-C target-cpu=native` for every native target, which the synth hot
+# path wants but a redistributable plugin must not have — a bundle built that way crashes on any CPU
+# older than the build machine. Override it for a build you intend to hand to someone else.
+[optime-plug]
+name = "Optime Player"

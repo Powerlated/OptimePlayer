@@ -10,7 +10,8 @@ mod persisted;
 mod piano_roll;
 mod player;
 mod song_names;
-mod theme;
+/// The shared egui theme, re-exported so the app's `crate::theme::…` call sites keep working.
+use optime_ui as theme;
 mod visualizer;
 mod wav;
 

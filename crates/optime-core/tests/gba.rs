@@ -3,6 +3,7 @@
 //! the player's channel/envelope model, and the shared synthesis path.
 
 use optime_core::devices::gba::GbaRom;
+use optime_core::devices::gba::param_player::{ParamPlayer, TrackParams};
 use optime_core::{
     LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, SynthController,
     load_all,
@@ -135,6 +136,293 @@ fn renders_audio_and_ends() {
         msgs.contains(&PlaybackEvent::TransitionStarted),
         "the song should report its end (a fade transition) after FINE: {msgs:?}"
     );
+}
+
+/// The parameter-driven player (the VST3 seam) starts a note through the same `ply_note_with` the
+/// sequencer uses, so a DAW note sounds like a song note: same voicegroup, same envelope, same
+/// channel allocation. Only the driver differs — there is no bytecode here at all.
+#[test]
+fn param_player_renders_a_note_without_any_bytecode() {
+    let rom: std::sync::Arc<[u8]> = build_rom().into();
+    let mut player = ParamPlayer::new(rom, VOICEGROUP, 16);
+    player.set_track_params(
+        0,
+        &TrackParams {
+            vol: 100,
+            ..TrackParams::default()
+        },
+    );
+    player.note_on(0, 60, 100);
+
+    let sr = 32768.0;
+    let mut controller = SynthController::with_player(sr, Box::new(player));
+    let config = PerDeviceSettings::neutral();
+
+    let mut out = vec![0.0f32; 2 * (0.5 * sr) as usize];
+    controller.fill(&mut out, &config);
+
+    let peak = out.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    assert!(peak > 0.01, "the note should be audible, peak={peak}");
+}
+
+/// MP2K bakes a gate time into a note and `gate_tick` releases the channel when it expires. A DAW
+/// note-off is asynchronous, so notes start with gate 0 — MP2K's own tie — and hold until released.
+///
+/// This pins that: the same note that the bytecode song ends after 24 steps (≈0.4 s, see
+/// `renders_audio_and_ends`) is still sounding here well past that, and only stops once
+/// `note_off` runs the engine's release.
+#[test]
+fn param_player_holds_a_note_until_note_off() {
+    let rom: std::sync::Arc<[u8]> = build_rom().into();
+    let sr = 32768.0;
+    let config = PerDeviceSettings::neutral();
+
+    let mut player = ParamPlayer::new(rom, VOICEGROUP, 16);
+    player.set_track_params(
+        0,
+        &TrackParams {
+            vol: 100,
+            ..TrackParams::default()
+        },
+    );
+    player.note_on(0, 60, 100);
+    let mut controller = SynthController::with_player(sr, Box::new(player));
+
+    // Well past the 24-step gate the bytecode version of this note would have expired at.
+    let mut held = vec![0.0f32; 2 * (1.5 * sr) as usize];
+    controller.fill(&mut held, &config);
+    let tail = &held[held.len() - 2 * (sr as usize / 10)..];
+    let held_peak = tail.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    assert!(
+        held_peak > 0.01,
+        "a gate-0 note should still be sounding at 1.5 s, peak={held_peak}"
+    );
+
+    // Release it, then let the envelope's release (200) run out.
+    controller
+        .player_mut()
+        .as_any_mut()
+        .downcast_mut::<ParamPlayer>()
+        .expect("the controller should still hold the ParamPlayer")
+        .note_off(0, 60);
+    let mut released = vec![0.0f32; 2 * (2.0 * sr) as usize];
+    controller.fill(&mut released, &config);
+    let tail = &released[released.len() - 2 * (sr as usize / 10)..];
+    let released_peak = tail.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    assert!(
+        released_peak < 0.001,
+        "after note_off the release should have run out, peak={released_peak}"
+    );
+}
+
+/// Rip capture reads a running song's registers back out as parameters, so `from_track` must be a
+/// true inverse of `set_track_params`: what the engine holds after applying a parameter set must
+/// read back as that same set. If these two drift, a capture records something the plugin cannot
+/// reproduce — which is the whole point of the feature.
+#[test]
+fn track_params_round_trip_through_the_engine() {
+    let rom: std::sync::Arc<[u8]> = build_rom().into();
+    let mut player = ParamPlayer::new(rom, VOICEGROUP, 16);
+
+    let want = TrackParams {
+        vol: 90,
+        pan: -20,
+        bend: 15,
+        bend_range: 7,
+        mod_: 30,
+        lfo_speed: 40,
+        lfo_delay: 5,
+        mod_type: 1,
+        tune: -8,
+        key_shift: 3,
+        priority: 60,
+        echo_volume: 12,
+        echo_length: 4,
+        // The tone fields only reach the engine with the override on (see the test below), so a
+        // round trip has to enable it to cover them.
+        tone_override: true,
+        kind: 0,
+        attack: 200,
+        decay: 10,
+        sustain: 100,
+        release: 50,
+        length: 3,
+        pan_sweep: 9,
+        ..TrackParams::default()
+    };
+    player.set_track_params(0, &want);
+
+    // `prog`/`tone_override` are not stored on the track (MP2K discards the VOICE index), so they
+    // are supplied — that asymmetry is exactly why `from_track` takes them.
+    let got = TrackParams::from_track(&player.tracks()[0], want.prog, want.tone_override);
+    assert_eq!(
+        got, want,
+        "engine registers must read back as the params that set them"
+    );
+}
+
+/// With `tone_override` off, the voicegroup's record wins and the tone parameters are inert — they
+/// are *not* what the engine plays. That asymmetry is deliberate (an untouched instance must sound
+/// like the ROM), and it is why `from_track` reports the engine's real tone rather than echoing the
+/// parameters back: a capture has to record what is actually sounding.
+#[test]
+fn tone_params_are_inert_until_tone_override_is_on() {
+    let rom: std::sync::Arc<[u8]> = build_rom().into();
+    let mut player = ParamPlayer::new(rom, VOICEGROUP, 16);
+
+    player.set_track_params(
+        0,
+        &TrackParams {
+            attack: 7,
+            release: 9,
+            tone_override: false,
+            ..TrackParams::default()
+        },
+    );
+    let tone = player.tracks()[0].tone;
+    // The synthetic voicegroup's program 0: attack 255, release 200.
+    assert_eq!(tone.attack, 255, "the voicegroup's attack, not the param's");
+    assert_eq!(
+        tone.release, 200,
+        "the voicegroup's release, not the param's"
+    );
+
+    player.set_track_params(
+        0,
+        &TrackParams {
+            attack: 7,
+            release: 9,
+            tone_override: true,
+            ..TrackParams::default()
+        },
+    );
+    let tone = player.tracks()[0].tone;
+    assert_eq!(tone.attack, 7, "the override should now win");
+    assert_eq!(tone.release, 9, "the override should now win");
+}
+
+/// `VOICE` throws the program index away, so capture recovers it by matching the tone against the
+/// voicegroup. A tone that isn't in the voicegroup (i.e. an `XCMD` edited it) must report `None`
+/// rather than a wrong index — that's the signal to capture it as a tone override instead.
+#[test]
+fn program_of_recovers_the_voice_index_and_rejects_an_edited_tone() {
+    use optime_core::devices::gba::m4a::ToneData;
+    use optime_core::devices::gba::param_player::program_of;
+
+    let rom = build_rom();
+    let tone = ToneData::read(&rom, VOICEGROUP);
+    assert_eq!(
+        program_of(&rom, VOICEGROUP, &tone),
+        Some(0),
+        "program 0's own record must resolve back to 0"
+    );
+
+    let edited = ToneData {
+        attack: tone.attack.wrapping_sub(1),
+        ..tone
+    };
+    assert_eq!(
+        program_of(&rom, VOICEGROUP, &edited),
+        None,
+        "a tone no voicegroup entry matches means XCMD edited it"
+    );
+}
+
+/// The note stream must carry the sequence's own velocity.
+///
+/// `NoteStarted::volume` is the *envelope* level at note-on, which is 0 on GBA (an attack starts
+/// from silence) — so it can never stand in for velocity. A MIDI export needs the note's dynamic,
+/// and on GBA velocity is read per *channel*, so it stays right even when a track plays a chord
+/// (consecutive `N` commands in one frame, each with its own velocity).
+#[test]
+fn note_started_carries_the_sequences_velocity() {
+    let rom = build_rom();
+    let data: Box<dyn SoundData> = load_all(&rom).remove(0);
+    let mut player = data.make_player(0).expect("song 0 should load");
+    let config = PerDeviceSettings::neutral();
+    let mut feedback = optime_core::devices::TickFeedback::default();
+    let mut events = Vec::new();
+
+    // The track is `N24 key=60 vel=100`; find the note-on it produces.
+    let mut started = None;
+    for _ in 0..16 {
+        events.clear();
+        player.tick(&mut feedback, &config, &mut events);
+        for ev in &events {
+            if let optime_core::devices::SynthEvent::NoteStarted {
+                key,
+                velocity,
+                volume,
+                ..
+            } = ev
+            {
+                started = Some((*key, *velocity, *volume));
+            }
+        }
+        if started.is_some() {
+            break;
+        }
+    }
+
+    let (key, velocity, volume) = started.expect("the song's note should start");
+    assert_eq!(key, 60, "the key the track asked for");
+    assert_eq!(velocity, 100, "the velocity the track asked for");
+    assert_eq!(
+        volume, 0.0,
+        "and `volume` is the envelope's starting level — which is exactly why velocity is needed"
+    );
+}
+
+/// The note tap is what turns a playing song back into a MIDI clip: rip capture records what it
+/// reports. So it must produce a matched on/off pair carrying the sequence's real velocity, and it
+/// must be silent unless asked — plain playback must not pay for it.
+#[test]
+fn note_taps_report_the_songs_notes_with_velocity() {
+    let rom = build_rom();
+    let data: Box<dyn SoundData> = load_all(&rom).remove(0);
+    let sr = 32768.0;
+    let config = PerDeviceSettings::neutral();
+
+    // Off by default.
+    let mut quiet = SynthController::new(sr, &*data, 0).expect("song 0 should load");
+    let mut out = vec![0.0f32; 2 * (1.0 * sr) as usize];
+    quiet.fill(&mut out, &config);
+    assert_eq!(
+        quiet.take_note_taps().count(),
+        0,
+        "recording must be opt-in — plain playback taps nothing"
+    );
+
+    let mut controller = SynthController::new(sr, &*data, 0).expect("song 0 should load");
+    controller.set_record_notes(true);
+
+    // The song is `N24 key=60 vel=100` (24 steps ≈ 0.4 s at 1 step/frame), then FINE.
+    let mut out = vec![0.0f32; 2 * (1.0 * sr) as usize];
+    controller.fill(&mut out, &config);
+    let taps: Vec<_> = controller.take_note_taps().collect();
+
+    let ons: Vec<_> = taps.iter().filter(|t| t.velocity.is_some()).collect();
+    let offs: Vec<_> = taps.iter().filter(|t| t.velocity.is_none()).collect();
+    assert_eq!(ons.len(), 1, "one note-on: {taps:?}");
+    assert_eq!(offs.len(), 1, "and a matching note-off: {taps:?}");
+
+    assert_eq!(ons[0].track, 0);
+    assert_eq!(ons[0].key, 60, "the key the song plays");
+    assert_eq!(
+        ons[0].velocity,
+        Some(100),
+        "the velocity the song plays it at"
+    );
+    assert_eq!(offs[0].key, 60, "the off must name the same key");
+    assert!(
+        offs[0].frame > ons[0].frame,
+        "the note must end after it starts: on@{} off@{}",
+        ons[0].frame,
+        offs[0].frame
+    );
+
+    // Draining is destructive — a host performs each tap exactly once.
+    assert_eq!(controller.take_note_taps().count(), 0, "taps drain");
 }
 
 #[test]

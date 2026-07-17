@@ -585,6 +585,8 @@ impl DsePlayer {
             track,
             voice,
             key,
+            // The SMDL's own note velocity, before the program/split scaling folds it into volume.
+            velocity: velocity.min(127),
             waveform,
             pitch,
             volume: initial,
@@ -680,6 +682,10 @@ fn lfo_set_parameter(t: &mut DseTrack, param: u8, value: u8) {
 }
 
 impl crate::devices::DevicePlayer for DsePlayer {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn clock_rate(&self) -> f64 {
         crate::DS_CLOCK_RATE as f64
     }

@@ -1,6 +1,11 @@
-//! The app-wide visual theme: an iOS-dark palette applied to egui's style, plus small
-//! Apple-style widget helpers (list rows, section headers, circular icon buttons) shared by
-//! the mobile and desktop layouts.
+//! The shared visual theme: an iOS-dark palette applied to egui's style, plus small Apple-style
+//! widget helpers (list rows, section headers, circular icon buttons).
+//!
+//! This is egui-only on purpose. It is shared by two very different hosts — `optime-app` (eframe,
+//! native + web) and `optime-plug` (a VST3 rendering egui into a baseview window) — so it must not
+//! reach for eframe, winit, or an audio backend. Both must also link the *same* egui version:
+//! egui is pre-1.0, so 0.29 and 0.35 are different crates with different `Color32`/`Ui` types, and
+//! a mismatch would make this unshareable rather than merely awkward.
 
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, TextStyle, Vec2};
 
@@ -27,7 +32,7 @@ fn install_fonts(ctx: &egui::Context) {
 
     fonts.font_data.insert(
         "inter".to_owned(),
-        egui::FontData::from_static(include_bytes!("../assets/Inter-Regular.ttf")),
+        egui::FontData::from_static(include_bytes!("../assets/Inter-Regular.ttf")).into(),
     );
     let prop = fonts
         .families
@@ -46,9 +51,10 @@ fn install_fonts(ctx: &egui::Context) {
             "/Library/Fonts/SF-Pro.ttf",
         ] {
             if let Ok(bytes) = std::fs::read(candidate) {
-                fonts
-                    .font_data
-                    .insert("sf-pro".to_owned(), egui::FontData::from_owned(bytes));
+                fonts.font_data.insert(
+                    "sf-pro".to_owned(),
+                    egui::FontData::from_owned(bytes).into(),
+                );
                 fonts
                     .families
                     .get_mut(&egui::FontFamily::Proportional)
@@ -65,19 +71,22 @@ fn install_fonts(ctx: &egui::Context) {
 /// Applies the theme to the egui context (call once at startup).
 pub fn apply(ctx: &egui::Context) {
     install_fonts(ctx);
-    // Pin the app to dark mode: egui 0.29 keeps separate dark/light styles and follows the
-    // OS theme by default, which would swap in the stock light style on light-mode systems.
+    // Pin the app to dark mode: egui keeps separate dark/light styles and follows the OS theme
+    // by default, which would swap in the stock light style on light-mode systems.
     ctx.set_theme(egui::ThemePreference::Dark);
-    let mut style = (*ctx.style()).clone();
-
-    style.text_styles = [
-        (TextStyle::Heading, FontId::proportional(24.0)),
-        (TextStyle::Body, FontId::proportional(14.5)),
-        (TextStyle::Button, FontId::proportional(14.5)),
-        (TextStyle::Monospace, FontId::monospace(12.0)),
-        (TextStyle::Small, FontId::proportional(11.5)),
-    ]
-    .into();
+    // egui 0.35 removed `Context::style` (styles are per-theme now). Every field below is set
+    // explicitly, so the default is as good a starting point as the current style was.
+    let mut style = egui::Style {
+        text_styles: [
+            (TextStyle::Heading, FontId::proportional(24.0)),
+            (TextStyle::Body, FontId::proportional(14.5)),
+            (TextStyle::Button, FontId::proportional(14.5)),
+            (TextStyle::Monospace, FontId::monospace(12.0)),
+            (TextStyle::Small, FontId::proportional(11.5)),
+        ]
+        .into(),
+        ..Default::default()
+    };
 
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
@@ -89,8 +98,8 @@ pub fn apply(ctx: &egui::Context) {
     v.window_fill = CARD;
     v.extreme_bg_color = Color32::from_rgb(0x13, 0x13, 0x18);
     v.faint_bg_color = CARD;
-    v.window_rounding = 14.0.into();
-    v.menu_rounding = 12.0.into();
+    v.window_corner_radius = 14.0.into();
+    v.menu_corner_radius = 12.0.into();
     v.window_stroke = Stroke::new(1.0_f32, HAIRLINE);
     v.selection.bg_fill = ACCENT.linear_multiply(0.35);
     v.selection.stroke = Stroke::new(1.0_f32, ACCENT);
@@ -117,10 +126,10 @@ pub fn apply(ctx: &egui::Context) {
         &mut v.widgets.active,
         &mut v.widgets.open,
     ] {
-        w.rounding = 10.0.into();
+        w.corner_radius = 10.0.into();
     }
 
-    ctx.set_style(style);
+    ctx.all_styles_mut(move |s| *s = style.clone());
 }
 
 /// A small gray uppercase section header, iOS-grouped-list style.

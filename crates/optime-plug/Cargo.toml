@@ -1,0 +1,27 @@
+[package]
+name = "optime-plug"
+description = "Optime Player as a VST3 instrument: the GBA MP2K engine, driven by a DAW"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# `cdylib` is the plugin itself; `lib` keeps the crate unit-testable.
+crate-type = ["cdylib", "lib"]
+doctest = false
+
+[dependencies]
+# The plugin framework. ISC (so the workspace license holds) and exports VST3 — the community
+# successor to nih-plug, whose GPLv3 `vst3-sys` bindings would have forced a license change here.
+nice-plug = "0.1.10"
+# The editor. Required, not cosmetic: VST3 automation recording goes through `performEdit`, which
+# nice-plug only exposes via `GuiContext` — and a `GuiContext` only reaches a plugin through
+# `Editor::spawn`. It is also the only way to point the plugin at a ROM.
+nice-plug-egui = "0.2"
+egui = "0.35"
+# The shared theme, so the plugin looks like the app.
+optime-ui = { path = "../optime-ui" }
+optime-core = { path = "../optime-core" }
+# Native file dialog for picking the ROM (the app uses this too).
+rfd = "0.15"

@@ -45,6 +45,13 @@ pub enum SynthEvent {
         voice: VoiceId,
         /// The sounding MIDI key (drives the visualizer grid).
         key: u8,
+        /// How hard the note was struck (0..=127), as the sequence asked for it.
+        ///
+        /// Distinct from [`Self::NoteStarted::volume`], which is the *envelope's* level at note-on
+        /// and is typically 0 (an attack starts from silence). Velocity is the note's own dynamic:
+        /// it survives the envelope, so it is what a MIDI export has to record and what a DAW hands
+        /// back on the way in.
+        velocity: u8,
         /// The waveform to play.
         waveform: Arc<Waveform>,
         /// Initial pitch.

@@ -156,7 +156,10 @@ fn step(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], result: &mut F
 
 /// `MPlayMain`'s per-channel gate countdown for track `t`: expired gates begin the release; a
 /// channel the envelope already shut off (`statusFlags == 0`) is detached.
-fn gate_tick(si: &mut SoundInfo, t: usize) {
+///
+/// Note a gate of 0 is never counted down, so it holds until something else stops the channel —
+/// MP2K's tie (`0xCE`). That is the behavior [`super::param_player`] leans on for held MIDI notes.
+pub(crate) fn gate_tick(si: &mut SoundInfo, t: usize) {
     let tick = |c: &mut ChannelHdr| {
         if c.status() & SOUND_CHANNEL_SF_ON == 0 {
             c.set_track(None); // ClearChain
@@ -441,7 +444,7 @@ fn end_tie(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize) {
 }
 
 /// `ply_lfos` (`m4a_1.s:1887`): the per-step LFO ("mod") tick, folded into the `MPlayMain` step.
-fn lfo_step(tr: &mut MusicPlayerTrack) {
+pub(crate) fn lfo_step(tr: &mut MusicPlayerTrack) {
     if tr.lfoSpeed == 0 || tr.mod_ == 0 {
         return;
     }
@@ -472,24 +475,58 @@ fn lfo_step(tr: &mut MusicPlayerTrack) {
 
 /// `ply_note`: gate/key/velocity parsing, key-split / rhythm resolution, then DirectSound / CGB
 /// channel allocation into `SoundInfo` and note setup.
+///
+/// Split into [`ply_note_args`] (the operand parsing, which only the bytecode path has) and
+/// [`ply_note_with`] (everything else) so a note can also be started from outside the sequencer —
+/// the seam the VST3 plugin drives, where the DAW supplies key/velocity/gate instead of `cmdPtr`.
+/// The two are called back-to-back here, so this path behaves exactly as the single function did.
 fn ply_note(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize, n: u8) {
-    mp.tracks[t].gateTime = CLOCK_TABLE[n as usize];
+    let (key, velocity, gate_time) = ply_note_args(mp, rom, t, n);
+    ply_note_with(mp, si, rom, t, key, velocity, gate_time);
+}
+
+/// The operand half of `ply_note`: reads the optional key / velocity / gate-time bytes that follow a
+/// note command, advancing `cmdPtr` past each one present. An absent operand keeps the track's
+/// current value (MP2K's running status), which is why the defaults are read back off the track.
+fn ply_note_args(mp: &mut MusicPlayerInfo, rom: &[u8], t: usize, n: u8) -> (u8, u8, u8) {
+    let mut gate_time = CLOCK_TABLE[n as usize];
+    let mut key = mp.tracks[t].key;
+    let mut velocity = mp.tracks[t].velocity;
 
     let mut byte = read_u8(rom, mp.tracks[t].cmdPtr);
     if byte < 0x80 {
-        mp.tracks[t].key = byte;
+        key = byte;
         mp.tracks[t].cmdPtr += 1;
         byte = read_u8(rom, mp.tracks[t].cmdPtr);
         if byte < 0x80 {
-            mp.tracks[t].velocity = byte;
+            velocity = byte;
             mp.tracks[t].cmdPtr += 1;
             byte = read_u8(rom, mp.tracks[t].cmdPtr);
             if byte < 0x80 {
-                mp.tracks[t].gateTime = mp.tracks[t].gateTime.wrapping_add(byte);
+                gate_time = gate_time.wrapping_add(byte);
                 mp.tracks[t].cmdPtr += 1;
             }
         }
     }
+
+    (key, velocity, gate_time)
+}
+
+/// The engine half of `ply_note`: key-split / rhythm resolution, then DirectSound / CGB channel
+/// allocation into `SoundInfo` and note setup. Reference-faithful — `key`/`velocity`/`gate_time` are
+/// stored onto the track exactly as the operand parsing did before reading them back.
+pub(crate) fn ply_note_with(
+    mp: &mut MusicPlayerInfo,
+    si: &mut SoundInfo,
+    rom: &[u8],
+    t: usize,
+    key: u8,
+    velocity: u8,
+    gate_time: u8,
+) {
+    mp.tracks[t].gateTime = gate_time;
+    mp.tracks[t].key = key;
+    mp.tracks[t].velocity = velocity;
 
     // --- resolve the tone (key-split / rhythm sub-voicegroups) ---
     let played_key = mp.tracks[t].key;
@@ -673,7 +710,7 @@ fn alloc_direct_sound(si: &SoundInfo, priority: u8, track: usize) -> Option<usiz
 
 /// The end-of-frame `MPT_FLG_VOLCHG`/`PITCHG` pass (`MPlayMain` `_081DD9C4`): recompute track
 /// mixers ([`m4a::TrkVolPitSet`]) and refresh every channel's volume scaling and pitch.
-fn refresh_changed_tracks(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8]) {
+pub(crate) fn refresh_changed_tracks(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8]) {
     for t in 0..mp.tracks.len() {
         if !exists(&mp.tracks[t]) {
             continue;

@@ -279,6 +279,8 @@ impl NdsPlayer {
             track: t,
             voice,
             key: midi_note as u8,
+            // The SSEQ's own note velocity (0..=127), before any envelope.
+            velocity: velocity.clamp(0, 127) as u8,
             waveform,
             pitch: VoicePitch::Midi {
                 note: f64::from(midi_note),
@@ -454,6 +456,10 @@ impl NdsPlayer {
 }
 
 impl crate::devices::DevicePlayer for NdsPlayer {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn clock_rate(&self) -> f64 {
         crate::DS_CLOCK_RATE as f64
     }

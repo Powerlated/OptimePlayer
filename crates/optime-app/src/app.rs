@@ -1640,7 +1640,7 @@ impl OptimeApp {
             .constrain(true)
             .fixed_pos(egui::pos2(px, py))
             .show(ctx, |ui| {
-                egui::Frame::popup(&ctx.style()).show(ui, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(430.0);
                     ui.horizontal(|ui| {
                         let (s, e) = self.annotation.pending_range.unwrap_or((0, 0));
@@ -2349,8 +2349,14 @@ impl OptimeApp {
                 win,
                 0.0,
                 egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(170)),
+                egui::StrokeKind::Middle,
             );
-            painter.rect_stroke(bar, 2.0, egui::Stroke::new(1.0_f32, crate::theme::HAIRLINE));
+            painter.rect_stroke(
+                bar,
+                2.0,
+                egui::Stroke::new(1.0_f32, crate::theme::HAIRLINE),
+                egui::StrokeKind::Middle,
+            );
 
             if scrubbable {
                 // The playhead, so the bar reads as a transport rather than a thumbnail.
@@ -2434,7 +2440,7 @@ impl OptimeApp {
             let like_label = if liked { "💔 Unlike" } else { "❤ Like" };
             if ui.button(like_label).clicked() {
                 *action = Some(Action::Like(i));
-                ui.close_menu();
+                ui.close();
             }
             ui.menu_button("➕ Add to playlist", |ui| {
                 if playlists.is_empty() {
@@ -2443,7 +2449,7 @@ impl OptimeApp {
                 for (p, pl) in playlists.iter().enumerate() {
                     if ui.button(&pl.name).clicked() {
                         *action = Some(Action::Add(i, p));
-                        ui.close_menu();
+                        ui.close();
                     }
                 }
             });
@@ -3533,10 +3539,10 @@ impl OptimeApp {
 
     /// The compact phone layout: a bottom navigation bar (Now Playing / Library / Playlists /
     /// Settings) with a floating mini-player above it on every screen except Now Playing.
-    fn mobile_ui(&mut self, ctx: &egui::Context, snap: &VisSnapshot) {
-        egui::TopBottomPanel::top("m_meters")
+    fn mobile_ui(&mut self, ui: &mut egui::Ui, snap: &VisSnapshot) {
+        egui::Panel::top("m_meters")
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.allocate_ui_with_layout(
                         egui::vec2(220.0, 20.0),
@@ -3546,9 +3552,9 @@ impl OptimeApp {
                 });
             });
 
-        egui::TopBottomPanel::bottom("m_nav")
+        egui::Panel::bottom("m_nav")
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.add_space(4.0);
                 let tabs = [
                     (MobileTab::NowPlaying, "▶", "Playing"),
@@ -3602,21 +3608,21 @@ impl OptimeApp {
             });
 
         if self.mobile_tab != MobileTab::NowPlaying && self.current_song.is_some() {
-            egui::TopBottomPanel::bottom("m_mini")
+            egui::Panel::bottom("m_mini")
                 .show_separator_line(false)
                 .frame(
-                    egui::Frame::none()
+                    egui::Frame::NONE
                         .fill(crate::theme::BG)
-                        .inner_margin(egui::Margin::symmetric(10.0, 4.0)),
+                        .inner_margin(egui::Margin::symmetric(10, 4)),
                 )
-                .show(ctx, |ui| self.mini_player(ui));
+                .show(ui, |ui| self.mini_player(ui));
         }
 
         match self.mobile_tab {
-            MobileTab::NowPlaying => self.mobile_now_playing(ctx, snap),
-            MobileTab::Library => self.mobile_library(ctx),
+            MobileTab::NowPlaying => self.mobile_now_playing(ui, snap),
+            MobileTab::Library => self.mobile_library(ui),
             MobileTab::Playlists => {
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.heading("Playlists");
                         ui.add_space(4.0);
@@ -3625,7 +3631,7 @@ impl OptimeApp {
                 });
             }
             MobileTab::Settings => {
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         self.settings_ui(ui);
                         ui.separator();
@@ -3749,8 +3755,8 @@ impl OptimeApp {
 
     /// The full-screen Now Playing view: visualizer with animated swipe navigation plus the
     /// large transport.
-    fn mobile_now_playing(&mut self, ctx: &egui::Context, snap: &VisSnapshot) {
-        egui::TopBottomPanel::bottom("m_transport").show(ctx, |ui| {
+    fn mobile_now_playing(&mut self, ui: &mut egui::Ui, snap: &VisSnapshot) {
+        egui::Panel::bottom("m_transport").show(ui, |ui| {
             use crate::theme::icon_button;
             ui.add_space(8.0);
             // Title + status above the controls.
@@ -3850,12 +3856,12 @@ impl OptimeApp {
             ui.add_space(10.0);
         });
 
-        let card_frame = egui::Frame::none()
+        let card_frame = egui::Frame::NONE
             .fill(crate::theme::BG)
-            .inner_margin(egui::Margin::symmetric(10.0, 8.0));
+            .inner_margin(egui::Margin::symmetric(10, 8));
         egui::CentralPanel::default()
             .frame(card_frame)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 // The piano roll doubles as the album art; swipe horizontally to change songs.
                 // While dragging, the roll follows the finger; past the threshold the old song
                 // slides out and the next one slides in from the opposite edge, with the volume
@@ -3942,14 +3948,15 @@ impl OptimeApp {
                     rect,
                     12.0,
                     egui::Stroke::new(1.0_f32, crate::theme::HAIRLINE),
+                    egui::StrokeKind::Middle,
                 );
             });
     }
 
     /// The mobile library: file open, demo archives, and the song list. Selecting a song starts
     /// it in the mini-player rather than jumping to the visualizer.
-    fn mobile_library(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn mobile_library(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Library");
                 ui.add_space(6.0);
@@ -3988,7 +3995,7 @@ impl OptimeApp {
     /// widget. Otherwise each shortcut *consumes* its key so it can't also reach a background widget.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         // A focused text field (or any widget wanting keyboard input) inhibits all shortcuts.
-        if ctx.wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() {
             return;
         }
         let (prev, next, toggle) = ctx.input_mut(|i| {
@@ -4025,7 +4032,8 @@ impl eframe::App for OptimeApp {
         eframe::set_value(storage, eframe::APP_KEY, &self.p);
     }
 
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         self.ensure_audio(ctx);
         #[cfg(target_arch = "wasm32")]
         self.keep_audio_alive(ctx);
@@ -4070,8 +4078,8 @@ impl eframe::App for OptimeApp {
         self.stats_ui(ctx);
 
         // Narrow screens (phones) get the Spotify-style mobile layout.
-        if ctx.screen_rect().width() < 600.0 {
-            self.mobile_ui(ctx, &snap);
+        if ui.max_rect().width() < 600.0 {
+            self.mobile_ui(ui, &snap);
             // The animated piano roll lives on the Now Playing tab; the Library / Playlists /
             // Settings tabs are essentially static, so idle the repaint clock down to 1 Hz there
             // to save battery on phones. (The mini-player intentionally stops animating so it
@@ -4087,11 +4095,11 @@ impl eframe::App for OptimeApp {
             return;
         }
 
-        egui::SidePanel::left("songs")
+        egui::Panel::left("songs")
             .resizable(true)
-            .default_width(260.0)
-            .width_range(200.0..=600.0)
-            .show(ctx, |ui| {
+            .default_size(260.0)
+            .size_range(200.0..=600.0)
+            .show(ui, |ui| {
                 ui.heading("Optime Player");
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
@@ -4127,7 +4135,7 @@ impl eframe::App for OptimeApp {
                     });
             });
 
-        egui::TopBottomPanel::top("transport").show(ctx, |ui| {
+        egui::Panel::top("transport").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let pause_label = if self.paused {
                     "▶ Resume"
@@ -4216,22 +4224,22 @@ impl eframe::App for OptimeApp {
             });
         });
 
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+        egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
             });
         });
 
-        egui::SidePanel::right("settings")
-            .default_width(240.0)
-            .width_range(220.0..=340.0)
-            .show(ctx, |ui| {
+        egui::Panel::right("settings")
+            .default_size(240.0)
+            .size_range(220.0..=340.0)
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     self.settings_ui(ui);
                 });
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.vis_tab, VisTab::PianoRoll, "🎹 Piano Roll");
                 ui.selectable_value(&mut self.vis_tab, VisTab::Tracks, "Tracks");

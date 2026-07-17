@@ -6,6 +6,8 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/optime-core/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/optime-core/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/optime-core/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/optime-plug/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/optime-ui/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

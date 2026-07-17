@@ -1,0 +1,17 @@
+[package]
+name = "optime-ui"
+description = "Shared egui theme and widgets for the Optime Player app and VST3 plugin."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+# egui only — deliberately no eframe/cpal/winit. The plugin hosts egui through a baseview window
+# (via `nice-plug-egui`), not through eframe, so anything windowing-related here would not be
+# shareable. The egui version must match the one `nice-plug-egui` links, or the two crates' types
+# (`Color32`, `Ui`, …) are distinct and nothing composes.
+egui = "0.35"

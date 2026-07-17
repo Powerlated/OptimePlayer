@@ -73,6 +73,21 @@ struct SlotOwner {
     key: u8,
 }
 
+/// A note the running device started or ended, and where it landed in the block just rendered.
+///
+/// This exists for hosts that record what the engine plays — the VST3 plugin's rip capture, which
+/// turns a song back into a MIDI clip. Nothing in the synthesis path reads it; recording is off
+/// unless [`SynthController::set_record_notes`] turns it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoteTap {
+    /// Sample offset within the block the producing [`SynthController::fill`] rendered.
+    pub frame: u32,
+    pub track: usize,
+    pub key: u8,
+    /// `Some(velocity)` = the note started; `None` = it ended.
+    pub velocity: Option<u8>,
+}
+
 /// `slot_owner[track][pool_slot]` — which device voice occupies each synthesizer voice in a set.
 type SlotOwners = Vec<Vec<Option<SlotOwner>>>;
 
@@ -423,6 +438,16 @@ pub struct SynthController {
     bank: Bank,
     /// `notes_on[track][note]` is 1 while a sequence note sounds (drives the visualizer).
     pub notes_on: Vec<[u8; 128]>,
+    /// Note starts/ends observed while [`Self::set_record_notes`] is on. Off by default: the cost
+    /// is only paid by a host that wants to record the notes back out.
+    note_taps: Vec<NoteTap>,
+    record_notes: bool,
+    /// `notes_on` as of the previous tick, for diffing.
+    note_shadow: Vec<[u8; 128]>,
+    /// The velocity each sounding note started with, so a tap can report it.
+    note_velocity: Vec<[u8; 128]>,
+    /// Which block offset the ticks currently being run belong to.
+    tap_frame: u32,
     /// The loop-count → fade-out policy and the per-sample fade gain it applies to the output.
     transition: Transition,
     /// High-level [`PlaybackEvent`]s pumped to the consumer (drained by [`Self::take_messages`]).
@@ -451,11 +476,22 @@ impl SynthController {
     ///
     /// Returns `None` if the song is missing or malformed.
     pub fn new(sample_rate: f64, data: &dyn SoundData, song_id: u32) -> Option<SynthController> {
-        let player = data.make_player(song_id)?;
+        Some(SynthController::with_player(
+            sample_rate,
+            data.make_player(song_id)?,
+        ))
+    }
+
+    /// Drives an already-built `player` at `sample_rate`.
+    ///
+    /// [`Self::new`] covers the archive-backed case (a `SoundData` plus a song id). This is for
+    /// players that aren't a song in an archive at all — the VST3 plugin's parameter-driven GBA
+    /// player, which has a ROM for its samples but no sequence to bind.
+    pub fn with_player(sample_rate: f64, player: Box<dyn DevicePlayer>) -> SynthController {
         let mixer_rate = 48_000.0;
         let (synths, slot_owner) = new_synth_set(sample_rate);
         let (mixer_synths, mixer_slot_owner) = new_synth_set(mixer_rate);
-        Some(SynthController {
+        SynthController {
             sample_rate,
             player,
             synths,
@@ -464,6 +500,13 @@ impl SynthController {
             mixer_slot_owner,
             bank: Bank::new(mixer_rate),
             notes_on: vec![[0u8; 128]; TRACK_COUNT],
+            // Sized generously so a capture never allocates on the audio thread; a tick produces a
+            // handful of transitions at most.
+            note_taps: Vec::with_capacity(256),
+            record_notes: false,
+            note_shadow: vec![[0u8; 128]; TRACK_COUNT],
+            note_velocity: vec![[0u8; 128]; TRACK_COUNT],
+            tap_frame: 0,
             transition: Transition::new(sample_rate, LoopAndTransitionOptions::none()),
             messages: Vec::new(),
             feedback: TickFeedback::default(),
@@ -476,7 +519,65 @@ impl SynthController {
             psg_comp_r: psg_comp_filter(sample_rate),
             psg_comp_was_active: false,
             reverb: Reverb::new(),
-        })
+        }
+    }
+
+    /// Records the notes the device plays, for a host that wants them back (the VST3 plugin's rip
+    /// capture). Off by default — plain playback never pays for it.
+    ///
+    /// Turning it on resets the diff against the currently sounding notes, so a capture that starts
+    /// mid-song reports the notes that begin *after* it, not a burst of everything already held.
+    pub fn set_record_notes(&mut self, on: bool) {
+        self.record_notes = on;
+        self.note_taps.clear();
+        self.note_shadow.clone_from(&self.notes_on);
+    }
+
+    /// Drains the notes started/ended since the last call. See [`NoteTap`].
+    pub fn take_note_taps(&mut self) -> std::vec::Drain<'_, NoteTap> {
+        self.note_taps.drain(..)
+    }
+
+    /// Diffs `notes_on` against the previous tick and records what changed.
+    ///
+    /// Diffing the flag rather than tapping the individual events is deliberate: `notes_on` is
+    /// cleared from four places (a round-robin steal, `VoiceStopped`, `NoteReleased`, and a
+    /// one-shot running out in `cut_finished`), and a note that ends by any of them must produce a
+    /// note-off or the host is left holding it forever. One diff catches all four and cannot
+    /// double-report.
+    ///
+    /// It inherits `notes_on`'s one limitation: it is a per-key flag, not a count, so a track
+    /// sounding the same key on two voices at once collapses to one note — and a key that stops and
+    /// restarts inside a single tick reads as no change at all.
+    fn tap_notes(&mut self) {
+        if !self.record_notes {
+            return;
+        }
+        for track in 0..self.notes_on.len() {
+            for key in 0..128 {
+                let now = self.notes_on[track][key];
+                if now == self.note_shadow[track][key] {
+                    continue;
+                }
+                self.note_shadow[track][key] = now;
+                self.note_taps.push(NoteTap {
+                    frame: self.tap_frame,
+                    track,
+                    key: key as u8,
+                    velocity: (now != 0).then(|| self.note_velocity[track][key]),
+                });
+            }
+        }
+    }
+
+    /// The device player being driven, for a caller that needs to keep feeding it.
+    ///
+    /// Most players are self-driving (a sequencer walking a song), so nothing needs this. The
+    /// GBA's parameter-driven player is not: its notes and registers arrive from a DAW every block,
+    /// and the controller owns it. Downcast via
+    /// [`as_any_mut`](crate::devices::DevicePlayer::as_any_mut) to reach the console-specific API.
+    pub fn player_mut(&mut self) -> &mut dyn DevicePlayer {
+        self.player.as_mut()
     }
 
     /// Applies the master high-shelf EQ to one final stereo sample (a transparent pass when the
@@ -700,6 +801,7 @@ impl SynthController {
             // First sample of the block: advance the clock and run any due ticks (mirroring
             // `next_sample`'s ordering: the tick fires before the sample is synthesized).
             self.timer += clock;
+            self.tap_frame = frame as u32;
             while self.timer >= threshold {
                 self.timer -= threshold;
                 self.tick(config);
@@ -799,6 +901,8 @@ impl SynthController {
             self.apply_event(event, config);
         }
         self.events = events;
+
+        self.tap_notes();
     }
 
     /// Locates the set and pool slot owning device voice `voice` on `track`: `true` ⇒ the mixer
@@ -828,6 +932,10 @@ impl SynthController {
                 track,
                 voice,
                 key,
+                // The synth layer plays only the level it is told — the device already folded
+                // velocity into that volume. Velocity is kept for consumers that need the note's
+                // *intent* rather than its level: rip capture records it, ml harvests it.
+                velocity,
                 waveform,
                 pitch,
                 volume,
@@ -846,6 +954,7 @@ impl SynthController {
                     self.feedback.ended_voices.push((track, old.voice));
                 }
                 self.notes_on[track][key as usize] = 1;
+                self.note_velocity[track][key as usize] = velocity;
             }
             SynthEvent::VoiceVolume {
                 track,

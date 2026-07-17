@@ -254,6 +254,27 @@ impl Grid {
     }
 }
 
+/// This frame's scroll delta, **unsmoothed**.
+///
+/// egui 0.35 removed `InputState::raw_scroll_delta` and made its wheel state private, leaving only
+/// the smoothed `smooth_scroll_delta`. [`View`] runs its own easing, so egui's smoothing on top of
+/// it would read as lag — hence summing the wheel events directly. Units are normalized exactly as
+/// egui's own `WheelState` does: points as-is, lines by the user's `line_scroll_speed`, pages by
+/// the viewport height.
+fn raw_scroll_delta(i: &egui::InputState, line_scroll_speed: f32) -> egui::Vec2 {
+    let page = i.raw.screen_rect.map_or(0.0, |r| r.height());
+    i.events.iter().fold(egui::Vec2::ZERO, |acc, e| match e {
+        egui::Event::MouseWheel { unit, delta, .. } => {
+            acc + match unit {
+                egui::MouseWheelUnit::Point => *delta,
+                egui::MouseWheelUnit::Line => *delta * line_scroll_speed,
+                egui::MouseWheelUnit::Page => *delta * page,
+            }
+        }
+        _ => acc,
+    })
+}
+
 impl PianoRoll {
     /// Resets the roll for a new song.
     pub fn clear(&mut self) {
@@ -574,6 +595,7 @@ impl PianoRoll {
                             1.0_f32,
                             scale_alpha(lighten(fill, if now { 0.55 } else { 0.25 }), dim),
                         ),
+                        egui::StrokeKind::Middle,
                     );
                 }
             } else if x0 >= strip.min.x {
@@ -631,6 +653,7 @@ impl PianoRoll {
                     1.5_f32,
                     Color32::from_rgba_unmultiplied(0xbf, 0xd8, 0xff, 235),
                 ),
+                egui::StrokeKind::Middle,
             );
         }
     }
@@ -664,11 +687,13 @@ impl PianoRoll {
     /// middle/secondary drag pan.
     fn handle_view_input(&mut self, ui: &egui::Ui, resp: &egui::Response, roll: Rect) {
         let hovered = resp.hovered();
+        // Needed to normalize wheel units; read before borrowing the input state.
+        let line_scroll_speed = ui.ctx().options(|o| o.input_options.line_scroll_speed);
         let (scroll, zoom_gesture, shift, pointer) = ui.input(|i| {
             (
                 // Raw, not smoothed: we run our own easing, and stacking egui's smoothing on top of
-                // it would read as lag.
-                i.raw_scroll_delta,
+                // it would read as lag. See `raw_scroll_delta`.
+                raw_scroll_delta(i, line_scroll_speed),
                 i.zoom_delta(),
                 i.modifiers.shift,
                 i.pointer.hover_pos(),
@@ -827,6 +852,7 @@ impl PianoRoll {
                     bar,
                     rounding,
                     Stroke::new(1.0_f32, scale_alpha(Color32::WHITE, 0.35 * dim)),
+                    egui::StrokeKind::Middle,
                 );
             }
         }
@@ -952,6 +978,9 @@ pub fn overview_image(overview: &SongOverview, width: usize, height: usize) -> C
     }
     ColorImage {
         size: [w, h],
+        // Only meaningful for images rasterized from a vector source; this grid is drawn directly
+        // at its final size, so the source size is the texel size.
+        source_size: egui::vec2(w as f32, h as f32),
         pixels,
     }
 }

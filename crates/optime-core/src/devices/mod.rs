@@ -150,6 +150,14 @@ pub trait DevicePlayer: Send {
     fn tick_rate(&self) -> f64 {
         self.clock_rate() / self.cycles_per_tick()
     }
+
+    /// Downcast hook for driving a console-specific player that a caller *owns the far end of*.
+    ///
+    /// Same rule as [`SoundData::as_any`]: console-specific operations stay off this trait, and a
+    /// caller that needs one downcasts. The GBA's parameter-driven player is the case that wants it
+    /// — the [`SynthController`](crate::SynthController) owns the `Box<dyn DevicePlayer>`, but the
+    /// VST3 plugin still has to push each block's notes and parameters into it.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 /// Parses every sound archive found in `bytes` (`.nds`/`.sdat` containers, a DSE ROM, or a

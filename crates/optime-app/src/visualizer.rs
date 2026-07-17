@@ -87,6 +87,7 @@ pub fn draw(ui: &mut egui::Ui, snap: &VisSnapshot, track_enables: &mut [bool; TR
             toggle_rect,
             2.0,
             Stroke::new(1.0_f32, alpha(Color32::BLACK)),
+            egui::StrokeKind::Middle,
         );
 
         // White keys (background + lit).
@@ -104,7 +105,12 @@ pub fn draw(ui: &mut egui::Ui, snap: &VisSnapshot, track_enables: &mut [bool; TR
                 Vec2::new(WHITE_W - 1.0, WHITE_H),
             );
             painter.rect_filled(key_rect, 0.0, alpha(Color32::WHITE));
-            painter.rect_stroke(key_rect, 0.0, Stroke::new(0.5_f32, alpha(Color32::GRAY)));
+            painter.rect_stroke(
+                key_rect,
+                0.0,
+                Stroke::new(0.5_f32, alpha(Color32::GRAY)),
+                egui::StrokeKind::Middle,
+            );
             if snap.notes_on[track][midi] {
                 painter.rect_filled(key_rect, 0.0, alpha(Color32::BLACK));
             }
