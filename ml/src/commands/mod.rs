@@ -4,6 +4,7 @@
 
 pub mod opts;
 
+pub mod dashboard;
 pub mod eval_real;
 pub mod generate_data;
 pub mod infer;

@@ -40,6 +40,8 @@ enum Command {
     Probe(commands::probe::ProbeArgs),
     /// Size the token/polyphony caps from the real corpus.
     TokenStats,
+    /// Serve the dashboard with dummy data, for visual testing (no training).
+    Dashboard(commands::dashboard::DashboardArgs),
 
     /// Harvest real game songs into unlabeled note-event windows (needs `harvest`).
     #[cfg(feature = "harvest")]
@@ -68,6 +70,7 @@ fn main() {
         Command::Infer(a) => commands::infer::run(a),
         Command::Probe(a) => commands::probe::run(a),
         Command::TokenStats => commands::token_stats::run(),
+        Command::Dashboard(a) => commands::dashboard::run(a),
 
         #[cfg(feature = "harvest")]
         Command::Harvest(a) => commands::harvest::run(a),
