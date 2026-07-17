@@ -123,6 +123,27 @@
   .empty { color: var(--text-muted); padding: 22px 0; text-align: center; font-size: 13px; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text-secondary); }
   .meta-line { color: var(--text-muted); font-size: 12px; margin-top: 10px; }
+
+  /* Architecture diagram: reuses the validated palette from above. Series-1 (blue)
+     tints the learned trunk + heads, neutral surface the input/hand-feature stages;
+     every label wears a text token, never a series color (identity is by position). */
+  .diagram { width: 100%; height: auto; display: block; }
+  .dg-box { fill: var(--surface-1); stroke: var(--border); stroke-width: 1; }
+  .dg-box.accent { stroke: color-mix(in srgb, var(--series-1) 50%, var(--border)); }
+  .dg-box.trunk { fill: color-mix(in srgb, var(--series-1) 7%, var(--surface-1));
+                  stroke: color-mix(in srgb, var(--series-1) 45%, var(--border)); }
+  .dg-title { fill: var(--text-primary); font-size: 12px; font-weight: 600; }
+  .dg-tag { fill: var(--text-muted); font-size: 10px; font-weight: 600; letter-spacing: .05em; }
+  .dg-sub { fill: var(--text-secondary); font-size: 10.5px; }
+  .dg-shape { fill: var(--text-muted); font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .dg-chip { fill: var(--surface-0); stroke: var(--border); stroke-width: 1; }
+  .dg-chip-text { fill: var(--text-secondary); font-size: 9.5px; }
+  .dg-layer { fill: color-mix(in srgb, var(--series-1) 15%, var(--surface-1));
+              stroke: color-mix(in srgb, var(--series-1) 40%, var(--border)); stroke-width: 1; }
+  .dg-layer-text { fill: var(--text-secondary); font-size: 9.5px; }
+  .dg-flow { stroke: var(--text-muted); stroke-width: 1.5; fill: none; }
+  .dg-arrow { fill: var(--text-muted); }
+  .dg-caption { fill: var(--text-secondary); font-size: 10.5px; }
 </style>
 </head>
 <body>

@@ -106,6 +106,210 @@ function niceTicks(min, max, count = 5) {
   return out;
 }
 
+/** Downward arrowhead triangle (points string) tipping at (x, y). */
+function dgArrow(x, y) {
+  return `${x - 4},${y - 7} ${x + 4},${y - 7} ${x},${y}`;
+}
+
+/**
+ * Lay out the model as a top-to-bottom data-flow diagram, sized from the run's own
+ * `RunMeta` so the dimensions can't drift from the model. The three backbones differ
+ * only in the note-window → frame-token stage; the RoPE trunk and the factored
+ * root/quality/key heads below it are shared, and drawn once.
+ *
+ * Returns absolute SVG geometry (a `viewBox` of `W × H`, stage boxes, connectors with
+ * tensor-shape labels, the head fan-out, and a mode caption) — the component just
+ * renders it. Pure function of `meta`, recomputed when the run reports.
+ */
+function buildDiagram(meta) {
+  const cfg = meta.model_config || {};
+  const bb = meta.backbone || 'frame';
+  const d = cfg.d_model ?? 128;
+  const L = cfg.n_layers ?? 4;
+  const nh = cfg.n_heads ?? 4;
+  const ff = cfg.d_ff ?? 512;
+  const T = meta.context?.tokens ?? cfg.n_frames ?? cfg.max_seq_len ?? 256;
+  const beats = Math.round(meta.context?.beats ?? T / 4);
+  const notes = meta.data?.notes_per_window ? Math.round(meta.data.notes_per_window) : null;
+  const pretrain = /pretrain/i.test(meta.stage || '');
+
+  const W = 920, spineW = 544, spineX = (W - spineW) / 2, cx = W / 2;
+  const contentX = spineX + 16, contentW = spineW - 32;
+  const fields = ['pitch', 'pc', 'channel', 'velocity', 'pan', 'duration', 'role'];
+
+  // The one backbone-specific stage: how a note window becomes one token per frame.
+  let enc;
+  if (bb === 'event') {
+    enc = {
+      tag: 'm01 · event', title: 'Frame tokens — scatter-add pool',
+      subs: ['7 field embeddings → Σ per note → φ = Linear ' + d + '→' + d + ' (GELU)',
+             'each note added into its onset-frame row → one token/frame'],
+      chips: fields,
+    };
+  } else if (bb === 'hier') {
+    enc = {
+      tag: 'm02 · hier', title: 'Frame tokens — set transformer',
+      subs: ['per-frame SET of sounding notes (≤16, attack/held flag)',
+             'CLS-attention pool · ' + (cfg.n_sub_layers ?? 1) + ' layer · ' + nh + ' heads · ff ' + (cfg.sub_d_ff ?? 256)],
+      chips: fields.concat(['attack/held']),
+    };
+  } else {
+    enc = {
+      tag: 'm00 · frame', title: 'Hand-engineered feature grid',
+      subs: ['4 pitch-class blocks (L2-normed) + 9 scalars = 57 dims',
+             'Linear 57 → ' + d + ' per frame'],
+      chips: ['chroma 12', 'bass 12', 'melody 12', 'onset 12', 'scalars 9'],
+    };
+  }
+  const trunkMode = pretrain
+    ? (bb === 'frame' ? 'bidirectional · masked-frame pretext' : 'causal · AR next-frame pretext')
+    : 'bidirectional encoder (fine-tune)';
+
+  const spine = [], connectors = [];
+  let top = 6;
+
+  // Stack one stage box, growing its height to fit subs + chips/layer cells.
+  function place(spec) {
+    const subH = 14, padBot = 14;
+    const titleY = top + (spec.tag ? 28 : 20);
+    const subs = (spec.subs || []).map((t, i) => ({ x: contentX, y: titleY + 18 + i * subH, text: t }));
+    let bottom = subs.length ? titleY + 18 + (subs.length - 1) * subH : titleY;
+
+    const chips = [];
+    if (spec.chips) {
+      let x = contentX, rowY = bottom + 12;
+      for (const t of spec.chips) {
+        const w = Math.round(t.length * 5.6) + 16;
+        if (x > contentX && x + w > contentX + contentW) { x = contentX; rowY += 25; }
+        chips.push({ x, y: rowY, w, h: 19, tx: x + w / 2, ty: rowY + 13, text: t });
+        x += w + 6;
+      }
+      bottom = rowY + 19;
+    }
+
+    const layers = [];
+    if (spec.layers) {
+      const n = Math.min(L, 16), rowY = bottom + 12, cw = (contentW - (n - 1) * 5) / n;
+      for (let i = 0; i < n; i++) {
+        const x = contentX + i * (cw + 5);
+        layers.push({ x, y: rowY, w: cw, h: 22, tx: x + cw / 2, ty: rowY + 15, text: String(i + 1) });
+      }
+      bottom = rowY + 22;
+    }
+
+    const h = bottom + padBot - top;
+    spine.push({
+      tone: spec.tone || 'neutral',
+      rect: { x: spineX, y: top, w: spineW, h },
+      tag: spec.tag ? { x: contentX, y: top + 16, text: spec.tag } : null,
+      title: { x: contentX, y: titleY, text: spec.title },
+      subs, chips, layers,
+    });
+    return top + h;
+  }
+
+  function connect(fromBottom, toTop, label) {
+    connectors.push({
+      x1: cx, y1: fromBottom, x2: cx, y2: toTop - 8,
+      arrow: dgArrow(cx, toTop - 1),
+      label, lx: cx + 14, ly: (fromBottom + toTop) / 2 + 3,
+    });
+  }
+
+  let bottom = place({
+    title: 'Note-event window',
+    subs: ['per note: pitch · velocity · channel · pan · onset' + (notes ? '   (~' + notes + ' notes)' : ''),
+           T + ' frames = ' + beats + ' beats (4 frames/beat)'],
+  });
+
+  top = bottom + 44;
+  connect(bottom, top, 'note events');
+  bottom = place({ tone: 'accent', tag: enc.tag, title: enc.title, subs: enc.subs, chips: enc.chips });
+
+  top = bottom + 44;
+  connect(bottom, top, '[B, ' + T + ', ' + d + ']');
+  bottom = place({
+    tone: 'trunk', title: 'RoPE Transformer trunk',
+    subs: [L + ' layers · ' + nh + ' heads · d_ff ' + ff + ' · pre-norm MHA (RoPE on Q,K) + FFN', trunkMode],
+    layers: true,
+  });
+
+  // The three heads fan out from the trunk through a shared bus line.
+  const trunkBottom = bottom, busY = trunkBottom + 26, headsTop = trunkBottom + 56;
+  const headW = 170, headH = 84, gap = 17, headsX = cx - (3 * headW + 2 * gap) / 2;
+  const headDefs = [
+    { title: 'Root head', subs: ['Linear ' + d + ' → 13', 'per frame'], shape: '[B, ' + T + ', 13]' },
+    { title: 'Quality head', subs: ['Linear ' + d + ' → 11', 'per frame'], shape: '[B, ' + T + ', 11]' },
+    { title: 'Key head', subs: ['mean-pool → Linear ' + d + '→24', 'one / window'], shape: '[B, 24]' },
+  ];
+  const heads = [], headLinks = [{ d: `M${cx},${trunkBottom} L${cx},${busY}` }];
+  headDefs.forEach((hd, i) => {
+    const x = headsX + i * (headW + gap), c = x + headW / 2;
+    headLinks.push({ d: `M${cx},${busY} L${c},${busY} L${c},${headsTop - 8}`, arrow: dgArrow(c, headsTop - 1) });
+    heads.push({
+      rect: { x, y: headsTop, w: headW, h: headH },
+      title: { x: c, y: headsTop + 20, text: hd.title },
+      subs: hd.subs.map((t, j) => ({ x: c, y: headsTop + 38 + j * 14, text: t })),
+      shape: { x: c, y: headsTop + headH - 10, text: hd.shape },
+    });
+  });
+
+  const capY = headsTop + headH + 20;
+  const caption = {
+    x: cx, y: capY,
+    text: pretrain
+      ? 'pretraining — ' + (bb === 'frame' ? 'masked-frame reconstruction' : 'AR heads predict next frame (pc + channel)') + '; chord/key heads idle'
+      : 'root ⊗ quality ⇒ 121-way chord per frame   ·   key = 24 (12 tonic × 2 mode), pooled over the window',
+  };
+
+  return { W, H: capY + 14, spine, connectors, heads, headLinks, caption };
+}
+
+/** The architecture diagram: a static SVG data-flow, dimensions live from the run. */
+const ModelDiagram = {
+  props: { meta: { type: Object, required: true } },
+  setup(props) {
+    return { dg: computed(() => buildDiagram(props.meta)) };
+  },
+  template: `
+    <svg class="diagram" :viewBox="'0 0 ' + dg.W + ' ' + dg.H" role="img"
+         aria-label="model architecture data-flow diagram">
+      <g v-for="(c, i) in dg.connectors" :key="'c' + i">
+        <line class="dg-flow" :x1="c.x1" :y1="c.y1" :x2="c.x2" :y2="c.y2" />
+        <polygon class="dg-arrow" :points="c.arrow" />
+        <text class="dg-shape" :x="c.lx" :y="c.ly">{{ c.label }}</text>
+      </g>
+      <g v-for="(l, i) in dg.headLinks" :key="'hl' + i">
+        <path class="dg-flow" :d="l.d" />
+        <polygon v-if="l.arrow" class="dg-arrow" :points="l.arrow" />
+      </g>
+      <g v-for="(bx, i) in dg.spine" :key="'b' + i">
+        <rect class="dg-box" :class="bx.tone" :x="bx.rect.x" :y="bx.rect.y"
+              :width="bx.rect.w" :height="bx.rect.h" rx="8" />
+        <text v-if="bx.tag" class="dg-tag" :x="bx.tag.x" :y="bx.tag.y">{{ bx.tag.text }}</text>
+        <text class="dg-title" :x="bx.title.x" :y="bx.title.y">{{ bx.title.text }}</text>
+        <text v-for="(s, j) in bx.subs" :key="'s' + j" class="dg-sub" :x="s.x" :y="s.y">{{ s.text }}</text>
+        <g v-for="(ch, j) in bx.chips" :key="'ch' + j">
+          <rect class="dg-chip" :x="ch.x" :y="ch.y" :width="ch.w" :height="ch.h" rx="5" />
+          <text class="dg-chip-text" text-anchor="middle" :x="ch.tx" :y="ch.ty">{{ ch.text }}</text>
+        </g>
+        <g v-for="(ly, j) in bx.layers" :key="'ly' + j">
+          <rect class="dg-layer" :x="ly.x" :y="ly.y" :width="ly.w" :height="ly.h" rx="4" />
+          <text class="dg-layer-text" text-anchor="middle" :x="ly.tx" :y="ly.ty">{{ ly.text }}</text>
+        </g>
+      </g>
+      <g v-for="(hd, i) in dg.heads" :key="'h' + i">
+        <rect class="dg-box accent" :x="hd.rect.x" :y="hd.rect.y"
+              :width="hd.rect.w" :height="hd.rect.h" rx="8" />
+        <text class="dg-title" text-anchor="middle" :x="hd.title.x" :y="hd.title.y">{{ hd.title.text }}</text>
+        <text v-for="(s, j) in hd.subs" :key="'s' + j" class="dg-sub" text-anchor="middle"
+              :x="s.x" :y="s.y">{{ s.text }}</text>
+        <text class="dg-shape" text-anchor="middle" :x="hd.shape.x" :y="hd.shape.y">{{ hd.shape.text }}</text>
+      </g>
+      <text class="dg-caption" text-anchor="middle" :x="dg.caption.x" :y="dg.caption.y">{{ dg.caption.text }}</text>
+    </svg>`,
+};
+
 /**
  * Line plot with a crosshair + tooltip hover layer.
  *
@@ -237,7 +441,7 @@ const LinePlot = {
 };
 
 createApp({
-  components: { LinePlot },
+  components: { LinePlot, ModelDiagram },
   setup() {
     const state = ref(null);
     const error = ref(null);
@@ -422,6 +626,14 @@ createApp({
           </table>
         </div>
         <div v-else class="empty">first epoch still running</div>
+      </div>
+
+      <div class="card">
+        <h2>Architecture</h2>
+        <p class="hint">Data flow for the <strong>{{ meta.backbone }}</strong> backbone — note-event
+          window to the factored chord + key heads. Only the frame-token stage differs by backbone;
+          the RoPE trunk and heads are shared. Dimensions are read from the run's own config.</p>
+        <model-diagram :meta="meta" />
       </div>
 
       <div class="card">
