@@ -345,14 +345,14 @@ impl PerDeviceSettings {
             mixer_resample: MixerResampleSettings {
                 choice: InstrumentResampleChoice::SincOutputNyquist,
                 sinc_taps: 32,
-                cutoff_hz: 15_000,
+                cutoff_hz: 13379,
             },
             shelf: HighShelf {
                 enabled: true,
                 order: 6,
-                q: 0.5,
-                cutoff_hz: 15000.0,
-                gain_db: -20.0,
+                q: 0.707,
+                cutoff_hz: 14000.0,
+                gain_db: -24.0,
             },
             track_enables: all_tracks_enabled(),
         }
