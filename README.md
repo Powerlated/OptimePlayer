@@ -18,3 +18,7 @@ Song-title data for the in-app library:
 
  * **Pokémon Emerald** — track titles follow the official *Pokémon Ruby, Pokémon Sapphire & Pokémon Emerald: Super Music Collection*, mapped to song ids via [pret/pokeemerald](https://github.com/pret/pokeemerald).
  * **Mother 3** — English Sound Player track names are from the [MOTHER 3 Fan Translation](https://mother3.fobby.net/) by the MOTHER 3 Fan Translation Team (Tomato/Jeffman et al.), paired with each track's in-game song id from the Sound Player's slot table in the ROM.
+
+Vendored third-party code:
+
+ * **[Vue.js](https://vuejs.org/)** (MIT, © Yuxi "Evan" You and Vue contributors) — the global build is vendored verbatim at `ml/dashboard/vendor/vue.global.prod.js` so the ML training dashboard serves itself with no build step and no CDN fetch.

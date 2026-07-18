@@ -1,0 +1,646 @@
+{
+  "schemaVersion": 1,
+  "source": "pokemon-emerald.gbaaudio",
+  "gameCode": "BPEE",
+  "stepsPerBeat": 24.0,
+  "songs": [
+    {
+      "songId": 359,
+      "beatsPerBar": 4,
+      "gridOffsetSteps": 13,
+      "spans": [
+        {
+          "startStep": 13,
+          "endStep": 109,
+          "chord": {
+            "root": 2,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 109,
+          "endStep": 205,
+          "chord": {
+            "root": 4,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 205,
+          "endStep": 301,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 301,
+          "endStep": 397,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 397,
+          "endStep": 493,
+          "chord": {
+            "root": 2,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 493,
+          "endStep": 589,
+          "chord": {
+            "root": 4,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 589,
+          "endStep": 685,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 685,
+          "endStep": 781,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 781,
+          "endStep": 877,
+          "chord": {
+            "root": 7,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 877,
+          "endStep": 973,
+          "chord": {
+            "root": 2,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 973,
+          "endStep": 1069,
+          "chord": {
+            "root": 4,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1069,
+          "endStep": 1165,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1165,
+          "endStep": 1261,
+          "chord": {
+            "root": 7,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1261,
+          "endStep": 1357,
+          "chord": {
+            "root": 6,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1357,
+          "endStep": 1453,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1453,
+          "endStep": 1549,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        }
+      ]
+    },
+    {
+      "songId": 360,
+      "beatsPerBar": 4,
+      "gridOffsetSteps": 13,
+      "spans": [
+        {
+          "startStep": 13,
+          "endStep": 109,
+          "chord": {
+            "root": 6,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 109,
+          "endStep": 205,
+          "chord": {
+            "root": 1,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 205,
+          "endStep": 301,
+          "chord": {
+            "root": 6,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 301,
+          "endStep": 397,
+          "chord": {
+            "root": 1,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 397,
+          "endStep": 493,
+          "chord": {
+            "root": 6,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 493,
+          "endStep": 589,
+          "chord": {
+            "root": 1,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 589,
+          "endStep": 685,
+          "chord": {
+            "root": 11,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 685,
+          "endStep": 733,
+          "chord": {
+            "root": 6,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 733,
+          "endStep": 781,
+          "chord": {
+            "root": 1,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 781,
+          "endStep": 877,
+          "chord": {
+            "root": 6,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 877,
+          "endStep": 973,
+          "chord": {
+            "root": 1,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 973,
+          "endStep": 1069,
+          "chord": {
+            "root": 11,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1069,
+          "endStep": 1165,
+          "chord": {
+            "root": 1,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1165,
+          "endStep": 1261,
+          "chord": {
+            "root": 6,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1261,
+          "endStep": 1357,
+          "chord": {
+            "root": 1,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1357,
+          "endStep": 1453,
+          "chord": {
+            "root": 4,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1453,
+          "endStep": 1549,
+          "chord": {
+            "root": 11,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1549,
+          "endStep": 1645,
+          "chord": {
+            "root": 2,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1645,
+          "endStep": 1741,
+          "chord": {
+            "root": 6,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1741,
+          "endStep": 1837,
+          "chord": {
+            "root": 1,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1837,
+          "endStep": 1933,
+          "chord": {
+            "root": 1,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        }
+      ]
+    },
+    {
+      "songId": 362,
+      "beatsPerBar": 4,
+      "gridOffsetSteps": 1,
+      "spans": [
+        {
+          "startStep": 97,
+          "endStep": 145,
+          "chord": {
+            "root": 8,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 145,
+          "endStep": 193,
+          "chord": {
+            "root": 3,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 193,
+          "endStep": 289,
+          "chord": {
+            "root": 5,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 289,
+          "endStep": 337,
+          "chord": {
+            "root": 10,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 337,
+          "endStep": 385,
+          "chord": {
+            "root": 5,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 385,
+          "endStep": 481,
+          "chord": {
+            "root": 3,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 481,
+          "endStep": 529,
+          "chord": {
+            "root": 8,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 529,
+          "endStep": 577,
+          "chord": {
+            "root": 3,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 577,
+          "endStep": 673,
+          "chord": {
+            "root": 5,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 673,
+          "endStep": 721,
+          "chord": {
+            "root": 10,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 721,
+          "endStep": 769,
+          "chord": {
+            "root": 5,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 769,
+          "endStep": 817,
+          "chord": {
+            "root": 3,
+            "quality": "sus4",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 817,
+          "endStep": 865,
+          "chord": {
+            "root": 3,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 865,
+          "endStep": 961,
+          "chord": {
+            "root": 8,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 961,
+          "endStep": 1057,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1057,
+          "endStep": 1153,
+          "chord": {
+            "root": 10,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1153,
+          "endStep": 1249,
+          "chord": {
+            "root": 3,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1249,
+          "endStep": 1345,
+          "chord": {
+            "root": 8,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1345,
+          "endStep": 1441,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1441,
+          "endStep": 1537,
+          "chord": {
+            "root": 10,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 1537,
+          "endStep": 1633,
+          "chord": {
+            "root": 3,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        }
+      ]
+    },
+    {
+      "songId": 405,
+      "beatsPerBar": 4,
+      "gridOffsetSteps": 37,
+      "spans": [
+        {
+          "startStep": 37,
+          "endStep": 133,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 133,
+          "endStep": 181,
+          "chord": {
+            "root": 9,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 181,
+          "endStep": 229,
+          "chord": {
+            "root": 9,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 229,
+          "endStep": 277,
+          "chord": {
+            "root": 2,
+            "quality": "minor",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 325,
+          "endStep": 349,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        }
+      ]
+    },
+    {
+      "songId": 413,
+      "beatsPerBar": 4,
+      "gridOffsetSteps": 25,
+      "spans": [
+        {
+          "startStep": 25,
+          "endStep": 121,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 121,
+          "endStep": 217,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 217,
+          "endStep": 313,
+          "chord": {
+            "root": 5,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        },
+        {
+          "startStep": 313,
+          "endStep": 409,
+          "chord": {
+            "root": 3,
+            "quality": "major",
+            "qualityUncertain": false
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -9,6 +9,7 @@ use optime_core::{
     SynthController,
 };
 
+use crate::annotation::{Bounce, ChordVoicer};
 use crate::persisted::{RepeatMode, TrackRef};
 
 /// One entry of the audio-thread-owned playlist. The id to decode is `track.song_id`.
@@ -145,13 +146,16 @@ pub struct AudioState {
     pub last_callback: f64,
     /// Audio-thread-owned playlist + advancement (see [`Playback`]).
     pub playback: Playback,
+    /// Annotation transport (see [`BounceTransport`]). While it is `active` the callback runs the
+    /// annotation mixer instead of the live controller, and the playlist stays idle.
+    pub bounce: BounceTransport,
     /// Final-stage resampler from the fixed engine render rate ([`crate::audio::ENGINE_SAMPLE_RATE_HZ`])
     /// to the device's actual output rate.
     pub resampler: StreamResampler,
 }
 
 impl AudioState {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             controller: None,
             config: PerDeviceSettings::neutral(),
@@ -166,8 +170,69 @@ impl AudioState {
             voices: 0,
             last_callback: f64::NEG_INFINITY,
             playback: Playback::default(),
+            bounce: BounceTransport::default(),
             resampler: StreamResampler::new(),
         }
+    }
+}
+
+/// The annotation transport: a whole-song [`Bounce`] played by frame index.
+///
+///
+/// Unlike [`Playback`] (audio-thread-owned, driven by queued commands because the audio thread
+/// decides *when* a transition may happen), this is plain shared state the UI writes under the
+/// lock — the same treatment as `paused`/`volume`. Nothing here has to wait for silence: seeking is
+/// an index assignment, so there is no transition to schedule and no command queue to arbitrate.
+#[derive(Default)]
+pub struct BounceTransport {
+    /// Whether the annotation mixer owns the output. Set for as long as annotation mode is on —
+    /// **not** merely while [`Self::buffer`] exists. The mixer is what plays chords, so gating it on
+    /// the buffer would mean a right-clicked chord made no sound until the multi-second bounce
+    /// finished rendering. While it is set the live playlist stays idle entirely.
+    pub active: bool,
+    /// The rendered song, once [`crate::app::OptimeApp::poll_bounce`] finishes it. `None` = nothing
+    /// to play under the chords yet (still rendering); the mixer runs regardless.
+    pub buffer: Option<Arc<Bounce>>,
+    /// Playback position, in bounce frames.
+    pub pos: usize,
+    /// Optional `[start, end)` frame range to loop, for auditioning a bar. Wraps with no fade —
+    /// the point of bouncing is that a repeat is bit-identical.
+    pub loop_range: Option<(usize, usize)>,
+    /// Whether the transport is rolling. Scrubbing while stopped still moves [`Self::pos`], so the
+    /// roll follows the cursor without sounding.
+    pub playing: bool,
+    /// Plays the annotated chord over the song, so a label can be judged by ear rather than read.
+    /// `None` until an instrument has been captured from the ROM.
+    pub chords: Option<ChordVoicer>,
+    /// Whether chord playback is audible. A toggle because it genuinely fights busy passages — the
+    /// point is to check the harmony, and sometimes the track alone is easier to hear.
+    pub chords_on: bool,
+}
+
+impl BounceTransport {
+    /// Advances one frame, wrapping inside [`Self::loop_range`], and returns the frame to output.
+    ///
+    /// When stopped it **holds** the current frame rather than returning silence: the caller's pause
+    /// ramp then fades that value out over ~25 ms. Cutting to zero here instead would step the
+    /// waveform straight to 0 and click on every pause and every scrub.
+    #[inline]
+    pub fn next_frame(&mut self) -> (f32, f32) {
+        let Some(b) = &self.buffer else {
+            return (0.0, 0.0);
+        };
+        if let Some((start, end)) = self.loop_range
+            && end > start
+            && (self.pos < start || self.pos >= end)
+        {
+            self.pos = start;
+        }
+        // Past the end reads as silence (`Bounce::frame` clamps), so a finished song simply stops
+        // making sound instead of needing a separate "ended" flag.
+        let out = b.frame(self.pos);
+        if self.playing && self.pos < b.frames() {
+            self.pos += 1;
+        }
+        out
     }
 }
 

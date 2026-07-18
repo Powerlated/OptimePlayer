@@ -1,16 +1,19 @@
 //! Inference: run a trained model on a note-event stream and produce a predicted
 //! global key + a per-frame chord timeline, then merge frames into chord segments
 //! suitable for driving a circle-of-fifths / annotated-chord display.
+//!
+//! Generic over [`Backbone`] — every generation emits the same
+//! [`ModelOutput`](crate::backbone::ModelOutput), so decoding it into a
+//! [`Prediction`] is written once here rather than once per generation.
 
-use crate::train::MlDevice;
 use burn::module::AutodiffModule;
-use burn::prelude::*;
 
-use crate::features::{self, FEATURE_DIM};
-use crate::model::KeyChordModel;
-use crate::notes::NoteEvent;
-use crate::theory::{Chord, Key, N_CHORD_CLASSES, N_KEY_CLASSES};
-use crate::train::{Back, Inner};
+use crate::backbone::{Backbone, ModelOutput};
+use crate::backend::{Back, Inner, MlDevice};
+use crate::notes::{NoteEvent, Song};
+use crate::theory::{
+    root_quality_to_chord_label, Chord, Key, N_KEY_CLASSES, N_QUALITY_CLASSES, N_ROOT_CLASSES,
+};
 
 /// A contiguous run of frames sharing one predicted chord (or silence).
 #[derive(Debug, Clone)]
@@ -30,40 +33,60 @@ pub struct Prediction {
     pub segments: Vec<Segment>,
 }
 
-/// Predict key + chords for a note-event stream of length `n_frames`.
-pub fn predict(
-    model: &KeyChordModel<Back>,
-    notes: &[NoteEvent],
-    n_frames: usize,
-    device: &MlDevice,
-) -> Prediction {
-    let grid = features::extract(notes, n_frames);
-    let model = model.valid();
+/// Predict key + chords for a note-event stream of length `n_frames`, using any
+/// backbone.
+pub fn predict<M>(model: &M, notes: &[NoteEvent], n_frames: usize, device: &MlDevice) -> Prediction
+where
+    M: Backbone<Back> + AutodiffModule<Back>,
+    M::InnerModule: Backbone<Inner, Batch = <M as Backbone<Back>>::Batch>,
+{
+    // A single-window "song" carrying the notes; the labels are placeholders that
+    // inference never reads.
+    let song = Song {
+        key_label: 0,
+        n_frames,
+        notes: notes.to_vec(),
+        chord_labels: vec![0; n_frames],
+        is_music: None,
+    };
+    let data = <M::InnerModule as Backbone<Inner>>::build_batch(std::slice::from_ref(&song));
+    let out = model.valid().forward_output(&data, device);
+    decode_output(out, n_frames)
+}
 
-    let features = Tensor::<Inner, 3>::from_data(
-        TensorData::new(grid.data, [1, n_frames, FEATURE_DIM]),
-        device,
-    );
-    let out = model.forward(features);
-
+/// Decode one window's [`ModelOutput`] into a [`Prediction`]. Backbone-agnostic: the
+/// factored root + quality argmax and the key read-out are identical for every
+/// generation, and match what `shared::eval_counts` scores.
+pub fn decode_output(out: ModelOutput<Inner>, n_frames: usize) -> Prediction {
     // Key: softmax for a confidence read-out.
     let key_probs = burn::tensor::activation::softmax(out.key_logits, 1);
     let key_probs: Vec<f32> = key_probs.into_data().to_vec().unwrap();
     let (key_idx, key_conf) = argmax_conf(&key_probs, N_KEY_CLASSES);
     let key = Key::from_label(key_idx);
 
-    // Chords: per-frame argmax.
-    let chord_pred = out
-        .chord_logits
-        .reshape([n_frames, N_CHORD_CLASSES])
+    // Chords: per-frame factored argmax over the dedicated root + quality heads,
+    // recombined into the joint 121-label space. The "none" quality column (index
+    // 0) is dropped so a real root always yields a concrete quality; the root head
+    // alone decides no-chord.
+    let root_pred: Vec<i64> = out
+        .root_logits
+        .reshape([n_frames, N_ROOT_CLASSES])
         .argmax(1)
-        .reshape([n_frames]);
-    let chord_labels: Vec<usize> = chord_pred
+        .reshape([n_frames])
         .into_data()
-        .to_vec::<i64>()
-        .unwrap()
-        .into_iter()
-        .map(|x| x as usize)
+        .to_vec()
+        .unwrap();
+    let quality_pred: Vec<i64> = out
+        .quality_logits
+        .reshape([n_frames, N_QUALITY_CLASSES])
+        .slice([0..n_frames, 1..N_QUALITY_CLASSES])
+        .argmax(1)
+        .reshape([n_frames])
+        .into_data()
+        .to_vec()
+        .unwrap();
+    let chord_labels: Vec<usize> = (0..n_frames)
+        .map(|i| root_quality_to_chord_label(root_pred[i] as usize, quality_pred[i] as usize + 1))
         .collect();
 
     let segments = merge_segments(&chord_labels);

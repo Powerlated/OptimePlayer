@@ -50,7 +50,24 @@ pub struct NoteEvent {
     pub pitch: u8,
     pub velocity: f32,
     pub instrument: Instrument,
+    /// Sequencer track / channel the note played on (0..15). For real songs this is
+    /// the only instrument cue that survives harvesting (the `instrument` role is
+    /// unknown → `Harmony`); the event model learns channel→instrument associations
+    /// from it. Synthetic songs assign a fixed channel per voice ([`synthetic_channel`]).
+    pub track: u8,
     pub pan: f32,
+}
+
+/// Fixed synthetic channel per voice role, so generated songs carry the same
+/// `track` field shape the model sees on real harvested songs.
+fn synthetic_channel(instrument: Instrument) -> u8 {
+    match instrument {
+        Instrument::Bass => 0,
+        Instrument::Harmony => 1,
+        Instrument::Arp => 2,
+        Instrument::Melody => 3,
+        Instrument::Percussion => 9,
+    }
 }
 
 /// A fully-arranged song: note events + per-frame labels + the global key.
@@ -113,6 +130,10 @@ impl Song {
 /// A random transposition covering all 12 pitch-class rotations while keeping the
 /// register shift small (`[-5, +6]` semitones, so notes rarely hit the MIDI range
 /// limits). Use per song per epoch for on-the-fly key augmentation.
+/// Distinct shifts [`random_transpose`] draws from (-5..=6) — every pitch-class
+/// rotation exactly once, so augmentation multiplies the reachable data by this.
+pub const N_TRANSPOSITIONS: usize = 12;
+
 pub fn random_transpose<R: Rng>(rng: &mut R) -> i32 {
     let r = rng.gen_range(0..12);
     if r <= 6 {
@@ -212,6 +233,7 @@ pub fn render_song<R: Rng>(rng: &mut R, key: &Key, n_frames: usize) -> Song {
                         pitch: p,
                         velocity: rng.gen_range(0.45..0.65),
                         instrument: Instrument::Harmony,
+                        track: 0,
                         pan: rng.gen_range(-0.35..0.35),
                     });
                 }
@@ -227,6 +249,7 @@ pub fn render_song<R: Rng>(rng: &mut R, key: &Key, n_frames: usize) -> Song {
                             pitch: p,
                             velocity: rng.gen_range(0.5..0.7),
                             instrument: Instrument::Harmony,
+                            track: 0,
                             pan: rng.gen_range(-0.3..0.3),
                         });
                     }
@@ -246,6 +269,7 @@ pub fn render_song<R: Rng>(rng: &mut R, key: &Key, n_frames: usize) -> Song {
                         pitch: p,
                         velocity: rng.gen_range(0.4..0.6),
                         instrument: Instrument::Arp,
+                        track: 0,
                         pan: rng.gen_range(-0.5..0.5),
                     });
                     f += step;
@@ -277,6 +301,7 @@ pub fn render_song<R: Rng>(rng: &mut R, key: &Key, n_frames: usize) -> Song {
                     pitch: 36 + (rng.gen_range(0..3) as u8), // kick/snare-ish, ignored as pitch
                     velocity: rng.gen_range(0.5..0.9),
                     instrument: Instrument::Percussion,
+                    track: 0,
                     pan: 0.0,
                 });
                 f += FRAMES_PER_BEAT / 2;
@@ -291,6 +316,11 @@ pub fn render_song<R: Rng>(rng: &mut R, key: &Key, n_frames: usize) -> Song {
 
     // Occasionally open or close with a short rest for NO_CHORD examples.
     maybe_insert_rests(rng, &mut notes, &mut chord_labels, n_frames);
+
+    // Assign each voice its fixed synthetic channel (the literals leave `track` at 0).
+    for n in notes.iter_mut() {
+        n.track = synthetic_channel(n.instrument);
+    }
 
     Song {
         key_label: key.label(),
@@ -317,6 +347,7 @@ fn add_bass<R: Rng>(
                 pitch: bass_pitch,
                 velocity: rng.gen_range(0.6..0.85),
                 instrument: Instrument::Bass,
+                track: 0,
                 pan: 0.0,
             });
         }
@@ -331,6 +362,7 @@ fn add_bass<R: Rng>(
                     pitch: bass_pitch,
                     velocity: rng.gen_range(0.6..0.85),
                     instrument: Instrument::Bass,
+                    track: 0,
                     pan: 0.0,
                 });
                 f += FRAMES_PER_BEAT;
@@ -374,6 +406,7 @@ fn add_melody<R: Rng>(
                 pitch: *melody_note as u8,
                 velocity: rng.gen_range(0.55..0.8),
                 instrument: Instrument::Melody,
+                track: 0,
                 pan: rng.gen_range(-0.2..0.4),
             });
         }
@@ -420,6 +453,7 @@ mod tests {
                 pitch: 60, // C4
                 velocity: 1.0,
                 instrument: Instrument::Harmony,
+                track: 0,
                 pan: 0.0,
             }],
             chord_labels: vec![

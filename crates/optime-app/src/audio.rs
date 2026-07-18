@@ -243,9 +243,11 @@ fn step_playback(st: &mut AudioState) {
     st.playback.status_gen = st.playback.status_gen.wrapping_add(1);
 }
 
-/// The per-sample gain pipeline: smoothed master volume × song fade-in × pause ramp. The
-/// end-of-song / manual fade-*out* now lives in the controller (it has already been applied to the
-/// samples this multiplies). All transitions are ramped inside the callback so no UI action pops.
+/// The per-sample gain pipeline: smoothed master volume × song fade-in. The end-of-song / manual
+/// fade-*out* now lives in the controller (it has already been applied to the samples this
+/// multiplies). All transitions are ramped inside the callback so no UI action pops.
+///
+/// Pause is deliberately *not* here — see [`PauseRamp`].
 struct GainRamp {
     volume: f32,
     volume_target: f32,
@@ -255,10 +257,6 @@ struct GainRamp {
     song: f32,
     /// Upward fade-in step (~30 ms).
     song_up_step: f32,
-    pause: f32,
-    pause_target: f32,
-    /// Pause ramp step (~25 ms).
-    pause_step: f32,
 }
 
 impl GainRamp {
@@ -270,9 +268,6 @@ impl GainRamp {
             volume_alpha: (1.0 / (0.010 * sr)).min(1.0),
             song: st.fade_gain,
             song_up_step: 1.0 / (0.030 * sr),
-            pause: st.pause_gain,
-            pause_target: if st.paused { 0.0 } else { 1.0 },
-            pause_step: 1.0 / (0.025 * sr),
         }
     }
 
@@ -281,19 +276,51 @@ impl GainRamp {
     fn next(&mut self) -> f32 {
         self.volume += (self.volume_target - self.volume) * self.volume_alpha;
         self.song = (self.song + self.song_up_step).min(1.0);
-        self.pause = if self.pause < self.pause_target {
-            (self.pause + self.pause_step).min(self.pause_target)
-        } else {
-            (self.pause - self.pause_step).max(self.pause_target)
-        };
-        0.5 * self.volume * self.song * self.pause
+        0.5 * self.volume * self.song
     }
 
     /// Writes the ramp state back into the shared audio state.
     fn store(self, st: &mut crate::player::AudioState) {
         st.volume_smooth = self.volume;
         st.fade_gain = self.song;
-        st.pause_gain = self.pause;
+    }
+}
+
+/// The pause fade (~25 ms), on its own ramp rather than folded into [`GainRamp`].
+///
+/// It is separate because the two callers need it in different places. The live path applies it with
+/// everything else, per output sample. The annotation mixer applies it to the prerendered song
+/// *alone* — a chord audition must sound while the transport is stopped — and therefore has to apply
+/// it before the chords are summed in, which happens at engine rate ahead of the output resampler.
+/// Hence the explicit `rate`: the ramp steps per sample of whichever bus it rides, keeping the same
+/// ~25 ms wall-clock length either way.
+struct PauseRamp {
+    gain: f32,
+    target: f32,
+    step: f32,
+}
+
+impl PauseRamp {
+    fn new(st: &crate::player::AudioState, rate: f32) -> Self {
+        Self {
+            gain: st.pause_gain,
+            target: if st.paused { 0.0 } else { 1.0 },
+            step: 1.0 / (0.025 * rate.max(1.0)),
+        }
+    }
+
+    #[inline]
+    fn next(&mut self) -> f32 {
+        self.gain = if self.gain < self.target {
+            (self.gain + self.step).min(self.target)
+        } else {
+            (self.gain - self.step).max(self.target)
+        };
+        self.gain
+    }
+
+    fn store(self, st: &mut crate::player::AudioState) {
+        st.pause_gain = self.gain;
     }
 }
 
@@ -308,6 +335,15 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
     let st = &mut *guard;
     // Heartbeat for the web stall detector (see `AudioEngine::callback_age`).
     st.last_callback = t0;
+    // Annotation owns the output for as long as the mode is on: its mixer runs continuously, so a
+    // right-clicked chord sounds while the bounce is still rendering and while the transport is
+    // stopped. Once the bounce exists the same mixer plays it under the chords, which is what keeps
+    // the two synchronous — one frame of song and one frame of chord leave together. The playlist
+    // stays idle throughout (no fade, no decode, no advancement).
+    if st.bounce.active {
+        mix_annotation(data, channels, st, t0);
+        return;
+    }
     // Advance the playlist (fade trigger + lazy decode) before rendering; keeps working while
     // the UI is frozen. May install a new controller.
     step_playback(st);
@@ -323,6 +359,8 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
     }
     let device_rate = st.sample_rate as f32;
     let mut ramp = GainRamp::new(st);
+    // The live path wants pause folded in with everything else, per output sample.
+    let mut pause = PauseRamp::new(st, device_rate);
     let config = &st.config;
     let controller = st.controller.as_mut().unwrap();
     let resampler = &mut st.resampler;
@@ -341,12 +379,13 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
             let frames = &mut scratch[..block.len() / 2];
             resampler.process(frames, &mut || controller.next_sample(config));
             for (out, &(l, r)) in block.chunks_exact_mut(2).zip(frames.iter()) {
-                let g = ramp.next();
+                let g = ramp.next() * pause.next();
                 out[0] = l * g;
                 out[1] = r * g;
             }
         }
         ramp.store(st);
+        pause.store(st);
         update_meters(st, t0, data.len() / 2);
         return;
     }
@@ -355,6 +394,77 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         let n = block.len() / frames_per_call;
         let frames = &mut scratch[..n];
         resampler.process(frames, &mut || controller.next_sample(config));
+        for (frame, &(l, r)) in block.chunks_mut(frames_per_call).zip(frames.iter()) {
+            let g = ramp.next() * pause.next();
+            let (l, r) = (l * g, r * g);
+            match frame.len() {
+                0 => {}
+                1 => frame[0] = (l + r) * 0.5,
+                _ => {
+                    frame[0] = l;
+                    frame[1] = r;
+                    for s in &mut frame[2..] {
+                        *s = 0.0;
+                    }
+                }
+            }
+        }
+    }
+    ramp.store(st);
+    pause.store(st);
+    update_meters(st, t0, data.len() / frames_per_call);
+}
+
+/// The annotation mixer: two buses — the prerendered [`Bounce`] and the chord audition — summed at
+/// [`ENGINE_SAMPLE_RATE_HZ`] and pushed through the output resampler as one.
+///
+/// Runs for the whole of annotation mode ([`BounceTransport::active`]), not just once a bounce
+/// exists. That is what lets a right-clicked chord sound while the render is still in progress and
+/// while the transport is stopped: with no buffer the song bus is simply silent and the chord bus
+/// plays alone. Once the bounce arrives the two are summed *before* the resampler — at the same
+/// engine rate, through the same resampler, so they cannot drift apart — which is what "synchronous"
+/// means here.
+///
+/// The buses differ in one gain: [`PauseRamp`] applies to the song only, since auditioning a chord
+/// is a deliberate act that must sound whether or not the transport is rolling. There is no fade
+/// policy and no playlist: a looped bar must repeat bit-identically.
+///
+/// Uses the general channel-mapping loop rather than `write_audio`'s stereo fast path; annotation is
+/// a maintainer tool and never runs in the hot playback case.
+fn mix_annotation(data: &mut [f32], channels: usize, st: &mut crate::player::AudioState, t0: f64) {
+    let device_rate = st.sample_rate as f32;
+    let mut ramp = GainRamp::new(st);
+    // Pause rides the engine-rate song bus, because that is where it has to be applied: ahead of
+    // the point the chords are summed in.
+    let mut pause = PauseRamp::new(st, ENGINE_SAMPLE_RATE_HZ as f32);
+    // Disjoint field borrows: the resampler and the transport are separate members of `st`.
+    let resampler = &mut st.resampler;
+    let bounce = &mut st.bounce;
+    resampler.set(
+        ENGINE_SAMPLE_RATE_HZ as f32,
+        device_rate,
+        InstrumentResampleMode::SincSampleNyquist { half_taps: 8 },
+    );
+
+    const CHUNK: usize = 256;
+    let mut scratch = [(0.0f32, 0.0f32); CHUNK];
+    let frames_per_call = channels.max(1);
+    for block in data.chunks_mut(frames_per_call * CHUNK) {
+        let n = block.len() / frames_per_call;
+        let frames = &mut scratch[..n];
+        resampler.process(frames, &mut || {
+            let (l, r) = bounce.next_frame();
+            let p = pause.next();
+            let (mut l, mut r) = (l * p, r * p);
+            if let Some(c) = &mut bounce.chords
+                && bounce.chords_on
+            {
+                let (cl, cr) = c.next_frame();
+                l += cl;
+                r += cr;
+            }
+            (l, r)
+        });
         for (frame, &(l, r)) in block.chunks_mut(frames_per_call).zip(frames.iter()) {
             let g = ramp.next();
             let (l, r) = (l * g, r * g);
@@ -372,5 +482,82 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         }
     }
     ramp.store(st);
+    pause.store(st);
     update_meters(st, t0, data.len() / frames_per_call);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::annotation::ChordVoicer;
+    use crate::annotation::model::{Chord, Quality};
+
+    /// A state in annotation mode with the embedded piano voicer armed and nothing rendered yet.
+    fn annotating() -> AudioState {
+        let instrument = crate::annotation::chord_voice::embedded_piano();
+        let mut st = AudioState::new();
+        st.sample_rate = 48_000.0;
+        st.volume = 1.0;
+        st.volume_smooth = 1.0;
+        st.fade_gain = 1.0;
+        st.bounce.active = true;
+        st.bounce.buffer = None; // still rendering
+        st.bounce.chords = Some(ChordVoicer::new(instrument));
+        st.bounce.chords_on = true;
+        st
+    }
+
+    fn peak(data: &[f32]) -> f32 {
+        data.iter().fold(0.0f32, |a, b| a.max(b.abs()))
+    }
+
+    fn c_major() -> Chord {
+        Chord {
+            root: 0,
+            quality: Quality::Major,
+            quality_uncertain: false,
+        }
+    }
+
+    /// The mixer runs for the whole of annotation mode, not just once a bounce exists: a chord
+    /// right-clicked while the multi-second render is still going has to sound.
+    #[test]
+    fn chords_sound_before_the_bounce_is_rendered() {
+        let mut st = annotating();
+        st.bounce.chords.as_mut().unwrap().strike((0, c_major()));
+        let mut data = vec![0.0f32; 2 * 4096];
+        mix_annotation(&mut data, 2, &mut st, 0.0);
+        assert!(
+            peak(&data) > 0.01,
+            "no chord audio with buffer=None (peak {})",
+            peak(&data)
+        );
+    }
+
+    /// A chord audition is a deliberate act and skips the pause ramp — right-clicking a bar while
+    /// the transport is stopped is the main way this tool gets used.
+    #[test]
+    fn chords_sound_while_paused_but_the_song_does_not() {
+        let mut st = annotating();
+        st.paused = true;
+        st.pause_gain = 0.0; // fully faded out
+        st.bounce.chords.as_mut().unwrap().strike((0, c_major()));
+        let mut data = vec![0.0f32; 2 * 4096];
+        mix_annotation(&mut data, 2, &mut st, 0.0);
+        assert!(
+            peak(&data) > 0.01,
+            "a paused transport silenced the chord audition (peak {})",
+            peak(&data)
+        );
+    }
+
+    /// The flip side: with nothing struck and nothing rendered, the mixer is silent — running
+    /// always must not mean humming always.
+    #[test]
+    fn the_idle_mixer_is_silent() {
+        let mut st = annotating();
+        let mut data = vec![0.0f32; 2 * 4096];
+        mix_annotation(&mut data, 2, &mut st, 0.0);
+        assert_eq!(peak(&data), 0.0, "the idle annotation mixer must be silent");
+    }
 }

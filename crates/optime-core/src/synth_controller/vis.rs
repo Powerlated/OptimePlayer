@@ -53,6 +53,11 @@ pub struct SongOverview {
     /// Tempo (musical BPM) over the timeline as `(step, bpm)` change points, in step order. The
     /// first entry is the starting tempo at step 0.
     pub tempos: Vec<(u32, f64)>,
+    /// The device's sequencer steps per quarter-note beat (DS SSEQ: 48, GBA MP2K: 24). Constant for
+    /// a song — a tempo change moves the step *rate* (steps per second), not this — so the musical
+    /// bar grid is uniform in steps and needs no tempo map. `0.0` if the device reports no beat
+    /// division.
+    pub steps_per_beat: f64,
 }
 
 impl FsVisController {
@@ -234,6 +239,7 @@ impl FsVisController {
             notes,
             total_steps,
             tempos,
+            steps_per_beat: player.steps_per_beat(),
         })
     }
 }

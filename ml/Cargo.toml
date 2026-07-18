@@ -9,6 +9,14 @@ edition = "2021"
 # Enables the real-song harvester + real-song eval, which depend on the main
 # engine crate. Off by default so the pure-synthetic build stays engine-free.
 harvest = ["dep:optime-core"]
+# WGPU GPU backend (cubecl-wgsl shaders → Vulkan/DX12/Metal). Off by default so
+# the lean CPU build is unaffected; enables `hier_pretrain_gpu`.
+gpu = ["burn/webgpu"]
+# CUDA backend (cubecl → nvrtc → PTX). Swaps `backend::{Inner, MlDevice}`, so every
+# bin runs on the GPU with no other change. Needs a CUDA *toolkit* (nvrtc), not just
+# a driver — cubecl compiles kernels at runtime. Off by default: the CPU build must
+# keep working on machines with no NVIDIA GPU.
+cuda = ["burn/cuda"]
 
 [dependencies]
 bincode = "1"
@@ -30,3 +38,15 @@ required-features = ["harvest"]
 [[bin]]
 name = "chord_export"
 required-features = ["harvest"]
+
+[[bin]]
+name = "eval_labeled"
+required-features = ["harvest"]
+
+[[bin]]
+name = "sft"
+required-features = ["harvest"]
+
+[[bin]]
+name = "hier_pretrain_gpu"
+required-features = ["gpu"]

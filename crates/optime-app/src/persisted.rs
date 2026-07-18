@@ -136,6 +136,18 @@ pub struct Persisted {
     pub sort_mode: SortMode,
     /// Whether the sort runs in descending order.
     pub sort_descending: bool,
+
+    /// Hand-authored chord labels, keyed by source archive, kept in eframe storage as a
+    /// **session-recovery working copy**.
+    ///
+    /// The record differs by platform: native commits `ml/annotations/*.json` in the source tree
+    /// (the training data of record); web has no source tree, so "Save" there only offers a
+    /// download. In both cases this stash captures unsaved edits — including non-label work like a
+    /// "Bar 1 here" grid/meter change — so a refresh or restart doesn't drop them. It only ever
+    /// fills in when no committed file exists (native load falls back to it on `Ok(None)`), so a
+    /// hand-edited record is never overwritten. Defaulted so existing stored blobs load unchanged.
+    #[serde(default)]
+    pub annotations: std::collections::HashMap<String, crate::annotation::model::GameAnnotations>,
 }
 
 impl Default for Persisted {
@@ -151,6 +163,7 @@ impl Default for Persisted {
             // Native song-list order, ascending, until the user sorts.
             sort_mode: SortMode::Default,
             sort_descending: false,
+            annotations: std::collections::HashMap::new(),
 
             // The high-quality presets are owned by the engine (so offline tools share them); the
             // app's runtime-only piano-roll track mutes are injected per frame over these.

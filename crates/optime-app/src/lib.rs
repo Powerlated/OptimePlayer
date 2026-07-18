@@ -1,6 +1,7 @@
 //! Optime Player front-end: an `eframe`/`egui` application that runs natively and on the web,
 //! driving the platform-independent [`optime_core`] DS sound engine.
 
+mod annotation;
 mod app;
 mod audio;
 mod chord_data;

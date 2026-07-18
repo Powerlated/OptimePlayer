@@ -9,7 +9,7 @@
 //! song-table entries are not. This is the "SSL learns what's music; the
 //! annotations only train the decoder" design.
 
-use crate::train::MlDevice;
+use crate::backend::MlDevice;
 use burn::module::{AutodiffModule, Module};
 use burn::nn::loss::CrossEntropyLossConfig;
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
@@ -20,10 +20,10 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use std::path::Path;
 
+use crate::backend::{Back, Inner};
 use crate::features::{self, FEATURE_DIM};
-use crate::model::KeyChordModel;
+use crate::m00_frame::KeyChordModel;
 use crate::notes::Song;
-use crate::train::{Back, Inner};
 
 /// Cached pooled encoder features + binary labels for the frozen probe.
 pub struct MusicSet {
@@ -106,7 +106,7 @@ impl Default for ProbeConfig {
 pub fn run(
     mut model: KeyChordModel<Back>,
     config: &ProbeConfig,
-    model_config: &crate::model::ModelConfig,
+    model_config: &crate::m00_frame::ModelConfig,
     train: &MusicSet,
     val: &MusicSet,
     out_dir: &Path,
@@ -199,7 +199,7 @@ pub fn accuracy(model: &KeyChordModel<Back>, set: &MusicSet, device: &MlDevice) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ModelConfig;
+    use crate::m00_frame::ModelConfig;
     use crate::notes::{Instrument, NoteEvent};
     use crate::theory::NO_CHORD;
 
@@ -213,6 +213,7 @@ mod tests {
                 pitch,
                 velocity: 1.0,
                 instrument: Instrument::Harmony,
+                track: 0,
                 pan: 0.0,
             }],
             chord_labels: vec![NO_CHORD; seq],

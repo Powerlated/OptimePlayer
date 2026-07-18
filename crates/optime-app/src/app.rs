@@ -10,6 +10,7 @@ use crate::web::get_track_ref_from_query_string;
 #[cfg(target_arch = "wasm32")]
 use crate::web::update_query_string;
 
+use crate::annotation::{AnnotationState, BounceJob};
 use crate::chord_data;
 use crate::media_controls::{self, MediaAction};
 use crate::persisted::{
@@ -361,6 +362,11 @@ pub struct OptimeApp {
     /// game is loaded (but keeps the user's edits while the same game stays loaded).
     #[cfg(not(target_arch = "wasm32"))]
     song_edit_filename_for: String,
+
+    /// Session-only chord-annotation dev-tool state (see [`crate::annotation`]).
+    annotation: AnnotationState,
+    /// The chord symbol being typed for the selected span.
+    annotation_entry: String,
 }
 
 impl OptimeApp {
@@ -428,6 +434,8 @@ impl OptimeApp {
             song_edit_filename: String::new(),
             #[cfg(not(target_arch = "wasm32"))]
             song_edit_filename_for: String::new(),
+            annotation: AnnotationState::default(),
+            annotation_entry: String::new(),
         };
 
         // Resume where the last session left off (paused), if the last track was from a demo
@@ -955,6 +963,22 @@ impl OptimeApp {
     /// Restarts the currently-playing entry from the top.
     fn restart(&mut self) {
         self.paused = false;
+        // Annotation mode parks the playlist entirely, so a `PlayAt` would just sit in the queue
+        // unread: restarting there means rewinding the bounce, which is an index.
+        if self.annotation.enabled {
+            self.annotation_seek(0.0);
+            if let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+            {
+                st.paused = false;
+                // The chord under the top of the song must strike again even if the playhead was
+                // already inside that same section.
+                if let Some(c) = &mut st.bounce.chords {
+                    c.reset();
+                }
+            }
+            return;
+        }
         let config = self.config();
         if let Some(audio) = &self.audio
             && let Ok(mut st) = audio.shared.lock()
@@ -1125,7 +1149,7 @@ impl OptimeApp {
     /// Pre-inferred chord-lane spans for a song: `(start_step, end_step, label)`, the label already
     /// baked as `"<roman> (<name>)"` (or `"N.C."`) offline. Empty when the game has no chord table
     /// (only Pokémon Emerald ships one), so the roll hides the lane.
-    fn chord_spans(&self, archive_index: usize, song_id: u32) -> Vec<(f64, f64, String)> {
+    fn chord_spans(&self, archive_index: usize, song_id: u32) -> Vec<crate::piano_roll::LaneSpan> {
         let game_code = self.archives[archive_index]
             .as_any()
             .downcast_ref::<GbaRom>()
@@ -1138,7 +1162,13 @@ impl OptimeApp {
         chords
             .segments
             .iter()
-            .map(|s| (s.start_step, s.end_step, s.label.clone()))
+            .map(|s| crate::piano_roll::LaneSpan {
+                start: s.start_step,
+                end: s.end_step,
+                label: s.label.clone(),
+                // Pre-inferred: text only. Only hand-authored spans get a block.
+                fill: None,
+            })
             .collect()
     }
 
@@ -1166,11 +1196,974 @@ impl OptimeApp {
             self.overview = FsVisController::overview(&*self.archives[archive_index], song_id);
             self.piano_roll
                 .set_chords(self.chord_spans(archive_index, song_id));
+            // The bar grid comes from the device's steps-per-beat; the meter/pickup are the
+            // annotator's (defaults until a song's annotation supplies them).
+            if let Some(ov) = &self.overview {
+                let grid = self.annotation.grid_for(song_id, ov.steps_per_beat);
+                self.piano_roll.set_grid(grid);
+            }
         }
         #[cfg(target_arch = "wasm32")]
         {
             let _ = update_query_string(t);
         }
+    }
+
+    /// The per-frame annotation sync: collect a finished bounce, follow the transport's playhead,
+    /// and push the hand-authored spans into the roll's chord lane.
+    fn sync_annotation(&mut self, ctx: &egui::Context) {
+        self.poll_bounce(ctx);
+        // The song can change under annotation mode (the library list still works).
+        if let Some(i) = self.current_song {
+            let song_id = self.songs[i].song_id;
+            if self.annotation.bounce_for != Some(song_id) {
+                self.request_bounce();
+                if let Some(ov) = &self.overview {
+                    let total = ov.total_steps;
+                    self.piano_roll.zoom_to_fit(total);
+                }
+            }
+        }
+        if let Some(ov) = &self.overview {
+            self.piano_roll.ingest_overview(ov);
+        }
+        // The app's own transport owns play/pause here too — annotation adds no second button, so
+        // there is exactly one source of truth for "is it rolling".
+        let rolling = !self.paused && self.annotation.bounce.is_some();
+        let pos = self
+            .audio
+            .as_ref()
+            .and_then(|a| {
+                a.shared.lock().ok().map(|mut st| {
+                    st.bounce.playing = rolling;
+                    st.bounce.pos
+                })
+            })
+            .unwrap_or(0);
+        if let Some(b) = &self.annotation.bounce {
+            self.piano_roll
+                .set_display_tick(b.step_of_frame(pos) as f64);
+        }
+        if rolling {
+            ctx.request_repaint();
+        }
+        // Follow the playhead with the chord voice. Driven from the UI frame rather than the audio
+        // callback, which has no idea what a span is: chords change at most once a bar (~2 s), so
+        // 16 ms of granularity is far below anything audible.
+        if let Some(song_id) = self.current_song.map(|i| self.songs[i].song_id) {
+            let step = self.piano_roll.display_tick();
+            let chord = self.chord_at(song_id, step);
+            if let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+                && let Some(c) = &mut st.bounce.chords
+            {
+                if rolling {
+                    c.set_chord(chord);
+                } else {
+                    // Stopped: let go of the section chord (it is held until the section changes,
+                    // and a stopped playhead never will) and forget it, so resuming re-sounds it.
+                    c.stop_following();
+                }
+            }
+        }
+
+        // The lane shows what has been *annotated*, not what a model guessed — this set is the
+        // eval data, so a prediction must never appear alongside it and get mistaken for a label.
+        let spans: Vec<crate::piano_roll::LaneSpan> = self
+            .current_song
+            .map(|i| self.songs[i].song_id)
+            .and_then(|id| self.annotation.song(id))
+            .map(|a| {
+                a.spans
+                    .iter()
+                    .map(|s| {
+                        let (label, fill) = match s.chord {
+                            Some(c) => (
+                                c.symbol(),
+                                crate::piano_roll::chord_color(
+                                    Some(c.root),
+                                    // Uncertain quality reads dimmer: the ribbon should show which
+                                    // labels are only half-trusted without opening anything.
+                                    c.quality_uncertain,
+                                ),
+                            ),
+                            None => (
+                                "N.C.".to_string(),
+                                crate::piano_roll::chord_color(None, false),
+                            ),
+                        };
+                        crate::piano_roll::LaneSpan {
+                            start: s.start_step as f64,
+                            end: s.end_step as f64,
+                            label,
+                            fill: Some(fill),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.piano_roll.set_chords(spans);
+        self.stash_annotations();
+    }
+
+    /// Snaps a step to the grid: bars by default, beats when the annotator asks.
+    fn snap_step(&self, step: f64) -> f64 {
+        let g = self.piano_roll.grid();
+        let unit = self.snap_unit();
+        if unit <= 0.0 {
+            return step.max(0.0);
+        }
+        let rel = step - g.offset_steps;
+        (g.offset_steps + (rel / unit).round() * unit).max(0.0)
+    }
+
+    /// The snap unit in steps: a bar, or a beat when beat-snap is on.
+    fn snap_unit(&self) -> f64 {
+        let g = self.piano_roll.grid();
+        if self.annotation.beat_snap {
+            g.steps_per_beat
+        } else {
+            g.bar_steps().unwrap_or(g.steps_per_beat)
+        }
+    }
+
+    /// The start of the snap unit *containing* `step` — floor, not round.
+    ///
+    /// Distinct from [`Self::snap_step`] on purpose: dragging an edge wants the *nearest* boundary,
+    /// but clicking a spot means "this bar", and rounding would grab the next bar over from
+    /// anywhere past its midpoint.
+    fn snap_floor(&self, step: f64) -> f64 {
+        let g = self.piano_roll.grid();
+        let unit = self.snap_unit();
+        if unit <= 0.0 {
+            return step.max(0.0);
+        }
+        let rel = step - g.offset_steps;
+        (g.offset_steps + (rel / unit).floor() * unit).max(0.0)
+    }
+
+    /// Interprets the roll's pointer input as annotation edits.
+    ///
+    /// Dragging in the chord lane defines a snapped range; releasing selects it (creating the span
+    /// on first label). Clicking elsewhere moves the playhead. The roll reports geometry only — the
+    /// model lives here.
+    fn annotation_roll_input(&mut self, input: crate::piano_roll::RollInput) {
+        let Some(song_id) = self.current_song.map(|i| self.songs[i].song_id) else {
+            return;
+        };
+        // A drag paints a range; show it live, then open the picker on release. `drag_step` (not
+        // `hover_step`) tracks the pointer, so a drag that wanders off the roll still resolves.
+        if let (Some(a), Some(b)) = (input.drag_start_step, input.drag_step)
+            && (input.dragging || input.drag_stopped)
+        {
+            let (s, e) = (self.snap_step(a), self.snap_step(b));
+            let (s, e) = (s.min(e), s.max(e));
+            // A drag with no movement still selects one whole snap unit.
+            let e = if e > s { e } else { self.snap_next(s) };
+            self.piano_roll.set_selection(Some((s, e)));
+            if input.drag_stopped {
+                self.select_or_create_span(song_id, s, e);
+                // The picker comes to the region just dragged, rather than making the eye travel to
+                // a toolbar and back for every bar.
+                self.annotation.picker_at = input.pointer_pos;
+                self.annotation.picker_just_opened = true;
+            }
+            return;
+        }
+        // A plain right-click (no drag) opens the picker without needing a drag at all — the common
+        // case is one bar, and dragging a single bar to label it is busywork.
+        if input.secondary_clicked
+            && let Some(step) = input.hover_step
+        {
+            // On an existing span, take that span's whole range: right-clicking a block means "this
+            // chord", and re-labelling or clearing it should act on what you clicked, not on
+            // whichever grid unit happens to sit under the cursor.
+            let existing = self.annotation.song(song_id).and_then(|a| {
+                a.spans
+                    .iter()
+                    .find(|sp| (sp.start_step as f64) <= step && (sp.end_step as f64) > step)
+                    .map(|sp| (sp.start_step, sp.end_step))
+            });
+            let (s, e) = existing.unwrap_or_else(|| {
+                let s = self.snap_floor(step);
+                (s as u32, self.snap_next(s) as u32)
+            });
+            self.select_or_create_span(song_id, s as f64, e as f64);
+            self.piano_roll.set_selection(Some((s as f64, e as f64)));
+            self.annotation.picker_at = input.pointer_pos;
+            self.annotation.picker_just_opened = true;
+            // Right-clicking a labelled bar plays its chord: the fastest possible check of whether
+            // what you wrote is what you meant.
+            if let Some(section) = self.chord_at(song_id, step) {
+                self.strike_chord(section);
+            }
+            return;
+        }
+        // Left button is purely the transport: click or drag anywhere to scrub.
+        if let Some(step) = input.scrub_step {
+            self.annotation_seek(step);
+        }
+    }
+
+    /// The next snap boundary after `step`.
+    fn snap_next(&self, step: f64) -> f64 {
+        step + self.snap_unit().max(1.0)
+    }
+
+    /// Selects the span covering `[start, end)`, or remembers the range so the next typed chord
+    /// creates one. Blank-slate authoring: nothing is written until a label is given.
+    fn select_or_create_span(&mut self, song_id: u32, start: f64, end: f64) {
+        let (s, e) = (start as u32, end as u32);
+        let existing = self.annotation.song(song_id).and_then(|a| {
+            a.spans
+                .iter()
+                .position(|sp| sp.start_step < e && sp.end_step > s)
+        });
+        self.annotation.pending_range = Some((s, e));
+        // Seed the entry box with whatever is already there, so retyping a chord is an edit.
+        self.annotation_entry = existing
+            .and_then(|i| self.annotation.song(song_id).map(|a| a.spans[i]))
+            .map(|sp| match sp.chord {
+                Some(c) => c.symbol(),
+                None => "NC".into(),
+            })
+            .unwrap_or_default();
+    }
+
+    /// Applies the typed chord symbol to the selected range.
+    fn apply_typed_chord(&mut self, song_id: u32) {
+        let Some((s, e)) = self.annotation.pending_range else {
+            self.annotation.status = "select a range first".into();
+            return;
+        };
+        // A typo must not overwrite a good label with a wrong one.
+        let Some(chord) = crate::annotation::model::parse_chord(&self.annotation_entry) else {
+            self.annotation.status = format!("unrecognised chord {:?}", self.annotation_entry);
+            return;
+        };
+        self.annotation.insert_span(
+            song_id,
+            crate::annotation::model::Span {
+                start_step: s,
+                end_step: e,
+                chord,
+            },
+        );
+        self.annotation.status.clear();
+        // Step on to the next range so labelling a run of bars is type-enter-type-enter.
+        let next_s = e;
+        let next_e = self.snap_next(next_s as f64) as u32;
+        self.annotation.pending_range = Some((next_s, next_e));
+        self.piano_roll
+            .set_selection(Some((next_s as f64, next_e as f64)));
+    }
+
+    /// The annotation toolbar: transport, meter, grid offset, snap, chord entry, save.
+    fn annotation_toolbar_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(song_id) = self.current_song.map(|i| self.songs[i].song_id) else {
+            ui.label("no song loaded");
+            return;
+        };
+        let ready = self.annotation.bounce.is_some();
+
+        ui.horizontal_wrapped(|ui| {
+            // --- Transport -------------------------------------------------------------------
+            // No play/pause here: the app's own transport button drives the bounce (see
+            // `sync_annotation`). A second one would be a second source of truth for the same state.
+            let mut looping = self
+                .audio
+                .as_ref()
+                .and_then(|a| {
+                    a.shared
+                        .lock()
+                        .ok()
+                        .map(|st| st.bounce.loop_range.is_some())
+                })
+                .unwrap_or(false);
+            if ui
+                .add_enabled(ready, egui::Checkbox::new(&mut looping, "Loop selection"))
+                .on_hover_text("Repeat the selected range — seamless, because the song is bounced.")
+                .changed()
+            {
+                self.set_annotation_loop(looping);
+            }
+            ui.separator();
+
+            // --- Grid ------------------------------------------------------------------------
+            let mut bpb = self.annotation.grid_for(song_id, 0.0).beats_per_bar;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut bpb)
+                        .range(2..=12)
+                        .prefix("meter "),
+                )
+                .on_hover_text("Beats per bar.")
+                .changed()
+            {
+                self.annotation.song_mut(song_id).beats_per_bar = bpb.clamp(2, 12);
+                self.annotation.dirty = true;
+                self.refresh_grid(song_id);
+            }
+            if ui
+                .button("Bar 1 here")
+                .on_hover_text(
+                    "Move the grid so bar 1 starts at the playhead — for songs that open with a \
+                     pickup.",
+                )
+                .clicked()
+            {
+                let t = self.piano_roll.display_tick().max(0.0);
+                let g = self.piano_roll.grid();
+                // Keep the offset inside one bar; the grid repeats, so a whole-bar shift is a no-op.
+                let bar = g.bar_steps().unwrap_or(1.0);
+                self.annotation.song_mut(song_id).grid_offset_steps = (t % bar).round() as i64;
+                self.annotation.dirty = true;
+                self.refresh_grid(song_id);
+            }
+            if ui.button("Reset grid").clicked() {
+                self.annotation.song_mut(song_id).grid_offset_steps = 0;
+                self.annotation.dirty = true;
+                self.refresh_grid(song_id);
+            }
+            ui.checkbox(&mut self.annotation.beat_snap, "Beat snap")
+                .on_hover_text("Snap to beats instead of bars (for a bar with two chords).");
+            let mut chords_on = self
+                .audio
+                .as_ref()
+                .and_then(|a| a.shared.lock().ok().map(|st| st.bounce.chords_on))
+                .unwrap_or(false);
+            if ui
+                .checkbox(&mut chords_on, "Play chords")
+                .on_hover_text(
+                    "Play the annotated chord over the song, on a piano lifted from the ROM. \
+                     Off by default — it fights busy passages, and sometimes the track alone is \
+                     easier to judge.",
+                )
+                .changed()
+                && let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+            {
+                st.bounce.chords_on = chords_on;
+            }
+            // Chord audition level — a quiet reference instrument can be lifted, a loud one tamed,
+            // without relabelling. Read on every output frame, so it needs no re-strike.
+            let prev_gain = self.annotation.chord_gain;
+            ui.add(
+                egui::Slider::new(&mut self.annotation.chord_gain, 0.0..=1.0)
+                    .fixed_decimals(2)
+                    .text("chord vol"),
+            )
+            .on_hover_text("Audition gain for chord playback.");
+            if self.annotation.chord_gain != prev_gain
+                && let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+                && let Some(c) = &mut st.bounce.chords
+            {
+                c.set_gain(self.annotation.chord_gain);
+            }
+            // Which inversion chords voice in. Re-voices the sounding chord at once, so flipping
+            // through root / 1st / 2nd / 3rd is itself an ear check.
+            let mut inv = self.annotation.chord_inversion;
+            egui::ComboBox::from_label("inversion")
+                .selected_text(match inv {
+                    1 => "1st",
+                    2 => "2nd",
+                    3 => "3rd",
+                    _ => "root",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut inv, 0, "root");
+                    ui.selectable_value(&mut inv, 1, "1st");
+                    ui.selectable_value(&mut inv, 2, "2nd");
+                    ui.selectable_value(&mut inv, 3, "3rd");
+                });
+            if inv != self.annotation.chord_inversion {
+                self.annotation.chord_inversion = inv;
+                if let Some(audio) = &self.audio
+                    && let Ok(mut st) = audio.shared.lock()
+                    && let Some(c) = &mut st.bounce.chords
+                {
+                    c.set_inversion(inv);
+                }
+            }
+            ui.separator();
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            let (done, total) = self.annotation.labeled_bars(
+                song_id,
+                self.piano_roll.grid(),
+                self.overview.as_ref().map(|o| o.total_steps).unwrap_or(0),
+            );
+            ui.label(
+                egui::RichText::new(format!("{done}/{total} bars"))
+                    .monospace()
+                    .color(crate::theme::TEXT_DIM),
+            );
+            if self.annotation.dirty {
+                ui.label(egui::RichText::new("● unsaved").color(crate::theme::ACCENT));
+            }
+            if ui.button("💾 Save to JSON").clicked() {
+                self.save_annotations();
+            }
+            if !self.annotation.status.is_empty() {
+                ui.label(
+                    egui::RichText::new(&self.annotation.status)
+                        .small()
+                        .color(crate::theme::TEXT_DIM),
+                );
+            }
+        });
+    }
+
+    /// The chord picker: pops up at the region you just dragged, listing every chord you can use.
+    ///
+    /// A 12×10 grid of every root × every quality — one click per label, no typing, no menu diving.
+    /// It shows the *whole* vocabulary on purpose: the set is exactly what the ml label space can
+    /// represent, so anything absent here is a chord the model could never be scored on, and the
+    /// annotator should never have to wonder which those are.
+    fn chord_picker_ui(&mut self, ctx: &egui::Context, song_id: u32) {
+        use crate::annotation::model::Quality;
+        let Some((px, py)) = self.annotation.picker_at else {
+            return;
+        };
+        let mut close = false;
+        let mut pick: Option<Option<crate::annotation::model::Chord>> = None;
+        let mut uncertain = self.annotation.picker_uncertain;
+        // The chord whose button is under the cursor this frame, if any — auditioned below once it
+        // changes (so a glide within one cell doesn't re-strike, but moving to a neighbour does).
+        let mut hovered: Option<crate::annotation::model::Chord> = None;
+
+        let area = egui::Area::new(egui::Id::new("chord_picker"))
+            .order(egui::Order::Foreground)
+            // Keep the whole grid on screen when the drag ends near an edge.
+            .constrain(true)
+            .fixed_pos(egui::pos2(px, py))
+            .show(ctx, |ui| {
+                egui::Frame::popup(&ctx.style()).show(ui, |ui| {
+                    ui.set_max_width(430.0);
+                    ui.horizontal(|ui| {
+                        let (s, e) = self.annotation.pending_range.unwrap_or((0, 0));
+                        let bars = self
+                            .piano_roll
+                            .grid()
+                            .bar_beat_at(s as f64)
+                            .map(|(b, _)| format!("bar {b}"))
+                            .unwrap_or_default();
+                        ui.label(
+                            egui::RichText::new(format!("{bars}  ({} steps)", e.saturating_sub(s)))
+                                .small()
+                                .color(crate::theme::TEXT_DIM),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // `❌`, not `✕`: the loaded fonts (Inter / SF Pro + egui's emoji font)
+                            // have no U+2715, so it renders as tofu. This is the glyph the Stats
+                            // window's close button already uses.
+                            if ui.small_button("❌").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                    ui.checkbox(&mut uncertain, "quality uncertain (scores root only)");
+                    ui.separator();
+
+                    egui::Grid::new("chord_grid")
+                        .spacing([2.0, 2.0])
+                        .show(ui, |ui| {
+                            // Header: the quality of each column.
+                            ui.label("");
+                            for q in Quality::ALL {
+                                let name = if q.suffix().is_empty() {
+                                    "maj"
+                                } else {
+                                    q.suffix()
+                                };
+                                ui.label(
+                                    egui::RichText::new(name)
+                                        .small()
+                                        .color(crate::theme::TEXT_DIM),
+                                );
+                            }
+                            ui.end_row();
+
+                            for root in 0..12u8 {
+                                let chord = |q: Quality| crate::annotation::model::Chord {
+                                    root,
+                                    quality: q,
+                                    quality_uncertain: uncertain,
+                                };
+                                // Row header doubles as the colour key used in the ribbon.
+                                let swatch = crate::piano_roll::chord_color(Some(root), false);
+                                ui.label(
+                                    egui::RichText::new(chord(Quality::Major).symbol())
+                                        .monospace()
+                                        .color(swatch),
+                                );
+                                for q in Quality::ALL {
+                                    let c = chord(q);
+                                    let btn = egui::Button::new(
+                                        egui::RichText::new(c.symbol()).monospace().size(11.0),
+                                    )
+                                    .min_size(egui::vec2(34.0, 18.0))
+                                    .fill(crate::piano_roll::chord_color(Some(root), true));
+                                    let resp = ui.add(btn);
+                                    if resp.clicked() {
+                                        pick = Some(Some(c));
+                                    }
+                                    // Hovering a cell auditions its chord, so the picker is an
+                                    // ear-led scan of the vocabulary rather than guess-and-click.
+                                    if resp.hovered() {
+                                        hovered = Some(c);
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("N.C.")
+                            .on_hover_text("No chord here — a real annotation, not a gap.")
+                            .clicked()
+                        {
+                            pick = Some(None);
+                        }
+                        if ui
+                            .button("🗑 clear")
+                            .on_hover_text("Remove any label over this range")
+                            .clicked()
+                        {
+                            self.delete_selected_span(song_id);
+                            close = true;
+                        }
+                        // Typing stays available: it beats the grid once you know the vocabulary.
+                        let entry = ui.add(
+                            egui::TextEdit::singleline(&mut self.annotation_entry)
+                                .desired_width(70.0)
+                                .hint_text("Am7"),
+                        );
+                        if entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            self.apply_typed_chord(song_id);
+                            close = true;
+                        }
+                    });
+                });
+            });
+
+        self.annotation.picker_uncertain = uncertain;
+        // Audition the chord whose cell the cursor entered — only when it differs from last frame's
+        // cell, so dwelling on one button rings once and a glide across the grid plays each in turn.
+        // Compared on `(root, quality)`: `quality_uncertain` flipping isn't a musical change.
+        if let Some(c) = hovered {
+            let key = (c.root % 12, c.quality);
+            let same = self
+                .annotation
+                .picker_hovered
+                .map(|p| (p.root % 12, p.quality) == key)
+                .unwrap_or(false);
+            if !same {
+                let start = self.annotation.pending_range.map(|(s, _)| s).unwrap_or(0);
+                self.strike_chord((start, c));
+            }
+        }
+        self.annotation.picker_hovered = hovered;
+        if let Some(chord) = pick {
+            self.set_selected_chord(song_id, chord);
+            close = true;
+        }
+        // Escape, or a press anywhere outside the popup, dismisses it. (A *press*, not a release:
+        // the drag-release that opened the picker lands on the same frame, and testing releases
+        // would close it instantly.)
+        //
+        // Never on the opening frame: a right-click's *press* arrives in the same frame the popup
+        // first appears, and a popup constrained away from a screen edge doesn't sit under the
+        // cursor — so it would dismiss itself the instant it opened.
+        let rect = area.response.rect;
+        let just_opened = std::mem::take(&mut self.annotation.picker_just_opened);
+        let pressed_outside = !just_opened
+            && ctx.input(|i| {
+                i.pointer.any_pressed()
+                    && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p))
+            });
+        if pressed_outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            close = true;
+        }
+        if close {
+            self.annotation.picker_at = None;
+            self.annotation.picker_hovered = None;
+        }
+    }
+
+    /// Writes `chord` over the selected range and advances the selection to the next one, so a run
+    /// of bars is drag-once-then-click-click-click.
+    fn set_selected_chord(&mut self, song_id: u32, chord: Option<crate::annotation::model::Chord>) {
+        let Some((s, e)) = self.annotation.pending_range else {
+            return;
+        };
+        self.annotation.insert_span(
+            song_id,
+            crate::annotation::model::Span {
+                start_step: s,
+                end_step: e,
+                chord,
+            },
+        );
+        self.annotation.status.clear();
+        let next_s = e;
+        let next_e = self.snap_next(next_s as f64) as u32;
+        self.annotation.pending_range = Some((next_s, next_e));
+        self.piano_roll
+            .set_selection(Some((next_s as f64, next_e as f64)));
+    }
+
+    /// Sounds `section`'s chord now through the audition voice. Passing the span, not just the
+    /// chord, lets the voice recognise the playhead arriving at the same section and hold it rather
+    /// than restrike it.
+    fn strike_chord(&mut self, section: (u32, crate::annotation::model::Chord)) {
+        if let Some(audio) = &self.audio
+            && let Ok(mut st) = audio.shared.lock()
+        {
+            st.bounce.chords_on = true; // an explicit audition overrides the toggle
+            if let Some(c) = &mut st.bounce.chords {
+                c.strike(section);
+            }
+        }
+    }
+
+    /// Re-installs the grid after the meter/offset changed.
+    fn refresh_grid(&mut self, song_id: u32) {
+        let spb = self
+            .overview
+            .as_ref()
+            .map(|o| o.steps_per_beat)
+            .unwrap_or(0.0);
+        let grid = self.annotation.grid_for(song_id, spb);
+        self.piano_roll.set_grid(grid);
+    }
+
+    /// Arms or clears the loop over the current selection. Arming also starts the transport — the
+    /// only reason to loop a range is to hear it.
+    fn set_annotation_loop(&mut self, on: bool) {
+        let range = self.annotation.pending_range.filter(|_| on);
+        let (Some(b), Some(audio)) = (&self.annotation.bounce, &self.audio) else {
+            return;
+        };
+        let frames = range.map(|(s, e)| (b.frame_of_step(s), b.frame_of_step(e)));
+        if let Ok(mut st) = audio.shared.lock() {
+            st.bounce.loop_range = frames;
+            if let Some((start, _)) = frames {
+                st.bounce.pos = start;
+            }
+        }
+        if frames.is_some() {
+            // `playing` is derived from `paused` each frame, so unpause rather than force the flag.
+            self.paused = false;
+        }
+    }
+
+    /// Deletes the selected span.
+    fn delete_selected_span(&mut self, song_id: u32) {
+        let Some((s, e)) = self.annotation.pending_range else {
+            return;
+        };
+        if let Some(song) = self.annotation.songs.get_mut(&song_id) {
+            let before = song.spans.len();
+            song.spans
+                .retain(|sp| !(sp.start_step < e && sp.end_step > s));
+            if song.spans.len() != before {
+                self.annotation.dirty = true;
+            }
+        }
+        self.annotation_entry.clear();
+    }
+
+    /// Turns annotation mode on/off.
+    ///
+    /// On: the live playlist is parked (installing a bounce makes the callback ignore it entirely)
+    /// and the current song is re-rendered to memory. Off: the bounce is dropped and live playback
+    /// picks up exactly where it was.
+    fn set_annotation_mode(&mut self, on: bool) {
+        self.annotation.enabled = on;
+        self.piano_roll.set_edit(on);
+        self.piano_roll.set_selection(None);
+        if on {
+            self.load_annotations();
+            self.capture_chord_instrument();
+            // Hand the output to the annotation mixer up front, not when the bounce lands: chord
+            // playback has to work while the render is still going.
+            if let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+            {
+                st.bounce.active = true;
+                st.bounce.buffer = None;
+                st.bounce.pos = 0;
+                st.bounce.loop_range = None;
+            }
+            self.request_bounce();
+            if let Some(ov) = &self.overview {
+                let total = ov.total_steps;
+                self.piano_roll.zoom_to_fit(total);
+            }
+        } else {
+            self.annotation.bounce = None;
+            self.annotation.bounce_for = None;
+            self.annotation.job = None;
+            // `audio` is `None` when no output device exists — the app still runs, so annotation
+            // must not assume a stream.
+            if let Some(audio) = &self.audio
+                && let Ok(mut st) = audio.shared.lock()
+            {
+                st.bounce.active = false;
+                st.bounce.buffer = None;
+                st.bounce.playing = false;
+                st.bounce.loop_range = None;
+            }
+            // Restore the pre-inferred lane the roll shows outside annotation.
+            if let Some(i) = self.current_song {
+                let (a, s) = (self.songs[i].archive_index, self.songs[i].song_id);
+                self.piano_roll.set_chords(self.chord_spans(a, s));
+            }
+        }
+    }
+
+    /// Lifts the chord-audition voice out of the ROM.
+    ///
+    /// Prefers Emerald's song 435 ("Trainers' School"), which opens on a clean piano; falls back to
+    /// the song being annotated so chord playback still works on a ROM without that id.
+    /// Arms the chord-audition voicer with the embedded piano reference instrument, inheriting the
+    /// user's current gain/inversion. The instrument ships with the app (`include_bytes!`'d from
+    /// `chord_data/piano_c4.wav`), so this no longer surveys the loaded ROM — the audition always
+    /// has a known-good piano regardless of the track, instead of grabbing a bass thump on a sparse
+    /// one.
+    fn capture_chord_instrument(&mut self) {
+        let instrument = crate::annotation::chord_voice::embedded_piano();
+        if let Some(audio) = &self.audio
+            && let Ok(mut st) = audio.shared.lock()
+        {
+            let mut v = crate::annotation::ChordVoicer::new(instrument);
+            // A freshly armed voicer must inherit the user's current audition settings, not the
+            // defaults — otherwise switching songs snaps the volume back and loses the inversion.
+            v.set_gain(self.annotation.chord_gain);
+            v.set_inversion(self.annotation.chord_inversion);
+            st.bounce.chords = Some(v);
+        }
+    }
+
+    /// The annotated chord covering `step`, if any, with the start step of the span it came from —
+    /// the voice keys its retrigger on the span, so two neighbouring bars labelled the same chord
+    /// each get struck.
+    fn chord_at(&self, song_id: u32, step: f64) -> Option<(u32, crate::annotation::model::Chord)> {
+        self.annotation.song(song_id)?.spans.iter().find_map(|sp| {
+            ((sp.start_step as f64) <= step && (sp.end_step as f64) > step)
+                .then_some(sp.chord)
+                .flatten()
+                .map(|c| (sp.start_step, c))
+        })
+    }
+
+    /// Starts rendering the current song to memory. The work is sliced across frames by
+    /// [`Self::poll_bounce`] rather than threaded — annotation runs on the web too, where there is
+    /// no thread to spawn and a multi-second block would freeze the tab.
+    fn request_bounce(&mut self) {
+        let Some(i) = self.current_song else { return };
+        let Some(ov) = &self.overview else { return };
+        let (archive_index, song_id) = (self.songs[i].archive_index, self.songs[i].song_id);
+        if self.annotation.bounce_for == Some(song_id) {
+            return;
+        }
+        let total_steps = ov.total_steps;
+        let archive = self.archives[archive_index].clone();
+        let config = self.device_settings().clone();
+        self.annotation.bounce = None;
+        self.annotation.bounce_for = Some(song_id);
+        self.annotation.job = BounceJob::new(&*archive, song_id, total_steps, config);
+        self.annotation.status = "rendering…".into();
+        // The old buffer must go now: it belongs to a different song.
+        if let Some(audio) = &self.audio
+            && let Ok(mut st) = audio.shared.lock()
+        {
+            st.bounce.buffer = None;
+            st.bounce.playing = false;
+            st.bounce.loop_range = None;
+        }
+    }
+
+    /// Advances an in-flight bounce by one frame's worth of work, installing it when done.
+    fn poll_bounce(&mut self, ctx: &egui::Context) {
+        /// Frames of audio rendered per UI frame. ~0.4 s of audio per tick keeps a 60 Hz UI
+        /// responsive while still bouncing a 3-minute song in a few seconds.
+        const BUDGET: usize = 12_000;
+
+        let Some(job) = &mut self.annotation.job else {
+            return;
+        };
+        job.step(BUDGET);
+        if !job.is_done() {
+            self.annotation.status = format!("rendering… {:.0}%", job.progress() * 100.0);
+            ctx.request_repaint(); // keep the slices coming
+            return;
+        }
+        let bounce = Arc::new(self.annotation.job.take().unwrap().finish());
+        self.annotation.status = format!("{:.1}s buffered", bounce.frames() as f64 / 32768.0);
+        self.annotation.bounce = Some(bounce.clone());
+        if let Some(audio) = &self.audio
+            && let Ok(mut st) = audio.shared.lock()
+        {
+            st.bounce.buffer = Some(bounce);
+            st.bounce.pos = 0;
+            st.bounce.playing = false;
+            st.bounce.loop_range = None;
+            st.resampler.reset();
+        }
+    }
+
+    /// Moves the annotation playhead to `step` (a scrub). Instant: the bounce makes this an index.
+    fn annotation_seek(&mut self, step: f64) {
+        let Some(b) = &self.annotation.bounce else {
+            return;
+        };
+        let frame = b.frame_of_step(step.max(0.0) as u32);
+        if let Some(audio) = &self.audio
+            && let Ok(mut st) = audio.shared.lock()
+        {
+            st.bounce.pos = frame;
+        }
+        // The roll follows the cursor even with no audio device — the app runs without one.
+        self.piano_roll.set_display_tick(step.max(0.0));
+    }
+
+    /// The annotation JSON path for the loaded source.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn annotation_path(&self) -> std::path::PathBuf {
+        crate::annotation::source_dir().join(crate::annotation::filename_for(&self.current_source))
+    }
+
+    /// Loads the current game's labels, once per source.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_annotations(&mut self) {
+        if self.annotation.loaded_for.as_deref() == Some(self.current_source.as_str()) {
+            return;
+        }
+        let path = self.annotation_path();
+        match crate::annotation::load_file(&path) {
+            Ok(Some(file)) => {
+                self.annotation.songs = file.songs.into_iter().map(|s| (s.song_id, s)).collect();
+                self.annotation.status = format!("loaded {}", path.display());
+            }
+            Ok(None) => {
+                // No committed JSON for this source — recover the last session's unsaved work
+                // (a "Bar 1 here" / meter edit the user didn't think to save) from the
+                // eframe-storage stash. The JSON remains the record; the stash only speaks when
+                // there is no record yet, so a hand-edited file is never overwritten.
+                if let Some(file) = self.p.annotations.get(&self.current_source).cloned() {
+                    self.annotation.songs =
+                        file.songs.into_iter().map(|s| (s.song_id, s)).collect();
+                    self.annotation.status = "recovered unsaved edits from last session".into();
+                } else {
+                    self.annotation.songs.clear();
+                    self.annotation.status = "no labels yet".into();
+                }
+            }
+            // Never fall back to "empty" on a bad file: that would look like no labels, and the
+            // next save would overwrite them.
+            Err(e) => {
+                self.annotation.songs.clear();
+                self.annotation.status = format!("⚠ {e}");
+                self.annotation.loaded_for = None;
+                return;
+            }
+        }
+        self.annotation.loaded_for = Some(self.current_source.clone());
+        self.annotation.dirty = false;
+    }
+
+    /// The current game's labels as the file that gets written/downloaded.
+    fn annotation_file(&self) -> crate::annotation::model::GameAnnotations {
+        let game_code = self
+            .archives
+            .first()
+            .and_then(|a| a.as_any().downcast_ref::<GbaRom>())
+            .and_then(GbaRom::game_code);
+        let spb = self
+            .overview
+            .as_ref()
+            .map(|o| o.steps_per_beat)
+            .unwrap_or(0.0);
+        self.annotation
+            .to_file(self.current_source.clone(), game_code, spb)
+    }
+
+    /// Persists the current game's labels.
+    ///
+    /// Native writes `ml/annotations/*.json` in the source tree — that file *is* the training data.
+    /// Web has no filesystem, so it downloads the same JSON for the user to drop in; the schema is
+    /// identical either way, which is the point of the format being the contract.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_annotations(&mut self) {
+        let file = self.annotation_file();
+        let path = self.annotation_path();
+        match crate::annotation::save_file(&path, &file) {
+            Ok(()) => {
+                self.annotation.dirty = false;
+                self.annotation.status = format!("saved {}", path.display());
+            }
+            Err(e) => self.annotation.status = format!("⚠ {e}"),
+        }
+    }
+
+    /// Downloads the current game's labels as JSON (web has no source tree to write to).
+    ///
+    /// The working copy already lives in eframe storage (see [`Self::stash_annotations`]), so this
+    /// is an *export* rather than the only thing standing between the user and data loss.
+    #[cfg(target_arch = "wasm32")]
+    fn save_annotations(&mut self) {
+        let file = self.annotation_file();
+        let name = crate::annotation::filename_for(&self.current_source);
+        match serde_json::to_string_pretty(&file) {
+            Ok(json) => {
+                crate::web::download(&name, json.as_bytes());
+                self.annotation.dirty = false;
+                self.annotation.status = format!("downloaded {name}");
+            }
+            Err(e) => self.annotation.status = format!("⚠ encode: {e}"),
+        }
+    }
+
+    /// Keeps the working copy in eframe storage so a refresh (web) or restart (native) can't
+    /// destroy unsaved work — most often a grid/meter edit ("Bar 1 here", meter, beat snap) the
+    /// user doesn't think to commit, since it isn't a chord label.
+    ///
+    /// This is **session recovery, not the record**: the source-tree JSON (native) and the
+    /// downloaded file (web) stay authoritative. The stash only fills in when there is no
+    /// committed file yet, so it can never silently overwrite a hand-edited record.
+    fn stash_annotations(&mut self) {
+        if !self.annotation.dirty {
+            return;
+        }
+        let file = self.annotation_file();
+        self.p.annotations.insert(self.current_source.clone(), file);
+    }
+
+    /// Web: restore the working copy from eframe storage.
+    #[cfg(target_arch = "wasm32")]
+    fn load_annotations(&mut self) {
+        if self.annotation.loaded_for.as_deref() == Some(self.current_source.as_str()) {
+            return;
+        }
+        self.annotation.songs = self
+            .p
+            .annotations
+            .get(&self.current_source)
+            .map(|f| f.songs.iter().map(|s| (s.song_id, s.clone())).collect())
+            .unwrap_or_default();
+        self.annotation.status = if self.annotation.songs.is_empty() {
+            "no labels yet".into()
+        } else {
+            format!("{} songs from browser storage", self.annotation.songs.len())
+        };
+        self.annotation.loaded_for = Some(self.current_source.clone());
+        self.annotation.dirty = false;
     }
 
     /// Opens a native file dialog; on web spawns the async picker. Loaded bytes arrive via
@@ -1326,13 +2319,20 @@ impl OptimeApp {
             ));
         }
 
-        // The overview bar (whole track) with the on-screen window highlighted.
+        // The overview bar (whole track) with the on-screen window highlighted. In annotation mode
+        // it is also the scrub control — dragging it seeks, which only works because the song is
+        // bounced (the sequencer itself cannot seek).
+        let mut scrub_to: Option<f64> = None;
         if let (Some(tex), Some(ov)) = (&self.overview_tex, &self.overview) {
             let bar_h = 32.0;
-            let (bar, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), bar_h),
-                egui::Sense::hover(),
-            );
+            let scrubbable = self.annotation.enabled;
+            let sense = if scrubbable {
+                egui::Sense::click_and_drag()
+            } else {
+                egui::Sense::hover()
+            };
+            let (bar, resp) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), bar_h), sense);
             let painter = ui.painter_at(bar);
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             painter.image(tex.id(), bar, uv, egui::Color32::WHITE);
@@ -1351,21 +2351,63 @@ impl OptimeApp {
                 egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(170)),
             );
             painter.rect_stroke(bar, 2.0, egui::Stroke::new(1.0_f32, crate::theme::HAIRLINE));
+
+            if scrubbable {
+                // The playhead, so the bar reads as a transport rather than a thumbnail.
+                let px = bar.min.x + frac(self.piano_roll.display_tick()) * bar.width();
+                painter.line_segment(
+                    [egui::pos2(px, bar.min.y), egui::pos2(px, bar.max.y)],
+                    egui::Stroke::new(1.0_f32, crate::theme::ACCENT),
+                );
+                if (resp.dragged() || resp.clicked())
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    let f = ((p.x - bar.min.x) / bar.width().max(1.0)).clamp(0.0, 1.0) as f64;
+                    scrub_to = Some(f * total);
+                }
+            }
+        }
+        if let Some(step) = scrub_to {
+            self.annotation_seek(step);
         }
 
-        // The current tempo marking, below the bar.
-        if snap.active && snap.bpm > 0.0 {
-            ui.add_space(2.0);
-            ui.label(
-                egui::RichText::new(format!("\u{2669} = {}", snap.bpm.round() as i64))
-                    .monospace()
-                    .color(egui::Color32::from_gray(0xc0)),
-            );
-        }
+        // The current tempo marking and musical position, below the bar.
+        ui.horizontal(|ui| {
+            if snap.active && snap.bpm > 0.0 {
+                ui.label(
+                    egui::RichText::new(format!("\u{2669} = {}", snap.bpm.round() as i64))
+                        .monospace()
+                        .color(egui::Color32::from_gray(0xc0)),
+                );
+            }
+            // Where the playhead is in musical terms — the coordinate an annotator thinks in.
+            if let Some((bar, beat)) = self
+                .piano_roll
+                .grid()
+                .bar_beat_at(self.piano_roll.display_tick())
+            {
+                ui.label(
+                    egui::RichText::new(format!("Bar {bar} · {beat}"))
+                        .monospace()
+                        .color(crate::theme::TEXT_DIM),
+                );
+            }
+        });
         ui.add_space(2.0);
 
+        if self.annotation.enabled {
+            self.annotation_toolbar_ui(ui);
+            ui.add_space(2.0);
+        }
+
         // The scrolling roll fills the rest of the panel.
-        self.piano_roll.draw(ui, snap.active);
+        let input = self.piano_roll.draw(ui, snap.active);
+        if self.annotation.enabled {
+            self.annotation_roll_input(input);
+            if let Some(song_id) = self.current_song.map(|i| self.songs[i].song_id) {
+                self.chord_picker_ui(ui.ctx(), song_id);
+            }
+        }
     }
 
     /// The full song list with like / add-to-playlist menus and status badges.
@@ -2387,6 +3429,24 @@ impl OptimeApp {
             );
         }
 
+        // Chord annotation. Available on the web too — the labelling itself needs nothing but the
+        // engine, and only where the JSON *lands* differs (source tree vs browser download).
+        ui.separator();
+        let mut annotating = self.annotation.enabled;
+        let changed = ui
+            .checkbox(&mut annotating, "Data annotation mode")
+            .on_hover_text(
+                "Turn the piano roll into a chord-labelling platform: scroll to zoom (shift+wheel \
+                 or middle-drag to pan), drag the overview bar to scrub, drag in the chord lane to \
+                 select a range, then type a chord symbol (Am7, F#m, Csus4, NC; trailing ? = \
+                 quality uncertain). The song is rendered to memory on entry so bars can be looped \
+                 seamlessly (a few seconds; ~47 MB for 3 minutes).",
+            )
+            .changed();
+        if changed {
+            self.set_annotation_mode(annotating);
+        }
+
         // Build provenance: which commit this binary was built from, and when. Embedded at compile
         // time by build.rs (falls back to "unknown" when git isn't available).
         ui.separator();
@@ -2860,15 +3920,16 @@ impl OptimeApp {
                 self.piano_roll.draw(&mut child, snap.active);
 
                 // The incoming song's preview alongside it while dragging.
-                if let Some(p) = &self.swipe_preview {
-                    let r = rect.translate(egui::vec2(self.swipe_offset + p.dir as f32 * w, 0.0));
+                let offset = self.swipe_offset;
+                if let Some(p) = &mut self.swipe_preview {
+                    let r = rect.translate(egui::vec2(offset + p.dir as f32 * w, 0.0));
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
                     child.set_clip_rect(rect);
                     p.roll.draw(&mut child, true);
                 }
                 // The old song's roll sliding out after a committed swipe.
-                if let Some((roll, side)) = &self.swipe_out {
-                    let r = rect.translate(egui::vec2(self.swipe_offset + side * w, 0.0));
+                if let Some((roll, side)) = &mut self.swipe_out {
+                    let r = rect.translate(egui::vec2(offset + *side * w, 0.0));
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
                     child.set_clip_rect(rect);
                     roll.draw(&mut child, true);
@@ -2988,7 +4049,12 @@ impl eframe::App for OptimeApp {
         let playing = snap.active && !self.paused;
         let dt = ctx.input(|i| i.stable_dt) as f64;
         self.piano_roll.advance(&snap, dt, playing);
-        if let Some(look) = &mut self.look_ahead {
+        if self.annotation.enabled {
+            // Annotation drives everything from the bounce: notes from the whole-song overview
+            // (the look-ahead's rolling window can't serve an editor that scrubs backwards) and the
+            // playhead from the buffer position.
+            self.sync_annotation(ctx);
+        } else if let Some(look) = &mut self.look_ahead {
             let target =
                 self.piano_roll.display_tick().ceil() as u32 + crate::piano_roll::RUN_AHEAD_TICKS;
             // Bounded catch-up so a stalled/zero-BPM sequence can't spin forever.

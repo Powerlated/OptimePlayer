@@ -12,16 +12,23 @@
 //! gradient, so this is exact synchronous data-parallel SGD — and it scales to all
 //! cores regardless of how small the model is.
 
-use burn::module::{Module, ModuleVisitor, Param};
+use burn::module::{AutodiffModule, Module, ModuleVisitor, Param};
 use burn::optim::{GradientsParams, Optimizer};
 use burn::prelude::*;
 use rayon::prelude::*;
 
-use crate::model::KeyChordModel;
-use crate::train::{Back, Inner, MlDevice};
+use crate::backend::{Back, Inner, MlDevice};
 
 /// Default shard count for a data-parallel step: the machine's logical-core count.
+///
+/// **1 under `--features cuda`/`gpu`.** Sharding exists only to fill CPU cores the ndarray
+/// backend can't; a GPU already parallelizes *within* the batch, so splitting it into
+/// rayon-driven shards just serializes launches on the same device and adds a
+/// gradient-sum pass. One shard makes [`dp_step`] a plain single-device step.
 pub fn default_shards() -> usize {
+    if cfg!(feature = "cuda") || cfg!(feature = "gpu") {
+        return 1;
+    }
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(8)
@@ -48,8 +55,9 @@ impl ModuleVisitor<Back> for GradAdder {
 }
 
 /// Add `other`'s gradients into `acc`, walking `model`'s params to recover ranks.
-fn add_grads(
-    model: &KeyChordModel<Back>,
+/// Generic over the module type so both the frame and event models reuse it.
+fn add_grads<M: Module<Back>>(
+    model: &M,
     acc: GradientsParams,
     other: GradientsParams,
 ) -> GradientsParams {
@@ -68,18 +76,19 @@ fn add_grads(
 /// that the **sum** over shards is the intended full-batch quantity (e.g. divide
 /// each shard's loss by `n_shards` for a batch-mean objective). Returns the updated
 /// model and the summed loss.
-pub fn dp_step<O, F>(
-    model: KeyChordModel<Back>,
+pub fn dp_step<M, O, F>(
+    model: M,
     optim: &mut O,
     lr: f64,
     device: &MlDevice,
     indices: &[usize],
     n_shards: usize,
     shard_grads: F,
-) -> (KeyChordModel<Back>, f64)
+) -> (M, f64)
 where
-    O: Optimizer<KeyChordModel<Back>, Back>,
-    F: Fn(&KeyChordModel<Back>, &[usize]) -> (GradientsParams, f64) + Sync,
+    M: AutodiffModule<Back> + Clone + Send + Sync,
+    O: Optimizer<M, Back>,
+    F: Fn(&M, &[usize]) -> (GradientsParams, f64) + Sync,
 {
     let n_shards = n_shards.max(1);
     let shard_size = indices.len().div_ceil(n_shards).max(1);

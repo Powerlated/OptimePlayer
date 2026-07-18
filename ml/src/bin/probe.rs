@@ -6,19 +6,22 @@
 //!     --annotate BPEE=../crates/optime-app/src/song_names/pokemon_emerald.json \
 //!     --annotate A3UJ=../crates/optime-app/src/song_names/mother_3.json
 //! # Then probe on top of a (pre)trained encoder:
-//! cargo run --release --bin probe -- [start_prefix]
-//! #   start_prefix defaults to models/model, else models/pretrained
-//! #   → models/probe(.mpk) + models/probe.json
+//! cargo run --release --bin probe -- [start_prefix] [--out-dir models]
+//! #   start_prefix defaults to <out-dir>/00-frame/model, else .../pretrained
+//! #   → <out-dir>/probe(.mpk) + probe.json
 //! ```
+//!
+//! Generation 00 only: the probe reads that backbone's pooled encoder features and
+//! its dedicated is-music head, which the learned-token generations don't carry.
 
 use burn::config::Config;
 use burn::module::Module;
 use burn::record::CompactRecorder;
+use optime_ml::backend::{Back, MlDevice};
+use optime_ml::cli::{Args, Kind};
 use optime_ml::data::load_songs;
-use optime_ml::model::{KeyChordModel, ModelConfig};
+use optime_ml::m00_frame::{KeyChordModel, ModelConfig};
 use optime_ml::probe::{self, build_music_set, ProbeConfig};
-use optime_ml::train::Back;
-use optime_ml::train::MlDevice;
 use std::path::{Path, PathBuf};
 
 fn load(prefix: &Path, device: &MlDevice) -> (KeyChordModel<Back>, ModelConfig) {
@@ -32,14 +35,15 @@ fn load(prefix: &Path, device: &MlDevice) -> (KeyChordModel<Back>, ModelConfig) 
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let args = Args::parse();
     let device = MlDevice::default();
+    let frame_dir = args.out_dir.join(Kind::Frame.dir());
 
     // Pick the starting encoder: explicit arg, else fine-tuned model, else pretrained.
-    let prefix: PathBuf = match args.get(1) {
+    let prefix: PathBuf = match args.positional.first() {
         Some(p) => PathBuf::from(p),
-        None if Path::new("models/model.json").exists() => PathBuf::from("models/model"),
-        None => PathBuf::from("models/pretrained"),
+        None if frame_dir.join("model.json").exists() => frame_dir.join("model"),
+        None => frame_dir.join("pretrained"),
     };
     if !prefix.with_extension("json").exists() {
         eprintln!(
@@ -71,6 +75,6 @@ fn main() {
         &config,
         &train,
         &val,
-        Path::new("models"),
+        &args.out_dir,
     );
 }
