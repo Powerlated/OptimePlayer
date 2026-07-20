@@ -6,7 +6,7 @@
 //! out-of-the-box values.
 
 use crate::TRACK_COUNT;
-use crate::synth_controller::{DelaySmoothing, HighShelf, PopSmoothing};
+use crate::synth_controller::{DelaySmoothing, HighBandCompressor, HighShelf, PopSmoothing};
 use crate::tuning::TuningSystem;
 use crate::waveform::InstrumentResampleMode;
 
@@ -151,6 +151,11 @@ pub struct PerDeviceSettings {
     pub mixer_resample: MixerResampleSettings,
     /// Per-device master high-shelf EQ applied to the final mix.
     pub shelf: HighShelf,
+    /// Per-device 1-band high-band compressor; `enabled_psg`/`enabled_sampled` select which bus it
+    /// runs on (each independently, only when the intermediate mixer is engaged). `#[serde(default)]`
+    /// so old saves load with every field at its `HighBandCompressor::default()` value (off).
+    #[serde(default)]
+    pub high_band_compress: HighBandCompressor,
     /// Stereo-expander delay-change handling: 0 = immediate, 1 = hold during notes.
     pub delay_smoothing_choice: usize,
     pub mixer_sample_rate: u32,
@@ -255,6 +260,7 @@ impl PerDeviceSettings {
                 cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
             },
             shelf: HighShelf::default(),
+            high_band_compress: HighBandCompressor::default(),
             delay_smoothing_choice: 0,
             mixer_sample_rate: 48_000,
             use_mixer: false,
@@ -308,6 +314,7 @@ impl PerDeviceSettings {
                 cutoff_hz: 12700.0,
                 gain_db: -10.0,
             },
+            high_band_compress: HighBandCompressor::default(),
             track_enables: all_tracks_enabled(),
         }
     }
@@ -354,6 +361,15 @@ impl PerDeviceSettings {
                 cutoff_hz: 14000.0,
                 gain_db: -24.0,
             },
+            high_band_compress: HighBandCompressor {
+                // Out of the box the dynamic taming targets the DirectSound bus — the static
+                // high-shelf above is already doing the broad EQ cut; this is the dynamic
+                // counterpart that catches transients the shelf can't. PSG stays untouched by
+                // default; users can opt in via the settings panel.
+                enabled_psg: false,
+                enabled_sampled: true,
+                ..HighBandCompressor::default()
+            },
             track_enables: all_tracks_enabled(),
         }
     }
@@ -398,6 +414,7 @@ impl PerDeviceSettings {
                 enabled: false,
                 ..HighShelf::default()
             },
+            high_band_compress: HighBandCompressor::default(),
             track_enables: all_tracks_enabled(),
         }
     }
