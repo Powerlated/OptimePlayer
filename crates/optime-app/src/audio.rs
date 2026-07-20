@@ -142,6 +142,30 @@ fn update_meters(st: &mut crate::player::AudioState, t0: f64, frames: usize) {
     let budget = (frames as f64 / st.sample_rate.max(1.0)).max(1e-9);
     let load = ((now_seconds() - t0) / budget) as f32;
     st.dsp_load = st.dsp_load * 0.85 + load.clamp(0.0, 2.0) * 0.15;
+    update_high_comp_meter(st, frames);
+}
+
+/// Smooths the high-band-compressor gain-reduction meter: instant catch on deeper reduction,
+/// ~200 ms one-pole release back toward 0. The compressor's own detector is already attack/release
+/// smoothed per sample; this peak-hold-with-release makes the per-buffer reading readable at UI
+/// frame rate.
+fn update_high_comp_meter(st: &mut crate::player::AudioState, frames: usize) {
+    let target = st
+        .controller
+        .as_ref()
+        .map(|c| c.high_band_gr_db() as f32)
+        .unwrap_or(0.0);
+    let held = st.high_comp_gr_db;
+    if target <= held {
+        // Deeper-than-held sample: peaks read straight through.
+        st.high_comp_gr_db = target;
+    } else {
+        // Release toward the held-then-0 target with a ~200 ms one-pole time constant, advanced
+        // by the buffer's wall-clock length (`frames / sample_rate` seconds).
+        let dt = frames as f32 / st.sample_rate.max(1.0) as f32;
+        let alpha = (dt / 0.200).min(1.0);
+        st.high_comp_gr_db = held + (target - held) * alpha;
+    }
 }
 
 /// Drives the audio-thread-owned playlist: drains UI commands, triggers the end-of-song fade,

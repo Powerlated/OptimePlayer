@@ -329,6 +329,9 @@ pub struct OptimeApp {
     cpu_history: std::collections::VecDeque<f32>,
     /// Rolling history of the active synthesizer voice count.
     voice_history: std::collections::VecDeque<f32>,
+    /// Smoothed high-band-compressor gain reduction (dB, ≤ 0), sampled from the audio thread in
+    /// [`Self::sync_audio`] for the small GR bar inside the high-band-compressor settings block.
+    high_comp_gr_db: f32,
 
     /// Cross-thread inbox for asynchronously-loaded file bytes: (source key, bytes).
     pending_file: FileInbox,
@@ -420,6 +423,7 @@ impl OptimeApp {
             swipe_out: None,
             cpu_history: std::collections::VecDeque::new(),
             voice_history: std::collections::VecDeque::new(),
+            high_comp_gr_db: 0.0,
             pending_file: Arc::new(Mutex::new(None)),
             vis_tab: VisTab::PianoRoll,
             piano_roll: PianoRoll::default(),
@@ -2290,6 +2294,9 @@ impl OptimeApp {
             self.voice_history.pop_front();
         }
 
+        // Sample the high-band-compressor GR meter (drawn inside its settings block).
+        self.high_comp_gr_db = st.high_comp_gr_db;
+
         if let Some(controller) = &st.controller {
             snap.active = true;
             snap.steps = controller.steps_elapsed();
@@ -3100,6 +3107,9 @@ impl OptimeApp {
         // keep independent copies.
         let device_name = self.current_device_name();
         let is_gba = self.current_is_gba();
+        // Snapshot before the mutable `d` borrow below — the high-band-compressor GR bar reads
+        // this inside the HBC sub-block.
+        let gr_db = self.high_comp_gr_db;
         let d = self.device_settings_mut();
         ui.heading("Settings");
         ui.label(format!("Settings are stored independently for each supported emulated device. You are currently editing the settings for: {device_name}"));
@@ -3390,6 +3400,87 @@ impl OptimeApp {
                 );
             });
         }
+        ui.separator();
+        // Per-bus high-band compressor (PSG and sampled). Each bus gets its own enable so a
+        // user can tame DirectSound highs without touching PSG, or vice-versa. Both require
+        // the intermediate mixer (the buses are only isolated there).
+        ui.label("High-band compressor");
+        let hbc = &mut d.high_band_compress;
+        let use_mixer = d.use_mixer;
+        ui.add_enabled_ui(use_mixer, |ui| {
+            ui.checkbox(&mut hbc.enabled_psg, "Apply to PSG voices")
+                .on_hover_text(
+                    "Run the high-band compressor on the PSG (square/wave/noise) bus. PSG \
+                        voices bypass the intermediate mixer, so this runs at the output rate.",
+                );
+            ui.checkbox(
+                &mut hbc.enabled_sampled,
+                "Apply to sampled (DirectSound) voices",
+            )
+            .on_hover_text(
+                "Run the high-band compressor on the sampled (DirectSound / SWAR) bus, at \
+                        the intermediate mixer rate. Catches harsh transients the static \
+                        high-shelf above can't track dynamically.",
+            );
+            let any = hbc.enabled_psg || hbc.enabled_sampled;
+            ui.add_enabled_ui(any, |ui| {
+                ui.add(
+                    egui::Slider::new(&mut hbc.cutoff_hz, 500.0..=16000.0)
+                        .text("Cutoff")
+                        .suffix(" Hz")
+                        .logarithmic(true),
+                )
+                .on_hover_text(
+                    "LPF/HPF split frequency. Only signal above this is compressed; the \
+                        rest passes untouched.",
+                );
+                ui.add(
+                    egui::Slider::new(&mut hbc.threshold_db, -60.0..=0.0)
+                        .text("Threshold")
+                        .suffix(" dB"),
+                )
+                .on_hover_text("Sidechain level above which the high band is compressed.");
+                ui.add(
+                    egui::Slider::new(&mut hbc.ratio, 1.0..=20.0)
+                        .text("Ratio")
+                        .logarithmic(true),
+                )
+                .on_hover_text(
+                    "Compression ratio above the threshold. 1:1 = no compression; higher = \
+                        more aggressive taming.",
+                );
+                ui.add(
+                    egui::Slider::new(&mut hbc.attack_ms, 0.1..=50.0)
+                        .text("Attack")
+                        .suffix(" ms")
+                        .logarithmic(true),
+                )
+                .on_hover_text(
+                    "How fast the compressor reacts to a rising sidechain. Fast catches \
+                        transients; slow lets them through.",
+                );
+                ui.add(
+                    egui::Slider::new(&mut hbc.release_ms, 1.0..=500.0)
+                        .text("Release")
+                        .suffix(" ms")
+                        .logarithmic(true),
+                )
+                .on_hover_text(
+                    "How fast the compressor recovers after the sidechain drops. Too fast \
+                        pumps; too slow squashes the next transient.",
+                );
+                ui.add(
+                    egui::Slider::new(&mut hbc.makeup_db, 0.0..=24.0)
+                        .text("Makeup")
+                        .suffix(" dB"),
+                )
+                .on_hover_text(
+                    "Gain applied after compression. Use it to bring the tamed signal back \
+                        up to the desired level.",
+                );
+                draw_gr_bar(ui, gr_db);
+            });
+        });
         ui.separator();
         ui.label("Tuning system");
         egui::ComboBox::from_id_salt("tuning")
@@ -4259,6 +4350,47 @@ impl eframe::App for OptimeApp {
         #[cfg(not(target_arch = "wasm32"))]
         ctx.request_repaint();
     }
+}
+
+/// A small horizontal gain-reduction meter for the high-band compressor: 0 dB at the right edge,
+/// `−GR_FULL_SCALE_DB` at the left, fill grows leftward as `gr_db` goes more negative. Industry
+/// convention (compression-only, no makeup); silent (0 dB) when neither bus is active.
+fn draw_gr_bar(ui: &mut egui::Ui, gr_db: f32) {
+    /// Full-scale span (left edge = `−this` dB). Covers the typical pop/electronic 1–12 dB range
+    /// with headroom for heavy limiting without pegging instantly.
+    const GR_FULL_SCALE_DB: f32 = 24.0;
+    let accent = crate::theme::ACCENT;
+    let warn = ui.visuals().warn_fg_color;
+    let frac = (gr_db.abs() / GR_FULL_SCALE_DB).clamp(0.0, 1.0);
+    let color = if frac > 0.75 { warn } else { accent };
+    ui.horizontal(|ui| {
+        ui.label("GR");
+        let (rect, _resp) = ui.allocate_exact_size(egui::vec2(180.0, 10.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+        // Fill grows from the right (0 dB anchor) leftward as reduction deepens.
+        let fill_w = rect.width() * frac;
+        let fill_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - fill_w, rect.top()),
+            egui::vec2(fill_w, rect.height()),
+        );
+        if fill_w > 0.0 {
+            painter.rect_filled(fill_rect, 2.0, color);
+        }
+        // Tick at the −12 dB mark.
+        let tick_x = rect.right() - rect.width() * (12.0 / GR_FULL_SCALE_DB);
+        painter.line_segment(
+            [
+                egui::pos2(tick_x, rect.top()),
+                egui::pos2(tick_x, rect.bottom()),
+            ],
+            egui::Stroke::new(1.0_f32, ui.visuals().noninteractive().fg_stroke.color),
+        );
+        ui.label(format!("{gr_db:+.1} dB")).on_hover_text(
+            "Live gain reduction applied by the high-band compressor (excludes makeup). \
+                Updates as the audio plays; peaks catch instantly, releases over ~200 ms.",
+        );
+    });
 }
 
 /// One scrolling history graph for the top-bar meters: an icon label, a filled line plot, and

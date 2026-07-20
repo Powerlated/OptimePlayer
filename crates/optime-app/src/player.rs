@@ -140,6 +140,10 @@ pub struct AudioState {
     pub dsp_load: f32,
     /// Number of currently sounding synthesizer voices.
     pub voices: usize,
+    /// Smoothed high-band-compressor gain reduction (dB, ≤ 0) for the settings-panel meter.
+    /// Peak-hold-fast / release-slow so the per-sample envelope is readable at UI frame rate.
+    /// 0 when no high-band compressor is active.
+    pub high_comp_gr_db: f32,
     /// Monotonic time (seconds) the audio callback last ran. Used on the web to detect a
     /// suspended/stalled `AudioContext` (iOS suspends it on background) so the stream can be
     /// rebuilt; `f64::NEG_INFINITY` until the first callback fires.
@@ -168,6 +172,7 @@ impl AudioState {
             sample_rate: 48_000.0,
             dsp_load: 0.0,
             voices: 0,
+            high_comp_gr_db: 0.0,
             last_callback: f64::NEG_INFINITY,
             playback: Playback::default(),
             bounce: BounceTransport::default(),

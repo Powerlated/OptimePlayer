@@ -25,11 +25,14 @@ pub mod messages;
 mod reverb;
 mod vis;
 
-pub use config::{DEFAULT_POP_SLEW_SECONDS, DelaySmoothing, HighShelf, PopSmoothing};
+pub use config::{
+    DEFAULT_POP_SLEW_SECONDS, DelaySmoothing, HighBandCompressor, HighShelf, PopSmoothing,
+};
 pub use vis::{FsVisController, SongOverview, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
 use crate::dsp::biquad_filter::BiquadFilter;
+use crate::dsp::high_band_compressor::{HighBandCompressorParams, HighBandCompressorStage};
 use crate::dsp::resample::StreamResampler;
 use crate::synth::MAX_BLOCK;
 use crate::waveform::{Frame, InstrumentResampleMode, Sample};
@@ -441,6 +444,13 @@ pub struct SynthController {
     psg_comp_l: BiquadFilter,
     psg_comp_r: BiquadFilter,
     psg_comp_was_active: bool,
+    /// Per-bus high-band compressors (PSG and sampled). Each stage runs independently so a peak
+    /// on one bus doesn't duck the other. State is cleared on the inactive->active edge (see
+    /// [`Self::compress_psg_high_band`] / [`Self::compress_sampled_high_band`]).
+    high_comp_psg: HighBandCompressorStage,
+    high_comp_sampled: HighBandCompressorStage,
+    high_comp_psg_was_active: bool,
+    high_comp_sampled_was_active: bool,
     /// MP2K reverb on the sampled bus (amount from the device's `ReverbAmount` event, gated by
     /// `config.mp2k_reverb`).
     reverb: Reverb,
@@ -475,6 +485,10 @@ impl SynthController {
             psg_comp_l: psg_comp_filter(sample_rate),
             psg_comp_r: psg_comp_filter(sample_rate),
             psg_comp_was_active: false,
+            high_comp_psg: HighBandCompressorStage::new(sample_rate),
+            high_comp_sampled: HighBandCompressorStage::new(mixer_rate),
+            high_comp_psg_was_active: false,
+            high_comp_sampled_was_active: false,
             reverb: Reverb::new(),
         })
     }
@@ -533,10 +547,62 @@ impl SynthController {
         (self.psg_comp_l.transform(l), self.psg_comp_r.transform(r))
     }
 
+    /// Tames the high band of the PSG (output-set) bus with [`HighBandCompressorStage`]. A
+    /// transparent pass when `use_mixer` is off or the PSG flag is off; the stage's filter +
+    /// envelope state is cleared on the inactive->active edge so a fresh enable starts clean.
+    /// Mirrors the [`Self::psg_compensate`] gating pattern.
+    #[inline]
+    fn compress_psg_high_band(
+        &mut self,
+        l: Sample,
+        r: Sample,
+        config: &PerDeviceSettings,
+    ) -> Frame {
+        let hbc = &config.high_band_compress;
+        if !config.use_mixer || !hbc.is_active_psg() {
+            self.high_comp_psg_was_active = false;
+            return (l, r);
+        }
+        if !self.high_comp_psg_was_active {
+            self.high_comp_psg.reset_state();
+            self.high_comp_psg_was_active = true;
+        }
+        self.high_comp_psg.process(
+            (l, r),
+            HighBandCompressorParams {
+                cutoff_hz: hbc.cutoff_hz,
+                threshold_db: hbc.threshold_db,
+                ratio: hbc.ratio,
+                attack_ms: hbc.attack_ms,
+                release_ms: hbc.release_ms,
+                makeup_db: hbc.makeup_db,
+            },
+        )
+    }
+
     /// The audio sample rate this controller renders at.
     #[inline]
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate
+    }
+
+    /// The most recent smoothed gain reduction (dB, ≤ 0) applied by the per-bus high-band
+    /// compressors — the deeper of the PSG / sampled bus stages that actually ran on the last
+    /// render. Stages that were bypassed this render (flag flipped false at the top of the bypass
+    /// path) report 0, so disabling a bus can't leave a stale reading on the meter. 0 when
+    /// neither bus is active.
+    pub fn high_band_gr_db(&self) -> f64 {
+        let psg = if self.high_comp_psg_was_active {
+            self.high_comp_psg.last_gr_db()
+        } else {
+            0.0
+        };
+        let sampled = if self.high_comp_sampled_was_active {
+            self.high_comp_sampled.last_gr_db()
+        } else {
+            0.0
+        };
+        psg.min(sampled)
     }
 
     /// Total voices sounding across both synthesizer sets (drives the app's DSP-load / voice stats).
@@ -591,6 +657,10 @@ impl SynthController {
         self.psg_comp_l = psg_comp_filter(sample_rate);
         self.psg_comp_r = psg_comp_filter(sample_rate);
         self.psg_comp_was_active = false;
+        // Rebuild the PSG high-band compressor so its split stays at a fixed frequency in Hz
+        // (the sampled stage runs at the mixer rate; see `prepare_mixer`).
+        self.high_comp_psg.set_sample_rate(sample_rate);
+        self.high_comp_psg_was_active = false;
     }
 
     /// Sequencer steps executed (the visualizer timeline position).
@@ -628,6 +698,9 @@ impl SynthController {
         }
         // The reverb delay is one VBlank of samples at the mixer rate (no-op when unchanged).
         self.reverb.set_rate(self.bank.rate);
+        // The sampled high-band compressor runs at the mixer rate too; rebuild its filters
+        // when the rate changes so its split stays at a fixed Hz.
+        self.high_comp_sampled.set_sample_rate(self.bank.rate);
     }
 
     /// One upsampled stereo sample routed from the mixer set through the bank: the resampler pulls
@@ -636,6 +709,8 @@ impl SynthController {
     fn route_mixer(&mut self, config: &PerDeviceSettings) -> Frame {
         let mixer_synths = &mut self.mixer_synths;
         let reverb = &mut self.reverb;
+        let high_comp_sampled = &mut self.high_comp_sampled;
+        let high_comp_sampled_was_active = &mut self.high_comp_sampled_was_active;
         let enables = &config.track_enables;
         // The MP2K reverb runs on the summed sampled bus at the mixer rate, before the bank upsamples
         // — matching the hardware, where the reverb pre-pass seeds the PCM buffer prior to DMA.
@@ -643,9 +718,35 @@ impl SynthController {
         // The mixer bus is optionally crushed to N-bit here, at the mixer rate and after the reverb,
         // mirroring m4a's 8-bit DirectSound buffer (the crushed samples are what would be DMA'd out).
         let bitcrush = config.bitcrush_mixer.then_some(config.bitcrush_bits);
+        // Snapshot the high-band-compressor settings for the closure. The stage is borrowed mutably
+        // above, so the gating + reset logic is inlined here (mirroring `compress_sampled_high_band`).
+        let hbc = config.high_band_compress;
+        let sampled_active = config.use_mixer && hbc.is_active_sampled();
         let mut render = || {
             let (l, r) = render_set(mixer_synths, enables, config);
             let (l, r) = reverb.process(l, r, reverb_on);
+            // Tame the high band after the reverb (reverb adds HF reflections) and before the
+            // bitcrush (so we don't compress quantisation noise).
+            let (l, r) = if sampled_active {
+                if !*high_comp_sampled_was_active {
+                    high_comp_sampled.reset_state();
+                    *high_comp_sampled_was_active = true;
+                }
+                high_comp_sampled.process(
+                    (l, r),
+                    HighBandCompressorParams {
+                        cutoff_hz: hbc.cutoff_hz,
+                        threshold_db: hbc.threshold_db,
+                        ratio: hbc.ratio,
+                        attack_ms: hbc.attack_ms,
+                        release_ms: hbc.release_ms,
+                        makeup_db: hbc.makeup_db,
+                    },
+                )
+            } else {
+                *high_comp_sampled_was_active = false;
+                (l, r)
+            };
             match bitcrush {
                 Some(bits) => (bitcrush_sample(l, bits), bitcrush_sample(r, bits)),
                 None => (l, r),
@@ -669,7 +770,10 @@ impl SynthController {
 
         let (val_l, val_r) = render_set(&mut self.synths, &config.track_enables, config);
         // The output set is PSG-only when the mixer is engaged; darken it to match DirectSound.
-        let (mut val_l, mut val_r) = self.psg_compensate(val_l, val_r, config);
+        let (val_l, val_r) = self.psg_compensate(val_l, val_r, config);
+        // Per-bus high-band compression (PSG stage; the sampled stage runs inside
+        // `route_mixer`). Both gated on `use_mixer` so direct mode is unaffected.
+        let (mut val_l, mut val_r) = self.compress_psg_high_band(val_l, val_r, config);
         if config.use_mixer {
             let (ml, mr) = self.route_mixer(config);
             val_l += ml;
@@ -722,7 +826,10 @@ impl SynthController {
             let block_out = &mut out[2 * frame..2 * (frame + n)];
             for (i, frame_out) in block_out.chunks_exact_mut(2).enumerate() {
                 // The block-rendered output set is the PSG bus when the mixer is engaged.
-                let (mut l, mut r) = self.psg_compensate(acc_l[i], acc_r[i], config);
+                let (l, r) = self.psg_compensate(acc_l[i], acc_r[i], config);
+                // Per-bus high-band compression (PSG stage; the sampled stage runs inside
+                // `route_mixer`). Matches `next_sample`'s ordering exactly.
+                let (mut l, mut r) = self.compress_psg_high_band(l, r, config);
                 if config.use_mixer {
                     let (ml, mr) = self.route_mixer(config);
                     l += ml;
