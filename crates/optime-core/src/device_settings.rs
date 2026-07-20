@@ -346,7 +346,7 @@ impl PerDeviceSettings {
             mixer_sample_rate: 13379,
             bitcrush_mixer: false,
             bitcrush_bits: 8,
-            psg_crunch_compensation: true,
+            psg_crunch_compensation: false,
             mp2k_reverb: true,
             remove_sample_dc_offset: false,
             mixer_resample: MixerResampleSettings {
@@ -355,18 +355,14 @@ impl PerDeviceSettings {
                 cutoff_hz: 13379,
             },
             shelf: HighShelf {
-                enabled: true,
+                enabled: false,
                 order: 6,
                 q: 0.707,
                 cutoff_hz: 14000.0,
                 gain_db: -24.0,
             },
             high_band_compress: HighBandCompressor {
-                // Out of the box the dynamic taming targets the DirectSound bus — the static
-                // high-shelf above is already doing the broad EQ cut; this is the dynamic
-                // counterpart that catches transients the shelf can't. PSG stays untouched by
-                // default; users can opt in via the settings panel.
-                enabled_psg: false,
+                enabled_psg: true,
                 enabled_sampled: true,
                 ..HighBandCompressor::default()
             },
