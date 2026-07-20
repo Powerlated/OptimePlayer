@@ -205,3 +205,47 @@ fn fill_matches_next_sample_intermediate_mixer_linear() {
     };
     assert_fill_matches_next_sample(&config, "intermediate mixer (linear)");
 }
+
+/// Regression: the sampled-bus high-band compressor runs at the **output** rate, not the mixer
+/// rate. With a low mixer rate (GBA's 13379 Hz, Nyquist ≈ 6689 Hz) and the cutoff slider maxing
+/// at 14 kHz, configuring it on the sampled bus used to compute RBJ coefficients with `w0 > π` —
+/// poles walked outside the unit circle and the bus exploded to NaN/silence the moment the cutoff
+/// slider crossed the mixer Nyquist. Now the stage lives after the bank upsamples, so the cutoff
+/// is bounded by the *output* Nyquist (well above 14 kHz at the 32 kHz engine rate) and the path
+/// stays finite and audible for any cutoff the UI can express.
+#[test]
+fn sampled_high_band_compressor_survives_cutoff_above_mixer_nyquist() {
+    use optime_core::synth_controller::HighBandCompressor;
+    let data = load_demo();
+    let sr = 32768.0;
+    let config = PerDeviceSettings {
+        use_mixer: true,
+        mixer_sample_rate: 13_379, // GBA hardware rate; Nyquist ≈ 6689 Hz
+        high_band_compress: HighBandCompressor {
+            enabled_psg: false,
+            enabled_sampled: true,
+            // 10 kHz is above the *mixer* Nyquist but below the *output* Nyquist — exactly the
+            // configuration that used to silence the bus.
+            cutoff_hz: 10_000.0,
+            threshold_db: -18.0,
+            ratio: 4.0,
+            attack_ms: 2.0,
+            release_ms: 85.53,
+            makeup_db: 0.0,
+        },
+        ..PerDeviceSettings::neutral()
+    };
+    let mut controller = SynthController::new(sr, &*data, 0).expect("SSEQ 0");
+
+    let mut peak = 0.0f32;
+    for _ in 0..(sr as usize * 2) {
+        let (l, r) = controller.next_sample(&config);
+        assert!(l.is_finite() && r.is_finite(), "non-finite output");
+        peak = peak.max(l.abs()).max(r.abs());
+    }
+    // The synth is actually playing over this window, so a near-zero peak would mean the path
+    // silently died — the failure mode the bug produced. Pick a generous floor well above the
+    // noise floor but well below clipping.
+    assert!(peak > 0.01, "output too quiet: peak {peak}");
+    assert!(peak <= 2.0, "output exploded: peak {peak}");
+}
