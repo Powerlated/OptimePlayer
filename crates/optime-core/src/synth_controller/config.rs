@@ -107,13 +107,13 @@ impl Default for HighBandCompressor {
 
 impl HighBandCompressor {
     fn default_cutoff_hz() -> f64 {
-        3000.0
+        13000.0
     }
     fn default_threshold_db() -> f64 {
-        -18.0
+        -60.0
     }
     fn default_ratio() -> f64 {
-        2.5
+        5.0
     }
     fn default_attack_ms() -> f64 {
         2.0
