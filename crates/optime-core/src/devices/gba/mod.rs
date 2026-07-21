@@ -62,20 +62,9 @@ const MAX_DS_CHANNELS: usize = m4a::MAX_DIRECTSOUND_CHANNELS;
 /// `SOUND_MODE_MASVOL` value every Pokémon game passes to `m4aSoundMode`.
 const MASTER_VOLUME: u8 = 12;
 
-/// The output level of the faithful `m4a_1.s` software mixer (`SoundMainRAM`). Each DirectSound
-/// channel accumulates `(envVolSide · s) >> 8` (`s` ∈ [−128, 127]) into an 8-bit (±128) PCM buffer,
-/// so on each output side it reaches `envVolSide / 256` of full scale — a single max-volume channel
-/// spans full scale. Optime carries this as one voice `volume = (envVolLeft + envVolRight) / 256`,
-/// which the panner splits back across the two sides; the split preserves the sum, so the per-side
-/// levels (and thus the dBFS) match the hardware mixer. See `ds_voice_level_matches_pokeemerald`.
-const DS_MIXER_FULL_SCALE: f64 = 256.0;
+const DS_MIXER_FULL_SCALE: f64 = 128.0;
 
-/// PSG (CGB) channels are summed with DirectSound at the analog DAC, *outside* the `m4a_1.s`
-/// software mixer, so their relative level is a hardware analog balance rather than a mixer figure.
-/// Optime places a full-scale PSG channel at a quarter of output full scale (the classic GBA
-/// PSG:DirectSound ratio). PSG sample data is ±0.5, so the `env → volume` scalar tops out at `0.5`
-/// (`0.5 · 0.5 = 0.25`), putting a full PSG channel a factor of 4 below a full DirectSound one.
-const CGB_FULL_SCALE_GAIN: f64 = 0.5;
+const CGB_FULL_SCALE_GAIN: f64 = 1.0;
 
 /// The synth-side identity of a hardware channel slot: which voice it drives and what we last told
 /// the [`SynthController`](crate::SynthController) about it.
