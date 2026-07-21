@@ -4163,11 +4163,9 @@ impl eframe::App for OptimeApp {
         // Narrow screens (phones) get the Spotify-style mobile layout.
         if ctx.screen_rect().width() < 600.0 {
             self.mobile_ui(ctx, &snap);
-            // The animated piano roll lives on the Now Playing tab; the Library / Playlists /
-            // Settings tabs are essentially static, so idle the repaint clock down to 1 Hz there
-            // to save battery on phones. (The mini-player intentionally stops animating so it
-            // doesn't force a faster repaint — see `mini_player`.)
-            if self.mobile_tab == MobileTab::NowPlaying {
+            // On mobile, to save battery, only repaint the Playing and Settings tab for animating
+            // the piano roll and compressor gain reduction bar, respectively.
+            if matches!(self.mobile_tab, MobileTab::NowPlaying | MobileTab::Settings) {
                 #[cfg(target_arch = "wasm32")]
                 ctx.request_repaint_after(std::time::Duration::from_millis(33));
                 #[cfg(not(target_arch = "wasm32"))]
