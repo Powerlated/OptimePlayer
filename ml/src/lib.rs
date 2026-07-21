@@ -48,31 +48,20 @@
 //! Behind the `harvest` feature (pulls in the engine crate):
 //! * [`harvest`]     — run device sequencers headlessly → unlabeled real songs.
 
-pub mod annotations;
-pub mod backbone;
-pub mod backend;
-pub mod cli;
-pub mod dashboard;
-pub mod data;
-pub mod estimate;
-pub mod features;
-pub mod flops;
-#[cfg(feature = "harvest")]
-pub mod harvest;
-pub mod infer;
-pub mod kda;
+pub mod datagen;
+pub mod dataset;
 pub mod m00_frame;
 pub mod m01_event;
 pub mod m02_hier;
 pub mod m03_kda;
-pub mod notes;
-pub mod parallel;
+pub mod nn;
 pub mod pretrain;
-pub mod probe;
-pub mod progress;
-pub mod progression;
-pub mod shared;
-pub mod theory;
-pub mod tokenize;
-pub mod train;
-pub mod transformer;
+pub mod run;
+
+// Re-exports for backward compatibility
+pub use datagen::{notes, progression, theory};
+#[cfg(feature = "harvest")]
+pub use dataset::harvest;
+pub use dataset::{annotations, data, estimate, features, tokenize};
+pub use nn::{backbone, flops, kda, shared, transformer};
+pub use run::{backend, cli, dashboard, infer, parallel, probe, progress, train};

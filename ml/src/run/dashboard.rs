@@ -37,9 +37,9 @@ const DEFAULT_ADDR: &str = "0.0.0.0:7878";
 /// wall time; past it the oldest points drop. Bounds memory on multi-day runs.
 const MAX_BATCH_POINTS: usize = 4000;
 
-const INDEX_HTML: &str = include_str!("../dashboard/index.html");
-const APP_JS: &str = include_str!("../dashboard/app.js");
-const VUE_JS: &str = include_str!("../dashboard/vendor/vue.global.prod.js");
+const INDEX_HTML: &str = include_str!("../../dashboard/index.html");
+const APP_JS: &str = include_str!("../../dashboard/app.js");
+const VUE_JS: &str = include_str!("../../dashboard/vendor/vue.global.prod.js");
 
 /// Reference tempo for every wall-clock figure the dashboard reports.
 ///
