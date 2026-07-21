@@ -2,7 +2,7 @@
 //! alongside the ground truth.
 //!
 //! ```sh
-//! cargo run --release --bin infer -- [val_index] [--backbone frame|event|hier] [--out-dir models]
+//! cargo run --release --bin infer -- [val_index] [--backbone frame|event|hier|kda] [--out-dir models]
 //! ```
 //!
 //! With no positional arg, generates a fresh random song. With an index, uses that
@@ -17,6 +17,7 @@ use optime_ml::infer::{merge_segments, predict};
 use optime_ml::m00_frame::FrameModel;
 use optime_ml::m01_event::EventModel;
 use optime_ml::m02_hier::HierModel;
+use optime_ml::m03_kda::KdaModel;
 use optime_ml::notes::{render_song, Song};
 use optime_ml::theory::{Chord, Key};
 use rand::{rngs::StdRng, SeedableRng};
@@ -55,6 +56,7 @@ fn main() {
         Kind::Frame => run::<FrameModel<Back>>(&prefix, &song, &device),
         Kind::Event => run::<EventModel<Back>>(&prefix, &song, &device),
         Kind::Hier => run::<HierModel<Back>>(&prefix, &song, &device),
+        Kind::Kda => run::<KdaModel<Back>>(&prefix, &song, &device),
     };
 
     println!("=== PREDICTION ({}) ===", args.kind.name());

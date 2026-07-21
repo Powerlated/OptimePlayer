@@ -2,7 +2,7 @@
 //!
 //! ```sh
 //! cargo run --release --bin pretrain -- [epochs] [batch_size] [lr] \
-//!     [--backbone frame|event|hier] [--out-dir models]
+//!     [--backbone frame|event|hier|kda] [--out-dir models]
 //! #   reads data/real_train.bin + data/real_val.bin (produced by `harvest`)
 //! #   → <out-dir>/<00-frame|01-event|02-hier>/pretrained (+ .json)
 //! ```
@@ -18,6 +18,7 @@ use optime_ml::cli::{Args, Kind};
 use optime_ml::data::load_songs;
 use optime_ml::m01_event::{EventModel, EventModelConfig};
 use optime_ml::m02_hier::{HierModel, HierModelConfig};
+use optime_ml::m03_kda::{KdaModel, KdaModelConfig};
 use optime_ml::pretrain::ar::{self, ArPretrainConfig};
 use optime_ml::pretrain::masked::{self, PretrainConfig};
 
@@ -66,6 +67,10 @@ fn main() {
                 &val,
                 &args.out_dir,
             );
+        }
+        Kind::Kda => {
+            let config = ar_config(epochs, batch_size, lr);
+            ar::run::<KdaModel<Back>>(&config, &KdaModelConfig::new(), &train, &val, &args.out_dir);
         }
     }
 }

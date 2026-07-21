@@ -17,6 +17,7 @@
 //! * [`m00_frame`] — hand-engineered 57-dim per-frame feature grid.
 //! * [`m01_event`] — learned frame tokens, param-free scatter-add pooling.
 //! * [`m02_hier`]  — learned frame tokens, set-transformer (CLS attention) pooling.
+//! * [`m03_kda`]   — learned frame tokens (m01's front-end), Kimi Linear (KDA) hybrid trunk.
 //!
 //! Adding a generation means implementing [`backbone::Backbone`] (and optionally
 //! [`backbone::ArBackbone`]) — not copying the training loop.
@@ -36,6 +37,7 @@
 //! * [`data`]        — synthetic dataset generation, retention, example shape.
 //! * [`train`]       — the one supervised multi-task loop, generic over a backbone.
 //! * [`transformer`] — pre-norm encoder with RoPE (burn's has no rotary hook).
+//! * [`kda`]         — Kimi Linear attention (KDA): chunkwise delta-rule mixer + hybrid trunk.
 //! * [`pretrain`]    — self-supervised pretexts: masked-frame (m00) + autoregressive (m01/m02).
 //! * [`parallel`]    — CPU data-parallel optimizer step.
 //! * [`probe`]       — frozen-encoder "is-music" linear probe (weak song-name labels).
@@ -58,9 +60,11 @@ pub mod flops;
 #[cfg(feature = "harvest")]
 pub mod harvest;
 pub mod infer;
+pub mod kda;
 pub mod m00_frame;
 pub mod m01_event;
 pub mod m02_hier;
+pub mod m03_kda;
 pub mod notes;
 pub mod parallel;
 pub mod pretrain;

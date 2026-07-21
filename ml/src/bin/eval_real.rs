@@ -2,7 +2,7 @@
 //!
 //! ```sh
 //! cargo run --release --bin eval_real -- [real_val.bin] \
-//!     [--backbone frame|event|hier] [--out-dir models]
+//!     [--backbone frame|event|hier|kda] [--out-dir models]
 //! ```
 //!
 //! Real game songs are unlabeled, so this reports comparable proxies on a held-out
@@ -32,6 +32,7 @@ use optime_ml::data::load_songs;
 use optime_ml::m00_frame::FrameModel;
 use optime_ml::m01_event::EventModel;
 use optime_ml::m02_hier::HierModel;
+use optime_ml::m03_kda::KdaModel;
 use optime_ml::notes::Song;
 use optime_ml::pretrain::masked::{self, PretrainConfig};
 use optime_ml::theory::NO_CHORD;
@@ -90,6 +91,7 @@ fn main() {
             Kind::Frame => agreement::<FrameModel<Back>>(&model_prefix, &real, &device),
             Kind::Event => agreement::<EventModel<Back>>(&model_prefix, &real, &device),
             Kind::Hier => agreement::<HierModel<Back>>(&model_prefix, &real, &device),
+            Kind::Kda => agreement::<KdaModel<Back>>(&model_prefix, &real, &device),
         }
     } else {
         println!(

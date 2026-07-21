@@ -18,6 +18,9 @@ pub enum Kind {
     Event,
     /// [`crate::m02_hier`] — learned frame tokens, set-transformer pooling.
     Hier,
+    /// [`crate::m03_kda`] — learned frame tokens (m01's front-end), Kimi Linear
+    /// (KDA) hybrid trunk.
+    Kda,
 }
 
 impl Kind {
@@ -26,6 +29,7 @@ impl Kind {
             "frame" | "m00" | "00" => Some(Kind::Frame),
             "event" | "m01" | "01" => Some(Kind::Event),
             "hier" | "m02" | "02" => Some(Kind::Hier),
+            "kda" | "m03" | "03" => Some(Kind::Kda),
             _ => None,
         }
     }
@@ -36,6 +40,7 @@ impl Kind {
             Kind::Frame => "00-frame",
             Kind::Event => "01-event",
             Kind::Hier => "02-hier",
+            Kind::Kda => "03-kda",
         }
     }
 
@@ -44,6 +49,7 @@ impl Kind {
             Kind::Frame => "frame",
             Kind::Event => "event",
             Kind::Hier => "hier",
+            Kind::Kda => "kda",
         }
     }
 }
@@ -82,7 +88,7 @@ impl Args {
                 "--backbone" => {
                     let v = it.next().expect("--backbone needs a value");
                     out.kind = Kind::parse(&v)
-                        .unwrap_or_else(|| panic!("unknown backbone {v:?} (frame|event|hier)"));
+                        .unwrap_or_else(|| panic!("unknown backbone {v:?} (frame|event|hier|kda)"));
                 }
                 "--out-dir" => {
                     out.out_dir = PathBuf::from(it.next().expect("--out-dir needs a path"));
@@ -159,9 +165,13 @@ mod tests {
     fn backbone_aliases_and_dirs() {
         assert_eq!(Kind::parse("m02"), Some(Kind::Hier));
         assert_eq!(Kind::parse("01"), Some(Kind::Event));
+        assert_eq!(Kind::parse("kda"), Some(Kind::Kda));
+        assert_eq!(Kind::parse("m03"), Some(Kind::Kda));
+        assert_eq!(Kind::parse("03"), Some(Kind::Kda));
         assert_eq!(Kind::parse("nope"), None);
         assert_eq!(Kind::Frame.dir(), "00-frame");
         assert_eq!(Kind::Event.dir(), "01-event");
         assert_eq!(Kind::Hier.dir(), "02-hier");
+        assert_eq!(Kind::Kda.dir(), "03-kda");
     }
 }

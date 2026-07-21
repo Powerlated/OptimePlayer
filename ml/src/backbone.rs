@@ -172,6 +172,7 @@ mod tests {
     use crate::m00_frame::FrameModel;
     use crate::m01_event::EventModel;
     use crate::m02_hier::HierModel;
+    use crate::m03_kda::KdaModel;
     use crate::notes::{Instrument, NoteEvent, Song};
     use crate::theory::{N_KEY_CLASSES, N_QUALITY_CLASSES, N_ROOT_CLASSES};
 
@@ -238,5 +239,6 @@ mod tests {
         check_shapes::<FrameModel<Inner>>();
         check_shapes::<EventModel<Inner>>();
         check_shapes::<HierModel<Inner>>();
+        check_shapes::<KdaModel<Inner>>();
     }
 }

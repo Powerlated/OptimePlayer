@@ -52,6 +52,7 @@ use optime_ml::infer::{merge_segments, predict, Prediction};
 use optime_ml::m00_frame::FrameModel;
 use optime_ml::m01_event::EventModel;
 use optime_ml::m02_hier::HierModel;
+use optime_ml::m03_kda::KdaModel;
 use optime_ml::notes::{NoteEvent, FRAMES_PER_BEAT};
 use optime_ml::theory::Key;
 
@@ -87,7 +88,7 @@ fn main() {
     let args = Args::parse();
     if args.positional.len() < 2 {
         eprintln!(
-            "usage: chord_export <archive> <out.ocd> [--names <song_names.json>]              [--backbone frame|event|hier] [--out-dir models]"
+            "usage: chord_export <archive> <out.ocd> [--names <song_names.json>]              [--backbone frame|event|hier|kda] [--out-dir models]"
         );
         std::process::exit(1);
     }
@@ -114,6 +115,7 @@ fn main() {
         Kind::Frame => boxed_predict::<FrameModel<Back>>(&prefix, device),
         Kind::Event => boxed_predict::<EventModel<Back>>(&prefix, device),
         Kind::Hier => boxed_predict::<HierModel<Back>>(&prefix, device),
+        Kind::Kda => boxed_predict::<KdaModel<Back>>(&prefix, device),
     };
 
     let bytes = read_maybe_gzip(Path::new(archive_path));

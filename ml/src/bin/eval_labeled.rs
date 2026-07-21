@@ -2,7 +2,7 @@
 //!
 //! ```sh
 //! cargo run --release --features harvest --bin eval_labeled -- \
-//!     [ann_dir] [rom_dir] [--backbone frame|event|hier] [--out-dir models]
+//!     [ann_dir] [rom_dir] [--backbone frame|event|hier|kda] [--out-dir models]
 //! #   defaults: ann_dir = ml/annotations, rom_dir = ../demos
 //! ```
 //!
@@ -28,6 +28,7 @@ use optime_ml::infer;
 use optime_ml::m00_frame::FrameModel;
 use optime_ml::m01_event::EventModel;
 use optime_ml::m02_hier::HierModel;
+use optime_ml::m03_kda::KdaModel;
 use optime_ml::notes::NoteEvent;
 use optime_ml::theory::{chord_label_to_root_quality, NO_CHORD};
 use std::path::{Path, PathBuf};
@@ -208,6 +209,7 @@ fn main() {
         Kind::Frame => run::<FrameModel<Back>>(&prefix, &cuts, seq_len, &device),
         Kind::Event => run::<EventModel<Back>>(&prefix, &cuts, seq_len, &device),
         Kind::Hier => run::<HierModel<Back>>(&prefix, &cuts, seq_len, &device),
+        Kind::Kda => run::<KdaModel<Back>>(&prefix, &cuts, seq_len, &device),
     };
 
     println!("\nvs. hand labels ({}):", args.kind.name());

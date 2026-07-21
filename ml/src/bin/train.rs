@@ -2,7 +2,7 @@
 //!
 //! ```sh
 //! cargo run --release --bin train -- [epochs] [batch_size] [lr] \
-//!     [--backbone frame|event|hier] [--out-dir models] [--pretrained <prefix>]
+//!     [--backbone frame|event|hier|kda] [--out-dir models] [--pretrained <prefix>]
 //! #   reads data/train.bin + data/val.bin (run `generate_data` first)
 //! #   → <out-dir>/<00-frame|01-event|02-hier>/model (+ .json)
 //! ```
@@ -23,6 +23,7 @@ use optime_ml::data::load_songs;
 use optime_ml::m00_frame::FrameModel;
 use optime_ml::m01_event::EventModel;
 use optime_ml::m02_hier::HierModel;
+use optime_ml::m03_kda::KdaModel;
 use optime_ml::notes::Song;
 use optime_ml::train::{self, TrainConfig};
 use std::path::Path;
@@ -51,6 +52,7 @@ fn main() {
         Kind::Frame => go::<FrameModel<Back>>(&cfg, &train_songs, &val_songs, &args),
         Kind::Event => go::<EventModel<Back>>(&cfg, &train_songs, &val_songs, &args),
         Kind::Hier => go::<HierModel<Back>>(&cfg, &train_songs, &val_songs, &args),
+        Kind::Kda => go::<KdaModel<Back>>(&cfg, &train_songs, &val_songs, &args),
     }
 }
 

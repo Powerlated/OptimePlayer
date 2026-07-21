@@ -109,7 +109,10 @@ impl<B: Backend> RopeEncoder<B> {
 }
 
 /// `[batch, heads, seq, seq]`, true where position `i` must not see `j` (`j > i`).
-fn causal_mask<B: Backend>(
+///
+/// `pub(crate)`: [`crate::kda`]'s `KimiEncoder` reuses this for its NoPE
+/// full-attention layers rather than duplicating the mask construction.
+pub(crate) fn causal_mask<B: Backend>(
     batch: usize,
     heads: usize,
     seq: usize,
