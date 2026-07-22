@@ -173,7 +173,7 @@ pub fn run(config: &PretrainConfig, train: &[Song], val: &[Song], out_dir: &Path
         precision: crate::backend::precision::<Back>(),
         epochs: config.epochs,
         context: ContextWindow::from_frames(seq),
-        data,
+        data: data.clone(),
         params: model.num_params(),
         flops_per_window: <KeyChordModel<Back> as Backbone<Back>>::flops_per_window(
             &config.model,

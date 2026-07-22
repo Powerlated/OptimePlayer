@@ -343,9 +343,10 @@ pub mod build {
             if !want.accepts(&file.source, ann.song_id) {
                 continue;
             }
-            let Some((notes, _spb)) = harvest_song_full(data, ann.song_id) else {
+            let Some(h) = harvest_song_full(data, ann.song_id) else {
                 continue;
             };
+            let notes = h.notes;
             let Some(key_label) = ann.key_label() else {
                 // The key head is supervised per window; without a key there is nothing to train it
                 // on, and inventing one would be a fabricated label.
@@ -378,11 +379,91 @@ pub mod build {
                     notes: win_notes,
                     chord_labels: win.iter().map(|l| l.expect("complete").chord).collect(),
                     is_music: Some(true), // hand-annotated implies a real music track
+                    ..Song::default()
                 });
                 stats.windows_kept += 1;
             }
         }
         (out, stats)
+    }
+
+    /// Turns one game's annotations into **whole labeled songs** (variable length,
+    /// intro+loop+loop) with a per-frame [`Song::label_mask`] — the VARLEN
+    /// (long-context m03) counterpart of [`songs_from_annotations`].
+    ///
+    /// The mask makes partial coverage usable: unannotated frames (including the
+    /// second loop pass, which the app's annotation timeline never covers) and
+    /// **uncertain-quality** frames are masked out of the loss instead of dropping
+    /// the song. Songs still need a key (the key head is supervised per song) and
+    /// at least one trustworthy labeled frame.
+    pub fn whole_songs_from_annotations(
+        file: &GameAnnotations,
+        data: &dyn SoundData,
+        max_frames: usize,
+        want: Split,
+    ) -> (Vec<Song>, BuildStats) {
+        let mut out = Vec::new();
+        let mut stats = BuildStats::default();
+
+        for ann in &file.songs {
+            if !want.accepts(&file.source, ann.song_id) {
+                continue;
+            }
+            let Some(h) = harvest_song_full(data, ann.song_id) else {
+                continue;
+            };
+            let Some(key_label) = ann.key_label() else {
+                stats.songs_missing_key += 1;
+                continue;
+            };
+            let total_frames = h.notes.iter().map(|n| n.end_frame).max().unwrap_or(0) as usize;
+            if total_frames == 0 {
+                stats.dropped_no_notes += 1;
+                continue;
+            }
+            let labels = ann.frame_labels(file.steps_per_beat, total_frames);
+            let chord_labels: Vec<usize> = labels
+                .iter()
+                .map(|l| l.map(|f| f.chord).unwrap_or(NO_CHORD))
+                .collect();
+            let mask: Vec<bool> = labels
+                .iter()
+                .map(|l| l.is_some_and(|f| f.quality_certain))
+                .collect();
+            if !mask.iter().any(|&m| m) {
+                stats.dropped_incomplete += 1;
+                continue;
+            }
+            let song = Song {
+                key_label,
+                n_frames: total_frames,
+                notes: h.notes,
+                chord_labels,
+                is_music: Some(true),
+                label_mask: Some(mask),
+                loop_frame: h.loop_frame,
+                ..Song::default()
+            };
+            out.push(crate::pack::truncate_song(
+                &song,
+                max_frames.saturating_sub(1),
+            ));
+            stats.windows_kept += 1;
+        }
+        (out, stats)
+    }
+
+    /// Every annotation file under `dir` as whole labeled songs — the VARLEN
+    /// counterpart of [`songs_from_dir`].
+    pub fn whole_songs_from_dir(
+        ann_dir: &Path,
+        rom_dir: &Path,
+        max_frames: usize,
+        want: Split,
+    ) -> Result<(Vec<Song>, BuildStats), String> {
+        each_file(ann_dir, rom_dir, |file, data| {
+            whole_songs_from_annotations(file, data, max_frames, want)
+        })
     }
 
     /// Every annotation file under `dir`, paired with its archive from `rom_dir` by `source`.
@@ -394,6 +475,18 @@ pub mod build {
         rom_dir: &Path,
         seq_len: usize,
         want: Split,
+    ) -> Result<(Vec<Song>, BuildStats), String> {
+        each_file(ann_dir, rom_dir, |file, data| {
+            songs_from_annotations(file, data, seq_len, want)
+        })
+    }
+
+    /// Run `build` on every annotation file under `ann_dir`, resolving each file's
+    /// archive from `rom_dir` and accumulating the stats.
+    fn each_file(
+        ann_dir: &Path,
+        rom_dir: &Path,
+        build: impl Fn(&GameAnnotations, &dyn SoundData) -> (Vec<Song>, BuildStats),
     ) -> Result<(Vec<Song>, BuildStats), String> {
         let files = load_dir(ann_dir)?;
         let mut all = Vec::new();
@@ -411,7 +504,7 @@ pub mod build {
             let Some(data) = archives.first() else {
                 return Err(format!("{}: no sound archive found", path.display()));
             };
-            let (songs, s) = songs_from_annotations(file, &**data, seq_len, want);
+            let (songs, s) = build(file, &**data);
             all.extend(songs);
             total.windows_kept += s.windows_kept;
             total.dropped_incomplete += s.dropped_incomplete;

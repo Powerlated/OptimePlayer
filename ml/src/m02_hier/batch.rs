@@ -160,6 +160,7 @@ mod tests {
             ],
             chord_labels: vec![0; 8],
             is_music: None,
+            ..Song::default()
         }
     }
 
@@ -220,6 +221,7 @@ mod tests {
             notes,
             chord_labels: vec![0; 2],
             is_music: None,
+            ..Song::default()
         };
         let data = HierBatchData::build(std::slice::from_ref(&song));
         // 2 frames x MAX_POLY kept, extras dropped.

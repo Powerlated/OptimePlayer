@@ -56,6 +56,9 @@ fn main() {
     let train_songs =
         load_songs("data/real_train.bin").expect("load data/real_train.bin (run `harvest` first)");
     let val_songs = load_songs("data/real_val.bin").unwrap_or_default();
+    // Whole-song dataset → 256-frame windows (the probe rides m00's fixed grid).
+    let train_songs = optime_ml::pack::window_dataset(&train_songs, 256);
+    let val_songs = optime_ml::pack::window_dataset(&val_songs, 256);
 
     let (model, config) = load(&prefix, &device);
     println!("frozen encoder: {}", prefix.display());

@@ -94,6 +94,14 @@ where
     let shard_size = indices.len().div_ceil(n_shards).max(1);
     let shards: Vec<&[usize]> = indices.chunks(shard_size).collect();
 
+    // GPU builds deliberately use one shard. Run directly on the current model:
+    // `fork` exists to give concurrent CPU shards independent autodiff leaves, but
+    // with one shard it only copies the model and adds device/graph overhead.
+    if shards.len() == 1 {
+        let (grads, loss) = shard_grads(&model, shards[0]);
+        return (optim.step(lr, model, grads), loss);
+    }
+
     // Per shard, in parallel: `fork` an **independent** copy of the weights (same
     // `ParamId`s, fresh autodiff leaves — cloning instead deadlocks, since clones
     // share the parameter tensors every thread differentiates), compute the shard

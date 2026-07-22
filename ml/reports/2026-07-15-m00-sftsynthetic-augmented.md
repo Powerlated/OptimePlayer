@@ -1,7 +1,7 @@
 # optime-ml run — 2026-07-15 augmented
 
 **Date:** 2026-07-15 · **Wall time:** ~1:52 · **Machine:** AMD Ryzen 8840U, 8c/16t · **Backend:** ndarray + 16-way CPU DP
-**Goal:** Add on-the-fly **transposition augmentation** + fix the **song-level train/val split**, vs. the [baseline](2026-07-15-baseline.md). Everything else identical.
+**Goal:** Add on-the-fly **transposition augmentation** + fix the **song-level train/val split**, vs. the [baseline](2026-07-15-m00-sftsynthetic-baseline.md). Everything else identical.
 
 ## Dataset
 

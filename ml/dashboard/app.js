@@ -449,6 +449,10 @@ createApp({
             <span class="k">FLOPs / batch</span>
             <span class="v">{{ fmtFlops(meta.flops_per_window * (meta.train_config.batch_size || 1)) }}<em>× batch of {{ meta.train_config.batch_size }}</em></span>
           </div>
+          <div class="fact">
+            <span class="k">FLOPs / run</span>
+            <span class="v">{{ fmtFlops(meta.flops_per_window * 3 * meta.data.train_windows * meta.epochs) }}<em>fwd+bwd ≈ 3× fwd · {{ meta.data.train_windows.toLocaleString() }} win × {{ meta.epochs }} ep</em></span>
+          </div>
         </div>
       </div>
 
@@ -464,6 +468,10 @@ createApp({
           <div class="fact">
             <span class="k">Music (augmented)</span>
             <span class="v">{{ meta.data.augmented_hours.toFixed(0) }} h<em>× {{ meta.data.transpositions }} transpositions</em></span>
+          </div>
+          <div class="fact" v-for="s in (meta.data.sources || [])" :key="s.name">
+            <span class="k">↳ {{ s.name }}</span>
+            <span class="v">{{ s.windows.toLocaleString() }} win<em>{{ s.hours.toFixed(1) }} h · {{ (100 * s.windows / meta.data.train_windows).toFixed(0) }}%</em></span>
           </div>
           <div class="fact">
             <span class="k">Windows</span>

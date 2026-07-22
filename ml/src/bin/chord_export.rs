@@ -58,10 +58,10 @@ use optime_ml::theory::Key;
 
 use optime_core::{load_all, SoundData};
 
-/// Window length fed to the model — the full context it has (a bidirectional
-/// encoder over this many frames, no cross-window memory). Equals the model's
-/// `max_seq_len` and the training sequence length (128 frames = 32 beats).
-const SEQ_LEN: usize = 128;
+/// Window length fed to a **fixed-window** backbone (m00–m02) — the full context
+/// it has, equal to its training sequence length. The VARLEN backbone (kda) gets
+/// the whole song in one shot instead (truncated at its nominal `n_frames`).
+const SEQ_LEN: usize = 256;
 
 /// One song's reduced chord timeline: contiguous segments as `(start_step, label)`
 /// plus the final boundary step.
@@ -111,6 +111,9 @@ fn main() {
         );
         std::process::exit(1);
     }
+    // VARLEN backbone: whole-song inference, truncated at the model's cap.
+    let varlen_cap =
+        (args.kind == Kind::Kda).then(|| optime_ml::m03_kda::KdaModelConfig::new().n_frames - 1);
     let predict: Predict = match args.kind {
         Kind::Frame => boxed_predict::<FrameModel<Back>>(&prefix, device),
         Kind::Event => boxed_predict::<EventModel<Back>>(&prefix, device),
@@ -134,7 +137,7 @@ fn main() {
                     continue;
                 }
             }
-            if let Some(out) = export_song(&predict, data.as_ref(), id) {
+            if let Some(out) = export_song(&predict, data.as_ref(), id, varlen_cap) {
                 println!("  song {id}: {} chord segments", out.segments.len());
                 songs.insert(id, out);
             }
@@ -157,31 +160,44 @@ fn export_song<P: Fn(&[NoteEvent], usize) -> Prediction>(
     predict: P,
     data: &dyn SoundData,
     id: u32,
+    varlen_cap: Option<usize>,
 ) -> Option<SongOut> {
-    let (notes, steps_per_beat) = harvest_song_full(data, id)?;
+    let h = harvest_song_full(data, id)?;
+    let (notes, steps_per_beat) = (h.notes, h.steps_per_beat);
     let total_frames = notes.iter().map(|n| n.end_frame).max().unwrap_or(0) as usize;
     if total_frames == 0 {
         return None;
     }
 
-    // Infer window-by-window (rebasing frames), concatenating per-frame labels and
-    // remembering the most confident window's key as the song key (roman is spelled
-    // relative to it).
     let mut labels: Vec<usize> = Vec::with_capacity(total_frames);
     let mut best_key = Key::from_label(0);
     let mut best_conf = -1.0_f32;
-    let n_windows = total_frames.div_ceil(SEQ_LEN);
-    for w in 0..n_windows {
-        let win_start = (w * SEQ_LEN) as u32;
-        let win_end = win_start + SEQ_LEN as u32;
-        let win_notes = clip_window(&notes, win_start, win_end);
-        let pred = predict(&win_notes, SEQ_LEN);
-        if pred.key_confidence > best_conf {
-            best_conf = pred.key_confidence;
-            best_key = pred.key;
+    if let Some(cap) = varlen_cap {
+        // Whole-song inference: the generative backbone reads the entire song and
+        // decodes every frame's chord in one pass.
+        let n = total_frames.min(cap);
+        let win_notes = clip_window(&notes, 0, n as u32);
+        let pred = predict(&win_notes, n);
+        best_key = pred.key;
+        labels.extend_from_slice(&pred.chord_labels[..n]);
+        // A song past the cap (rare at 2047 frames) keeps its last decoded label.
+        labels.resize(total_frames, labels.last().copied().unwrap_or(0));
+    } else {
+        // Fixed-window backbones: infer window-by-window (rebasing frames),
+        // remembering the most confident window's key as the song key.
+        let n_windows = total_frames.div_ceil(SEQ_LEN);
+        for w in 0..n_windows {
+            let win_start = (w * SEQ_LEN) as u32;
+            let win_end = win_start + SEQ_LEN as u32;
+            let win_notes = clip_window(&notes, win_start, win_end);
+            let pred = predict(&win_notes, SEQ_LEN);
+            if pred.key_confidence > best_conf {
+                best_conf = pred.key_confidence;
+                best_key = pred.key;
+            }
+            let take = (total_frames - w * SEQ_LEN).min(SEQ_LEN);
+            labels.extend_from_slice(&pred.chord_labels[..take]);
         }
-        let take = (total_frames - w * SEQ_LEN).min(SEQ_LEN);
-        labels.extend_from_slice(&pred.chord_labels[..take]);
     }
 
     // Frame → sequencer step (inverse of `harvest::step_to_frame`), rounded to a

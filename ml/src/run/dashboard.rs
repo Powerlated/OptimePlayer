@@ -71,7 +71,7 @@ impl ContextWindow {
 }
 
 /// Size of the dataset, in windows and in music.
-#[derive(Serialize, Clone, Copy, Debug, Default)]
+#[derive(Serialize, Clone, Debug, Default)]
 pub struct DataStats {
     pub train_windows: usize,
     pub val_windows: usize,
@@ -87,6 +87,18 @@ pub struct DataStats {
     /// hours of distinct recorded music. Every transposition is the same performance
     /// shifted, so this inflates variety, not information.
     pub augmented_hours: f64,
+    /// Per-source (ROM archive stem; `"synthetic"` for generated data) breakdown of
+    /// the training split, largest first.
+    pub sources: Vec<SourceStat>,
+}
+
+/// One source's share of the training split (see [`DataStats::sources`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceStat {
+    pub name: String,
+    pub windows: usize,
+    /// Hours at [`REFERENCE_BPM`], unaugmented.
+    pub hours: f64,
 }
 
 impl DataStats {
@@ -103,8 +115,29 @@ impl DataStats {
             train_hours: hours,
             transpositions,
             augmented_hours: hours * transpositions as f64,
+            sources: source_stats(train),
         }
     }
+}
+
+/// Group the training split by `Song::source`, largest first (`""` → `"synthetic"`).
+fn source_stats(train: &[Song]) -> Vec<SourceStat> {
+    let mut by_name: std::collections::BTreeMap<&str, (usize, u64)> = Default::default();
+    for s in train {
+        let e = by_name.entry(s.source.as_str()).or_default();
+        e.0 += 1;
+        e.1 += s.n_frames as u64;
+    }
+    let mut out: Vec<SourceStat> = by_name
+        .into_iter()
+        .map(|(name, (windows, frames))| SourceStat {
+            name: if name.is_empty() { "synthetic" } else { name }.to_string(),
+            windows,
+            hours: frames as f64 / FRAMES_PER_BEAT as f64 / REFERENCE_BPM / 60.0,
+        })
+        .collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.windows));
+    out
 }
 
 /// What this run is, fixed for its lifetime. Set once by the driver via [`start`].

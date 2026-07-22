@@ -162,6 +162,7 @@ mod tests {
             ],
             chord_labels: vec![0; 8],
             is_music: None,
+            ..Song::default()
         }
     }
 

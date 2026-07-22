@@ -11,7 +11,7 @@
 mod batch;
 mod model;
 
-pub use batch::EventBatchData;
+pub use batch::{EventBatchData, SLOT_EOS, SLOT_FRAME, SLOT_PAD};
 pub use model::{EventKeyChordModel, EventModelConfig};
 
 /// Generation-01 model, named for the backbone it implements. A type alias, so it is

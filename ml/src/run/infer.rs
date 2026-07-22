@@ -48,9 +48,10 @@ where
         notes: notes.to_vec(),
         chord_labels: vec![0; n_frames],
         is_music: None,
+        ..Song::default()
     };
     let data = <M::InnerModule as Backbone<Inner>>::build_batch(std::slice::from_ref(&song));
-    let out = model.valid().forward_output(&data, device);
+    let out = model.valid().infer_output(&data, device);
     decode_output(out, n_frames)
 }
 
@@ -67,25 +68,28 @@ pub fn decode_output(out: ModelOutput<Inner>, n_frames: usize) -> Prediction {
     // Chords: per-frame factored argmax over the dedicated root + quality heads,
     // recombined into the joint 121-label space. The "none" quality column (index
     // 0) is dropped so a real root always yields a concrete quality; the root head
-    // alone decides no-chord.
+    // alone decides no-chord. A VARLEN backbone's logits cover `n_frames` real
+    // frames plus EOS/pad slots — read the padded length from the tensor and keep
+    // the first `n_frames`.
+    let padded = out.root_logits.dims()[1];
     let root_pred: Vec<i64> = out
         .root_logits
-        .reshape([n_frames, N_ROOT_CLASSES])
+        .reshape([padded, N_ROOT_CLASSES])
         .argmax(1)
-        .reshape([n_frames])
+        .reshape([padded])
         .into_data()
         .to_vec()
         .unwrap();
     let quality_pred: Vec<i64> = out
         .quality_logits
-        .reshape([n_frames, N_QUALITY_CLASSES])
-        .slice([0..n_frames, 1..N_QUALITY_CLASSES])
+        .reshape([padded, N_QUALITY_CLASSES])
+        .slice([0..padded, 1..N_QUALITY_CLASSES])
         .argmax(1)
-        .reshape([n_frames])
+        .reshape([padded])
         .into_data()
         .to_vec()
         .unwrap();
-    let chord_labels: Vec<usize> = (0..n_frames)
+    let chord_labels: Vec<usize> = (0..n_frames.min(padded))
         .map(|i| root_quality_to_chord_label(root_pred[i] as usize, quality_pred[i] as usize + 1))
         .collect();
 

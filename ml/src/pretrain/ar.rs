@@ -25,9 +25,11 @@ use crate::backbone::{self, ArBackbone, ArOutput, Backbone};
 use crate::backend::{precision, Back, Inner, MlDevice};
 use crate::dashboard::{self, ContextWindow, DataStats, EpochPoint, RunMeta};
 use crate::notes::{random_transpose, Song, N_TRANSPOSITIONS};
+use crate::pack::pack_songs;
 use crate::parallel::{default_shards, dp_step};
 use crate::progress::TrainProgress;
 use crate::tokenize::{N_CHANNELS, N_PC};
+use std::borrow::Cow;
 
 #[derive(Config, Debug)]
 pub struct ArPretrainConfig {
@@ -41,6 +43,14 @@ pub struct ArPretrainConfig {
     pub augment: bool,
     #[config(default = 4242)]
     pub seed: u64,
+    /// `> 0` → **multi-song sequence packing**: each epoch, whole songs are
+    /// re-packed ([`crate::pack::pack_songs`]) into `pack_to`-slot EOS-separated
+    /// sequences (fresh neighbours every epoch; transposition applied per
+    /// constituent inside the packer, so the loop's own `augment` is bypassed).
+    /// `0` = plain per-song batches (fixed-window backbones). The long-context
+    /// backbone (m03) trains with this = its `n_frames`.
+    #[config(default = 0)]
+    pub pack_to: usize,
 }
 
 impl Default for ArPretrainConfig {
@@ -49,17 +59,32 @@ impl Default for ArPretrainConfig {
     }
 }
 
-/// Numerically-stable binary-cross-entropy-with-logits, mean over all elements:
-/// `max(x,0) - x*t + log(1 + exp(-|x|))`.
-fn bce_with_logits<B: Backend>(logits: Tensor<B, 3>, targets: Tensor<B, 3>) -> Tensor<B, 1> {
+/// Numerically-stable binary-cross-entropy-with-logits, mean over all elements —
+/// or, with `mask` (`[b, t, 1]`, 1.0 = position counts), the masked mean over the
+/// kept positions' elements.
+fn bce_with_logits<B: Backend>(
+    logits: Tensor<B, 3>,
+    targets: Tensor<B, 3>,
+    mask: Option<&Tensor<B, 3>>,
+) -> Tensor<B, 1> {
+    let c = logits.dims()[2];
     let max0 = logits.clone().clamp_min(0.0);
     let xt = logits.clone() * targets;
     let softplus = logits.abs().neg().exp().add_scalar(1.0).log();
-    (max0 - xt + softplus).mean()
+    let elem = max0 - xt + softplus;
+    match mask {
+        None => elem.mean(),
+        Some(m) => {
+            let denom = m.clone().sum().mul_scalar(c as f64).clamp_min(1.0);
+            elem.mul(m.clone()).sum().div(denom)
+        }
+    }
 }
 
-/// AR next-frame loss for one batch: predict frame `f+1`'s sounding pitch-classes +
-/// channels from the causal hidden state at frame `f`.
+/// AR next-frame loss for one batch: predict slot `f+1`'s sounding pitch-classes +
+/// channels from the causal hidden state at slot `f`. Packed batches (slot kinds
+/// present) additionally predict "**next slot is EOS**" and exclude predictions
+/// into/out of pad slots.
 pub fn ar_loss<M, B>(model: &M, data: &M::Batch, device: &B::Device) -> Tensor<B, 1>
 where
     B: Backend,
@@ -69,19 +94,49 @@ where
     let ArOutput {
         pc_logits,
         channel_logits,
+        eos_logits,
     } = model.ar_forward(data, device);
 
     let (pc_t, ch_t) = M::ar_targets(data);
     let pc_target = Tensor::<B, 3>::from_data(TensorData::new(pc_t, [b, nf, N_PC]), device);
     let ch_target = Tensor::<B, 3>::from_data(TensorData::new(ch_t, [b, nf, N_CHANNELS]), device);
 
-    // Shift by one frame: logits at f predict content at f+1.
+    // Shift by one slot: logits at f predict content at f+1.
     let pc_pred = pc_logits.slice([0..b, 0..nf - 1, 0..N_PC]);
     let pc_tgt = pc_target.slice([0..b, 1..nf, 0..N_PC]);
     let ch_pred = channel_logits.slice([0..b, 0..nf - 1, 0..N_CHANNELS]);
     let ch_tgt = ch_target.slice([0..b, 1..nf, 0..N_CHANNELS]);
 
-    bce_with_logits(pc_pred, pc_tgt) + bce_with_logits(ch_pred, ch_tgt)
+    // Validity of the prediction *at* slot f *into* slot f+1: neither may be pad.
+    let (mask, eos_term) = match (M::ar_slot_kinds(data), eos_logits) {
+        (Some(kinds), Some(eos_logits)) => {
+            use crate::m01_event::{SLOT_EOS, SLOT_PAD};
+            let mut w = Vec::with_capacity(b * (nf - 1));
+            let mut eos_t = Vec::with_capacity(b * (nf - 1));
+            for bi in 0..b {
+                let row = &kinds[bi * nf..(bi + 1) * nf];
+                for f in 0..nf - 1 {
+                    let ok = row[f] != SLOT_PAD && row[f + 1] != SLOT_PAD;
+                    w.push(if ok { 1.0f32 } else { 0.0 });
+                    eos_t.push(if row[f + 1] == SLOT_EOS { 1.0f32 } else { 0.0 });
+                }
+            }
+            let mask = Tensor::<B, 3>::from_data(TensorData::new(w, [b, nf - 1, 1]), device);
+            let eos_target =
+                Tensor::<B, 3>::from_data(TensorData::new(eos_t, [b, nf - 1, 1]), device);
+            let eos_pred = eos_logits.slice([0..b, 0..nf - 1, 0..1]);
+            let term = bce_with_logits(eos_pred, eos_target, Some(&mask));
+            (Some(mask), Some(term))
+        }
+        _ => (None, None),
+    };
+
+    let loss = bce_with_logits(pc_pred, pc_tgt, mask.as_ref())
+        + bce_with_logits(ch_pred, ch_tgt, mask.as_ref());
+    match eos_term {
+        Some(t) => loss + t,
+        None => loss,
+    }
 }
 
 /// Tokenize `songs[indices]` with per-shard transposition augmentation.
@@ -120,6 +175,39 @@ fn config_json<C: burn::config::Config>(cfg: &C) -> serde_json::Value {
     serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null)
 }
 
+/// Epoch training set: with packing on, whole songs are re-packed into fresh
+/// EOS-separated sequences (per-constituent transposition inside the packer, so
+/// the returned `augment` flag for the loop's own batcher is false); otherwise
+/// the raw windows pass through with the loop's usual augmentation.
+fn epoch_train_set<'a>(
+    train: &'a [Song],
+    config: &ArPretrainConfig,
+    epoch: usize,
+) -> (Cow<'a, [Song]>, bool) {
+    if config.pack_to > 0 {
+        let mut prng = StdRng::seed_from_u64(
+            config.seed ^ 0xA5A5_1234 ^ (epoch as u64).wrapping_mul(0x9E37_79B9),
+        );
+        (
+            Cow::Owned(pack_songs(train, config.pack_to, config.augment, &mut prng)),
+            false,
+        )
+    } else {
+        (Cow::Borrowed(train), config.augment)
+    }
+}
+
+/// Validation set matching the training layout: packed once, deterministically
+/// (no augmentation), when packing is on.
+fn val_set(val: &[Song], config: &ArPretrainConfig) -> Vec<Song> {
+    if config.pack_to > 0 {
+        let mut prng = StdRng::seed_from_u64(config.seed ^ 0x7A11_D0C5);
+        pack_songs(val, config.pack_to, false, &mut prng)
+    } else {
+        val.to_vec()
+    }
+}
+
 /// Deterministic per-shard, per-epoch RNG for augmentation.
 fn shard_rng(seed: u64, first: usize, epoch: usize) -> StdRng {
     StdRng::seed_from_u64(
@@ -144,7 +232,8 @@ pub fn run<M>(
     let mut optim = AdamConfig::new().init();
 
     let mut rng = StdRng::seed_from_u64(config.seed);
-    let mut indices: Vec<usize> = (0..train.len()).collect();
+    let val_packed = val_set(val, config);
+    let val = &val_packed[..];
     let n_shards = std::env::var("DP_SHARDS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -167,19 +256,25 @@ pub fn run<M>(
         ),
         precision: precision::<Back>(),
         epochs: config.epochs,
-        context: ContextWindow::from_frames(n_frames(train)),
-        data,
+        context: ContextWindow::from_frames(if config.pack_to > 0 {
+            config.pack_to
+        } else {
+            n_frames(train)
+        }),
+        data: data.clone(),
         params: model.num_params(),
         flops_per_window: M::flops_per_window(model_cfg, data.notes_per_window.round() as usize),
         model_config: config_json(model_cfg),
         train_config: config_json(config),
     });
 
-    let n_total = indices.len().div_ceil(config.batch_size);
-
     for epoch in 1..=config.epochs {
         let epoch_start = std::time::Instant::now();
+        let (epoch_train, loop_augment) = epoch_train_set(train, config, epoch);
+        let epoch_train = &epoch_train[..];
+        let mut indices: Vec<usize> = (0..epoch_train.len()).collect();
         indices.shuffle(&mut rng);
+        let n_total = indices.len().div_ceil(config.batch_size);
         let mut running = 0.0f64;
         let mut n_batches = 0usize;
         let mut prog = TrainProgress::per_epoch(epoch);
@@ -195,7 +290,7 @@ pub fn run<M>(
                 k,
                 |m: &M, shard| {
                     let mut srng = shard_rng(config.seed, shard[0], epoch);
-                    let data = build_batch::<M, Back>(train, shard, config.augment, &mut srng);
+                    let data = build_batch::<M, Back>(epoch_train, shard, loop_augment, &mut srng);
                     // Scale by 1/k so the K shard gradients sum to the batch-mean gradient.
                     let l = ar_loss::<M, Back>(m, &data, &device).mul_scalar(1.0 / k as f64);
                     let grads = GradientsParams::from_grads(l.clone().backward(), m);
@@ -275,8 +370,8 @@ pub fn run_single_device<M, B>(
     let mut optim = AdamConfig::new().init();
 
     let mut rng = StdRng::seed_from_u64(config.seed);
-    let mut indices: Vec<usize> = (0..train.len()).collect();
-    let n_total = indices.len().div_ceil(config.batch_size);
+    let val_packed = val_set(val, config);
+    let val = &val_packed[..];
 
     println!(
         "{} AR pretrain (single-device): {} train / {} val windows, batch {}, lr {}",
@@ -293,8 +388,12 @@ pub fn run_single_device<M, B>(
         backend: dashboard::backend_label(std::any::type_name::<B>()),
         precision: precision::<B>(),
         epochs: config.epochs,
-        context: ContextWindow::from_frames(n_frames(train)),
-        data,
+        context: ContextWindow::from_frames(if config.pack_to > 0 {
+            config.pack_to
+        } else {
+            n_frames(train)
+        }),
+        data: data.clone(),
         params: model.num_params(),
         flops_per_window: M::flops_per_window(model_cfg, data.notes_per_window.round() as usize),
         model_config: config_json(model_cfg),
@@ -303,14 +402,18 @@ pub fn run_single_device<M, B>(
 
     for epoch in 1..=config.epochs {
         let epoch_start = std::time::Instant::now();
+        let (epoch_train, loop_augment) = epoch_train_set(train, config, epoch);
+        let epoch_train = &epoch_train[..];
+        let mut indices: Vec<usize> = (0..epoch_train.len()).collect();
         indices.shuffle(&mut rng);
+        let n_total = indices.len().div_ceil(config.batch_size);
         let mut running = 0.0f64;
         let mut n_batches = 0usize;
         let mut prog = TrainProgress::per_epoch(epoch);
 
         for chunk in indices.chunks(config.batch_size) {
             let mut srng = shard_rng(config.seed, chunk[0], epoch);
-            let data = build_batch::<M, B>(train, chunk, config.augment, &mut srng);
+            let data = build_batch::<M, B>(epoch_train, chunk, loop_augment, &mut srng);
             let l = ar_loss::<M, B>(&model, &data, device);
             let grads = GradientsParams::from_grads(l.clone().backward(), &model);
             model = optim.step(config.lr, model, grads);

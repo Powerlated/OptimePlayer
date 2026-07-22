@@ -49,13 +49,23 @@ fn main() {
     let device = MlDevice::default();
     let dir = args.out_dir.join(args.kind.dir());
 
-    let real = load_songs(real_path).unwrap_or_else(|_| {
+    let mut real = load_songs(real_path).unwrap_or_else(|_| {
         eprintln!("could not load {real_path} — run `harvest` first");
         std::process::exit(1);
     });
+    // The dataset stores whole songs; fixed-window backbones need 256-frame
+    // windows (the VARLEN kda backbone takes them whole).
+    if args.kind != Kind::Kda {
+        real = optime_ml::pack::window_dataset(&real, 256);
+    }
     println!(
-        "loaded {} real val windows from {real_path}; backbone {} ({})\n",
+        "loaded {} real val {} from {real_path}; backbone {} ({})\n",
         real.len(),
+        if args.kind == Kind::Kda {
+            "whole songs"
+        } else {
+            "windows"
+        },
         args.kind.name(),
         dir.display()
     );

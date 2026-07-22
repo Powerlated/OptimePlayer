@@ -259,6 +259,7 @@ impl<B: Backend> ArBackbone<B> for HierEventModel<B> {
         ArOutput {
             pc_logits: self.ar_pc_head.forward(hidden.clone()),
             channel_logits: self.ar_ch_head.forward(hidden),
+            eos_logits: None,
         }
     }
 

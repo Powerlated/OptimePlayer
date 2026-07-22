@@ -19,24 +19,43 @@ use optime_ml::data::load_songs;
 use optime_ml::m01_event::{EventModel, EventModelConfig};
 use optime_ml::m02_hier::{HierModel, HierModelConfig};
 use optime_ml::m03_kda::{KdaModel, KdaModelConfig};
+use optime_ml::pack::window_dataset;
 use optime_ml::pretrain::ar::{self, ArPretrainConfig};
 use optime_ml::pretrain::masked::{self, PretrainConfig};
+
+/// Fixed-window generations (m00–m02) window the whole-song dataset at load time.
+const FIXED_SEQ_LEN: usize = 256;
 
 fn main() {
     let args = Args::parse();
     let epochs: usize = args.positional_or(0, 20);
-    let batch_size: usize = args.positional_or(1, 32);
+    // A packed m03 batch carries 2048 slots per item and nearly fills an 8 GB
+    // GPU at batch 8. Fixed-window generations retain their historical default.
+    let default_batch = if args.kind == Kind::Kda { 8 } else { 32 };
+    let batch_size: usize = args.positional_or(1, default_batch);
     let lr: f64 = args.positional_or(2, 3.0e-4);
 
     // Songs are transposed on the fly during training (see the configs' `augment`).
-    let train =
+    // The dataset holds whole songs (intro+loop+loop, variable length): the
+    // long-context backbone (kda) packs them per epoch; fixed-window backbones
+    // slice them into 256-frame windows here.
+    let mut train =
         load_songs("data/real_train.bin").expect("load data/real_train.bin (run `harvest` first)");
-    let val = load_songs("data/real_val.bin").unwrap_or_default();
+    let mut val = load_songs("data/real_val.bin").unwrap_or_default();
     println!(
-        "loaded {} train / {} val real windows",
+        "loaded {} train / {} val whole real songs",
         train.len(),
         val.len()
     );
+    if args.kind != Kind::Kda {
+        train = window_dataset(&train, FIXED_SEQ_LEN);
+        val = window_dataset(&val, FIXED_SEQ_LEN);
+        println!(
+            "windowed at {FIXED_SEQ_LEN} frames → {} train / {} val windows",
+            train.len(),
+            val.len()
+        );
+    }
 
     match args.kind {
         // Generation 00: masked-frame reconstruction over the feature grid.
@@ -69,8 +88,11 @@ fn main() {
             );
         }
         Kind::Kda => {
-            let config = ar_config(epochs, batch_size, lr);
-            ar::run::<KdaModel<Back>>(&config, &KdaModelConfig::new(), &train, &val, &args.out_dir);
+            // Long-context generative backbone: multi-song sequence packing at
+            // the model's nominal window.
+            let model_cfg = KdaModelConfig::new();
+            let config = ar_config(epochs, batch_size, lr).with_pack_to(model_cfg.n_frames);
+            ar::run::<KdaModel<Back>>(&config, &model_cfg, &train, &val, &args.out_dir);
         }
     }
 }

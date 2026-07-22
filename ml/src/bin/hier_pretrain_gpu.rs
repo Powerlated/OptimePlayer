@@ -45,6 +45,9 @@ fn main() {
     let train =
         load_songs("data/real_train.bin").expect("load data/real_train.bin (run `harvest` first)");
     let val = load_songs("data/real_val.bin").unwrap_or_default();
+    // Whole-song dataset → fixed 256-frame windows (hier is a fixed-window backbone).
+    let train = optime_ml::pack::window_dataset(&train, 256);
+    let val = optime_ml::pack::window_dataset(&val, 256);
     println!(
         "loaded {} train / {} val real windows (WGPU backend)",
         train.len(),

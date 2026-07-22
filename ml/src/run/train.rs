@@ -96,6 +96,14 @@ pub fn run<M>(
     M::InnerModule: Backbone<Inner, Batch = <M as Backbone<Back>>::Batch>,
 {
     let device = MlDevice::default();
+    // A warm start may use a non-default architecture. Keep that checkpoint's
+    // config authoritative for dashboard metadata and every checkpoint written
+    // by this run; pairing its weights with the caller's config makes reload fail.
+    let loaded_cfg = pretrained.map(|prefix| {
+        M::Cfg::load(prefix.with_extension("json"))
+            .unwrap_or_else(|e| panic!("load config {}.json: {e}", prefix.display()))
+    });
+    let effective_model_cfg = loaded_cfg.as_ref().unwrap_or(model_cfg);
     let mut model: M = match pretrained {
         Some(prefix) => {
             println!("warm-starting {} trunk from {}", M::NAME, prefix.display());
@@ -140,10 +148,13 @@ pub fn run<M>(
         precision: crate::backend::precision::<Back>(),
         epochs: config.epochs,
         context: ContextWindow::from_frames(seq),
-        data,
+        data: data.clone(),
         params: model.num_params(),
-        flops_per_window: M::flops_per_window(model_cfg, data.notes_per_window.round() as usize),
-        model_config: serde_json::to_value(model_cfg).unwrap_or(serde_json::Value::Null),
+        flops_per_window: M::flops_per_window(
+            effective_model_cfg,
+            data.notes_per_window.round() as usize,
+        ),
+        model_config: serde_json::to_value(effective_model_cfg).unwrap_or(serde_json::Value::Null),
         train_config: serde_json::to_value(config).unwrap_or(serde_json::Value::Null),
     });
 
@@ -176,7 +187,9 @@ pub fn run<M>(
                             ^ (epoch as u64).wrapping_mul(0x85EBCA77),
                     );
                     let data = build_batch::<M, Back>(train, shard, config.augment, &mut srng);
-                    let (b, _) = M::dims(&data);
+                    // Per-batch seq: a VARLEN backbone pads each batch to its own
+                    // longest song, so the global dataset seq doesn't apply.
+                    let (b, seq) = M::dims(&data);
                     let out = m.forward_output(&data, &device);
                     let (root_t, quality_t) =
                         root_quality_targets::<Back>(M::chord_labels(&data), &device);
@@ -192,6 +205,7 @@ pub fn run<M>(
                         seq,
                         config.key_loss_weight,
                         config.chord_smoothness_weight,
+                        M::frame_mask(&data),
                     )
                     .mul_scalar(1.0 / k as f64);
                     let grads = GradientsParams::from_grads(l.clone().backward(), m);
@@ -204,8 +218,7 @@ pub fn run<M>(
             prog.maybe_log(running, n_batches, n_total);
         }
 
-        let (key_acc, chord_acc, changes) =
-            evaluate::<M>(&model, val, config.batch_size, seq, &device);
+        let (key_acc, chord_acc, changes) = evaluate::<M>(&model, val, config.batch_size, &device);
         let train_loss = running / n_batches.max(1) as f64;
         let secs = epoch_start.elapsed().as_secs_f64();
         println!(
@@ -219,7 +232,7 @@ pub fn run<M>(
         ));
         backbone::save_epoch::<M, Back>(
             &model,
-            model_cfg,
+            effective_model_cfg,
             &backbone::artifact_dir::<M, Back>(out_dir),
             name,
             epoch,
@@ -227,7 +240,7 @@ pub fn run<M>(
     }
 
     let dir = backbone::artifact_dir::<M, Back>(out_dir);
-    backbone::save::<M, Back>(model, model_cfg, &dir, name);
+    backbone::save::<M, Back>(model, effective_model_cfg, &dir, name);
     println!("saved {} {name} to {}", M::NAME, dir.display());
     dashboard::finish(&dir);
 }
@@ -236,13 +249,7 @@ pub fn run<M>(
 /// Chord accuracy ignores no-chord frames. The last value is the mean number of
 /// frame-to-frame predicted-label transitions per `seq`-frame sequence — the flicker
 /// proxy the smoothness penalty is meant to reduce.
-pub fn evaluate<M>(
-    model: &M,
-    val: &[Song],
-    batch_size: usize,
-    seq: usize,
-    device: &MlDevice,
-) -> (f64, f64, f64)
+pub fn evaluate<M>(model: &M, val: &[Song], batch_size: usize, device: &MlDevice) -> (f64, f64, f64)
 where
     M: Backbone<Back> + AutodiffModule<Back>,
     M::InnerModule: Backbone<Inner, Batch = <M as Backbone<Back>>::Batch>,
@@ -255,14 +262,15 @@ where
     for chunk in val.chunks(batch_size) {
         // No augmentation at eval.
         let data = <M::InnerModule as Backbone<Inner>>::build_batch(chunk);
-        let (b, _) = <M::InnerModule as Backbone<Inner>>::dims(&data);
+        let (b, batch_seq) = <M::InnerModule as Backbone<Inner>>::dims(&data);
         let out = model.forward_output(&data, device);
         let c = eval_counts::<Inner>(
             &out,
             <M::InnerModule as Backbone<Inner>>::chord_labels(&data),
             <M::InnerModule as Backbone<Inner>>::key_labels(&data),
             b,
-            seq,
+            batch_seq,
+            <M::InnerModule as Backbone<Inner>>::frame_mask(&data),
         );
         acc.key_correct += c.key_correct;
         acc.chord_correct += c.chord_correct;

@@ -62,6 +62,6 @@ pub mod run;
 pub use datagen::{notes, progression, theory};
 #[cfg(feature = "harvest")]
 pub use dataset::harvest;
-pub use dataset::{annotations, data, estimate, features, tokenize};
+pub use dataset::{annotations, data, estimate, features, pack, tokenize};
 pub use nn::{backbone, flops, kda, shared, transformer};
 pub use run::{backend, cli, dashboard, infer, parallel, probe, progress, train};

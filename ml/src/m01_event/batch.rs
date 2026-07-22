@@ -8,7 +8,13 @@
 //! which pools the notes *sounding* in each frame.
 
 use crate::notes::Song;
+use crate::theory::NO_CHORD;
 use crate::tokenize::{self, EventExample};
+
+/// Per-slot kind codes in [`EventBatchData::slot_kind`].
+pub const SLOT_FRAME: i64 = 0;
+pub const SLOT_EOS: i64 = 1;
+pub const SLOT_PAD: i64 = 2;
 
 /// CPU-side flattened batch: per-field onset-token index arrays (`n_total` long),
 /// each token's destination row `batch*n_frames + onset_frame` for the scatter-add
@@ -30,6 +36,16 @@ pub struct EventBatchData {
     pub chord_labels: Vec<usize>,
     /// `batch` key labels.
     pub key_labels: Vec<usize>,
+    /// `batch*n_frames` slot kinds ([`SLOT_FRAME`]/[`SLOT_EOS`]/[`SLOT_PAD`]).
+    /// All-`SLOT_FRAME` for the legacy fixed-window layout ([`Self::build`]).
+    pub slot_kind: Vec<i64>,
+    /// `batch*n_frames` document ids (index of the constituent song a slot belongs
+    /// to; its EOS slot included). `-1` for pad. All-`0` for the legacy layout.
+    pub doc_id: Vec<i64>,
+    /// `batch*n_frames` supervised-label validity (1.0 = this frame's chord label
+    /// counts in the loss). Legacy layout: all `1.0`. Generative layout: frame
+    /// slots with a trustworthy label only (EOS/pad and unannotated frames are 0).
+    pub label_valid: Vec<f32>,
     /// Retained so the AR pretext can rebuild per-frame sounding content.
     pub examples: Vec<EventExample>,
 }
@@ -59,6 +75,9 @@ impl EventBatchData {
             target_row: Vec::with_capacity(cap),
             chord_labels: Vec::with_capacity(batch * nf),
             key_labels: Vec::with_capacity(batch),
+            slot_kind: vec![SLOT_FRAME; batch * nf],
+            doc_id: vec![0; batch * nf],
+            label_valid: vec![1.0; batch * nf],
             examples: Vec::new(),
         };
         for (bi, ex) in examples.iter().enumerate() {
@@ -76,6 +95,89 @@ impl EventBatchData {
             d.key_labels.push(ex.key_label);
         }
         d.examples = examples;
+        d
+    }
+
+    /// Build a **variable-length / multi-document** batch for the generative
+    /// long-context backbone (m03). Each song is laid out per its
+    /// [`Song::doc_spans`] (packed sequences come pre-laid-out); a plain song
+    /// becomes one document `[0, n_frames)` followed by its EOS slot. All songs
+    /// are padded to the batch's longest layout, so `n_frames` here is the padded
+    /// slot count — [`Self::slot_kind`] / [`Self::doc_id`] / [`Self::label_valid`]
+    /// carry the real structure.
+    pub fn build_generative(songs: &[Song]) -> EventBatchData {
+        // Per-song layout: spans + total slot count (last EOS inclusive).
+        let layouts: Vec<Vec<(u32, u32)>> = songs
+            .iter()
+            .map(|s| {
+                if s.doc_spans.is_empty() {
+                    vec![(0u32, s.n_frames as u32)]
+                } else {
+                    s.doc_spans.clone()
+                }
+            })
+            .collect();
+        let padded_nf = songs
+            .iter()
+            .zip(&layouts)
+            .map(|(s, spans)| {
+                let layout_end = spans.last().map(|&(_, e)| e + 1).unwrap_or(0) as usize;
+                // Packed songs are pre-sized to their full window (pad included).
+                if s.doc_spans.is_empty() {
+                    layout_end
+                } else {
+                    s.n_frames.max(layout_end)
+                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        // Tokenize against the padded frame count (notes only live inside spans).
+        let examples: Vec<EventExample> = songs
+            .iter()
+            .map(|s| {
+                let mut chord_labels = s.chord_labels.clone();
+                chord_labels.resize(padded_nf, NO_CHORD);
+                let padded = Song {
+                    n_frames: padded_nf,
+                    chord_labels,
+                    ..s.clone()
+                };
+                EventExample::from_song(&padded)
+            })
+            .collect();
+        let mut d = Self::from_examples(examples);
+
+        // Overwrite the legacy all-frame structure with the real layout.
+        for (bi, (song, spans)) in songs.iter().zip(&layouts).enumerate() {
+            for f in 0..padded_nf {
+                let idx = bi * padded_nf + f;
+                let fu = f as u32;
+                let in_doc = spans.iter().position(|&(s, e)| fu >= s && fu < e);
+                let is_eos = spans.iter().position(|&(_, e)| fu == e);
+                let (kind, doc) = match (in_doc, is_eos) {
+                    (Some(di), _) => (SLOT_FRAME, di as i64),
+                    (None, Some(di)) => (SLOT_EOS, di as i64),
+                    (None, None) => (SLOT_PAD, -1),
+                };
+                d.slot_kind[idx] = kind;
+                d.doc_id[idx] = doc;
+                d.label_valid[idx] = if kind == SLOT_FRAME {
+                    match &song.label_mask {
+                        Some(m) => {
+                            if m.get(f).copied().unwrap_or(false) {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        }
+                        None => 1.0,
+                    }
+                } else {
+                    0.0
+                };
+            }
+        }
         d
     }
 }
@@ -112,6 +214,7 @@ mod tests {
             ],
             chord_labels: vec![0; 8],
             is_music: None,
+            ..Song::default()
         };
         let batch = EventBatchData::build(std::slice::from_ref(&song));
         assert_eq!(batch.n_total, 2);

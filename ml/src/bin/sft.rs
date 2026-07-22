@@ -33,8 +33,9 @@ use optime_ml::notes::Song;
 use optime_ml::train::{self, TrainConfig};
 use std::path::{Path, PathBuf};
 
-/// Must match the window every other stage uses; a dataset windowed at one length cannot train a
-/// model built for another.
+/// Fixed window for m00–m02; a dataset windowed at one length cannot train a model built for
+/// another. The VARLEN backbone (kda) instead takes whole songs (truncated at its nominal
+/// `n_frames`) with a per-frame label mask.
 const SEQ_LEN: usize = 256;
 
 /// Artifact stem for the real-label stage, kept distinct from the synthetic `model` it starts from.
@@ -57,16 +58,25 @@ fn main() {
     let rom_dir = PathBuf::from(std::env::var("ML_ROMS").unwrap_or_else(|_| "../demos".into()));
 
     let val_frac = DEFAULT_VAL_FRAC;
-    let (train_songs, tstats) =
-        match build::songs_from_dir(&ann_dir, &rom_dir, SEQ_LEN, Split::Train(val_frac)) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }
-        };
-    let (val_songs, _) = build::songs_from_dir(&ann_dir, &rom_dir, SEQ_LEN, Split::Val(val_frac))
-        .unwrap_or_default();
+    // VARLEN backbone: whole songs + label mask (partial coverage usable);
+    // fixed-window backbones: fully-covered 256-frame windows as before.
+    let varlen = args.kind == Kind::Kda;
+    let max_frames = optime_ml::m03_kda::KdaModelConfig::new().n_frames;
+    let build_split = |want: Split| {
+        if varlen {
+            build::whole_songs_from_dir(&ann_dir, &rom_dir, max_frames, want)
+        } else {
+            build::songs_from_dir(&ann_dir, &rom_dir, SEQ_LEN, want)
+        }
+    };
+    let (train_songs, tstats) = match build_split(Split::Train(val_frac)) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let (val_songs, _) = build_split(Split::Val(val_frac)).unwrap_or_default();
 
     println!(
         "hand-labelled: {} train / {} val windows (song-level {:.0}% holdout)",

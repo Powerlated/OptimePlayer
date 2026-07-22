@@ -14,10 +14,13 @@
 
 use crate::notes::{Instrument, NoteEvent, Song, FRAMES_PER_BEAT};
 use crate::theory::NO_CHORD;
+// The windowing helpers moved to [`crate::pack`] (no engine dependency, so fixed-
+// window backbones can window whole-song datasets at load time); re-exported here
+// for the label-window cutters that already import them from `harvest`.
+pub use crate::pack::{clip_notes_to_window, sample_random_windows, slice_into_windows};
 use optime_core::devices::gba::GbaRom;
 use optime_core::synth_controller::messages::TickFeedback;
 use optime_core::{load_all, PerDeviceSettings, SoundData, SynthEvent, VoiceId};
-use rand::Rng;
 use std::collections::{HashMap, HashSet};
 
 /// Weak is-music labels: game code → set of curated (real-music) song ids. Built
@@ -98,33 +101,12 @@ struct OpenNote {
     pan: f32,
 }
 
-/// Harvest every playable song from one loaded archive into [`Song`] windows of
-/// exactly `seq_len` frames (longer songs are sliced into consecutive windows;
-/// the trailing partial window is dropped).
+/// Harvest every playable song from one loaded archive as a **whole** [`Song`]
+/// (intro + loop + loop, variable `n_frames`).
 ///
 /// When `data` is a GBA ROM whose game code is present in `annotations`, each
-/// window is stamped with a weak is-music label; otherwise windows are unlabeled.
-pub fn harvest_sound_data(
-    data: &dyn SoundData,
-    seq_len: usize,
-    annotations: &Annotations,
-) -> Vec<Vec<Song>> {
-    harvest_sound_data_full(data, annotations)
-        .into_iter()
-        .map(|(notes, is_music)| slice_into_windows(&notes, seq_len, is_music))
-        .filter(|windows| !windows.is_empty())
-        .collect()
-}
-
-/// Harvest every playable song as its full, **un-windowed** note-event stream +
-/// weak is-music label (one entry per source song). Windowing is left to the
-/// caller, so the train/val split can window differently — e.g. random-offset
-/// overlapping windows for train (more, phase-diverse data) vs fixed tiling for a
-/// clean, non-redundant val set.
-pub fn harvest_sound_data_full(
-    data: &dyn SoundData,
-    annotations: &Annotations,
-) -> Vec<(Vec<NoteEvent>, Option<bool>)> {
+/// song is stamped with a weak is-music label; otherwise songs are unlabeled.
+pub fn harvest_sound_data_full(data: &dyn SoundData, annotations: &Annotations) -> Vec<Song> {
     // Game code (GBA only) selects the annotation set; DS/DSE stay unlabeled.
     let game_code = data
         .as_any()
@@ -134,25 +116,49 @@ pub fn harvest_sound_data_full(
     let mut out = Vec::new();
     for id in data.song_ids() {
         let is_music = annotations.label(game_code.as_deref(), id);
-        if let Some((notes, _steps_per_beat)) = harvest_song(data, id) {
-            if !notes.is_empty() {
-                out.push((notes, is_music));
+        if let Some(h) = harvest_song(data, id) {
+            if !h.notes.is_empty() {
+                let n_frames = h.notes.iter().map(|n| n.end_frame).max().unwrap_or(0) as usize;
+                if n_frames == 0 {
+                    continue;
+                }
+                out.push(Song {
+                    key_label: 0, // unlabeled sentinel
+                    n_frames,
+                    notes: h.notes,
+                    chord_labels: vec![NO_CHORD; n_frames],
+                    is_music,
+                    loop_frame: h.loop_frame,
+                    ..Song::default()
+                });
             }
         }
     }
     out
 }
 
-/// Run one song headlessly and collect its full un-windowed note-event stream
-/// plus the device's `steps_per_beat` (so callers can map ml frames back to
-/// sequencer steps). Returns `None` if the song can't be started or is silent.
-pub fn harvest_song_full(data: &dyn SoundData, id: u32) -> Option<(Vec<NoteEvent>, f64)> {
+/// One harvested song's raw stream: note events, the device's `steps_per_beat`
+/// (so callers can map ml frames back to sequencer steps), and the frame of the
+/// first loop point when the song looped.
+pub struct HarvestedSong {
+    pub notes: Vec<NoteEvent>,
+    pub steps_per_beat: f64,
+    pub loop_frame: Option<u32>,
+}
+
+/// Run one song headlessly and collect its full un-windowed note-event stream.
+/// Returns `None` if the song can't be started or is silent.
+pub fn harvest_song_full(data: &dyn SoundData, id: u32) -> Option<HarvestedSong> {
     harvest_song(data, id)
 }
 
-/// Run one song headlessly and collect its full note-event stream (no windowing)
-/// and the device's `steps_per_beat`. Returns `None` if the song can't be started.
-fn harvest_song(data: &dyn SoundData, id: u32) -> Option<(Vec<NoteEvent>, f64)> {
+/// Run one song headlessly and collect its full note-event stream (no windowing).
+///
+/// A looping song is captured as **intro + loop + loop** — the run stops at the
+/// *second* [`SynthEvent::Looped`] — so the model can train on the music crossing
+/// a loop boundary. A non-looping song stops at [`SynthEvent::Ended`]. Returns
+/// `None` if the song can't be started.
+fn harvest_song(data: &dyn SoundData, id: u32) -> Option<HarvestedSong> {
     let mut player = data.make_player(id)?;
     let steps_per_beat = player.steps_per_beat();
     let config = PerDeviceSettings::neutral();
@@ -163,6 +169,7 @@ fn harvest_song(data: &dyn SoundData, id: u32) -> Option<(Vec<NoteEvent>, f64)> 
     let mut finished: Vec<NoteEvent> = Vec::new();
     // Latest pan per track (from `TrackPan`), applied to notes at their onset.
     let mut track_pan: Vec<f32> = Vec::new();
+    let mut loop_frame: Option<u32> = None;
 
     loop {
         events.clear();
@@ -214,7 +221,13 @@ fn harvest_song(data: &dyn SoundData, id: u32) -> Option<(Vec<NoteEvent>, f64)> 
                     // Normalized split (~sums to 1) → signed pan in [-1, 1].
                     track_pan[track] = (pan_vol_r - pan_vol_l) as f32;
                 }
-                SynthEvent::Looped | SynthEvent::Ended => stop = true,
+                // Intro + loop + loop: keep playing through the first loop point
+                // (recording where it was) and stop at the second.
+                SynthEvent::Looped => match loop_frame {
+                    None => loop_frame = Some(now),
+                    Some(_) => stop = true,
+                },
+                SynthEvent::Ended => stop = true,
                 _ => {}
             }
         }
@@ -231,7 +244,11 @@ fn harvest_song(data: &dyn SoundData, id: u32) -> Option<(Vec<NoteEvent>, f64)> 
     if finished.is_empty() {
         None
     } else {
-        Some((finished, steps_per_beat))
+        Some(HarvestedSong {
+            notes: finished,
+            steps_per_beat,
+            loop_frame,
+        })
     }
 }
 
@@ -280,159 +297,14 @@ fn push_note(finished: &mut Vec<NoteEvent>, n: OpenNote, end_frame: u32) {
     });
 }
 
-/// Notes overlapping `[win_start, win_end)`, clipped to the window and rebased to
-/// its start. Empty if nothing sounds in the window.
-/// Clip a note stream to `[win_start, win_end)`, rebasing frame indices to the window start.
-///
-/// Public because the labelled-window path ([`crate::annotations`], `eval_labeled`) has to cut the
-/// exact same windows this module's own slicing does — two different notions of "window" would
-/// silently misalign notes against their labels.
-pub fn clip_notes_to_window(notes: &[NoteEvent], win_start: u32, win_end: u32) -> Vec<NoteEvent> {
-    let mut out = Vec::new();
-    for n in notes {
-        if n.end_frame <= win_start || n.start_frame >= win_end {
-            continue;
-        }
-        let start = n.start_frame.max(win_start) - win_start;
-        let end = n.end_frame.min(win_end) - win_start;
-        if end > start {
-            out.push(NoteEvent {
-                start_frame: start,
-                end_frame: end,
-                ..*n
-            });
-        }
-    }
-    out
-}
-
-/// Slice a full-song note stream into consecutive `seq_len`-frame windows, each a
-/// standalone [`Song`] with frame indices rebased to the window start and the
-/// song's weak is-music label. The trailing partial window (and any window with
-/// no notes) is dropped.
-pub fn slice_into_windows(
-    notes: &[NoteEvent],
-    seq_len: usize,
-    is_music: Option<bool>,
-) -> Vec<Song> {
-    if seq_len == 0 || notes.is_empty() {
-        return Vec::new();
-    }
-    let total_frames = notes.iter().map(|n| n.end_frame).max().unwrap_or(0) as usize;
-    let n_windows = total_frames / seq_len;
-    let sl = seq_len as u32;
-
-    let mut songs = Vec::with_capacity(n_windows);
-    for w in 0..n_windows {
-        let win_start = (w as u32) * sl;
-        let win_notes = clip_notes_to_window(notes, win_start, win_start + sl);
-        if win_notes.is_empty() {
-            continue;
-        }
-        songs.push(Song {
-            key_label: 0, // unlabeled sentinel; unused during pretraining
-            n_frames: seq_len,
-            notes: win_notes,
-            chord_labels: vec![NO_CHORD; seq_len],
-            is_music,
-        });
-    }
-    songs
-}
-
-/// Sample **random-offset overlapping windows** from a full-song note stream, for
-/// pretraining augmentation: each window starts at a uniformly random offset in
-/// `[0, total - seq_len]`, so the encoder sees phrase context beginning at every
-/// beat phase instead of only at fixed `seq_len` boundaries. Yields roughly
-/// `coverage ×` the fixed-tiling window count (`coverage ≥ 1`), multiplying the
-/// pretraining set; the AR next-frame pretext has no beat-phase assumption, so
-/// random offsets are safe (the beat-aware smoothness term runs only at fine-tune,
-/// on synthetic data, which stays a single window). Notes are clipped/rebased per
-/// window exactly like [`slice_into_windows`].
-pub fn sample_random_windows<R: Rng>(
-    notes: &[NoteEvent],
-    seq_len: usize,
-    coverage: f64,
-    is_music: Option<bool>,
-    rng: &mut R,
-) -> Vec<Song> {
-    if seq_len == 0 || notes.is_empty() {
-        return Vec::new();
-    }
-    let total = notes.iter().map(|n| n.end_frame).max().unwrap_or(0) as usize;
-    if total < seq_len {
-        return Vec::new(); // can't fit even one window
-    }
-    let max_offset = total - seq_len; // inclusive upper bound for a start offset
-    let tiled = (total / seq_len).max(1);
-    let target = ((tiled as f64) * coverage.max(1.0)).ceil() as usize;
-    let sl = seq_len as u32;
-
-    let mut songs = Vec::with_capacity(target);
-    for _ in 0..target {
-        let off = rng.gen_range(0..=max_offset) as u32;
-        let win_notes = clip_notes_to_window(notes, off, off + sl);
-        if win_notes.is_empty() {
-            continue;
-        }
-        songs.push(Song {
-            key_label: 0,
-            n_frames: seq_len,
-            notes: win_notes,
-            chord_labels: vec![NO_CHORD; seq_len],
-            is_music,
-        });
-    }
-    songs
-}
-
-/// Harvest every archive in a directory of ROMs/audio dumps into [`Song`]s,
-/// applying `annotations` (weak is-music labels) to GBA ROMs whose game code is
-/// covered. Files that don't parse into any `SoundData` are silently skipped.
-pub fn harvest_dir(
-    dir: &std::path::Path,
-    seq_len: usize,
-    annotations: &Annotations,
-) -> std::io::Result<Vec<Vec<Song>>> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        for data in load_all(&bytes) {
-            let songs = harvest_sound_data(data.as_ref(), seq_len, annotations);
-            let n_windows: usize = songs.iter().map(|s| s.len()).sum();
-            if n_windows > 0 {
-                let flat = songs.iter().flatten();
-                let music = flat.clone().filter(|s| s.is_music == Some(true)).count();
-                let sfx = flat.filter(|s| s.is_music == Some(false)).count();
-                eprintln!(
-                    "  {}: {} songs, {} windows ({} music / {} sfx / {} unlabeled)",
-                    path.file_name().unwrap_or_default().to_string_lossy(),
-                    songs.len(),
-                    n_windows,
-                    music,
-                    sfx,
-                    n_windows - music - sfx,
-                );
-                out.extend(songs);
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Harvest every archive in a directory into its per-song **un-windowed** note
-/// stream + weak is-music label (the full-stream counterpart to [`harvest_dir`]).
-/// Lets the caller window train/val differently after the song-level split.
+/// Harvest every archive in a directory into whole [`Song`]s (intro+loop+loop,
+/// variable length), stamped with the archive's file stem as `Song::source` and
+/// weak is-music labels for covered GBA game codes. Files that don't parse into
+/// any `SoundData` are silently skipped.
 pub fn harvest_dir_full(
     dir: &std::path::Path,
     annotations: &Annotations,
-) -> std::io::Result<Vec<(Vec<NoteEvent>, Option<bool>)>> {
+) -> std::io::Result<Vec<Song>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
@@ -442,8 +314,32 @@ pub fn harvest_dir_full(
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
+        // Archive file stem = the song's `Song::source` (per-ROM data breakdown).
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         for data in load_all(&bytes) {
-            out.extend(harvest_sound_data_full(data.as_ref(), annotations));
+            let mut songs = harvest_sound_data_full(data.as_ref(), annotations);
+            if songs.is_empty() {
+                continue;
+            }
+            let music = songs.iter().filter(|s| s.is_music == Some(true)).count();
+            let sfx = songs.iter().filter(|s| s.is_music == Some(false)).count();
+            let looped = songs.iter().filter(|s| s.loop_frame.is_some()).count();
+            eprintln!(
+                "  {}: {} songs ({} music / {} sfx / {} unlabeled; {} looped)",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                songs.len(),
+                music,
+                sfx,
+                songs.len() - music - sfx,
+                looped,
+            );
+            for s in songs.iter_mut() {
+                s.source = stem.clone();
+            }
+            out.extend(songs);
         }
     }
     Ok(out)
@@ -464,109 +360,6 @@ mod tests {
         assert_eq!(step_to_frame(24, 24.0), 4);
         // Degenerate: no beat division -> step == frame.
         assert_eq!(step_to_frame(7, 0.0), 7);
-    }
-
-    #[test]
-    fn windows_rebase_and_drop_partial() {
-        // Two notes: one in window 0, one straddling into window 1.
-        let notes = vec![
-            NoteEvent {
-                start_frame: 2,
-                end_frame: 6,
-                pitch: 60,
-                velocity: 0.8,
-                instrument: Instrument::Harmony,
-                track: 0,
-                pan: 0.0,
-            },
-            NoteEvent {
-                start_frame: 6,
-                end_frame: 14,
-                pitch: 64,
-                velocity: 0.8,
-                instrument: Instrument::Harmony,
-                track: 0,
-                pan: 0.0,
-            },
-        ];
-        // seq_len 8, total_frames 14 -> exactly one full window (frames 0..8).
-        let songs = slice_into_windows(&notes, 8, Some(true));
-        assert_eq!(songs.len(), 1);
-        let s = &songs[0];
-        assert_eq!(s.n_frames, 8);
-        assert_eq!(s.chord_labels, vec![NO_CHORD; 8]);
-        assert_eq!(s.is_music, Some(true)); // label propagates to windows
-                                            // First note verbatim; second clipped to the window boundary (6..8).
-        assert!(s
-            .notes
-            .iter()
-            .any(|n| n.start_frame == 2 && n.end_frame == 6));
-        assert!(s
-            .notes
-            .iter()
-            .any(|n| n.start_frame == 6 && n.end_frame == 8));
-    }
-
-    #[test]
-    fn sample_random_windows_oversamples_and_stays_in_bounds() {
-        use rand::rngs::StdRng;
-        use rand::SeedableRng;
-        // 4 windows worth of notes (total 32 frames) at seq_len 8 -> tiled count 4.
-        // Pitch varies by frame so different offsets capture different pitch sets
-        // (otherwise uniform notes look identical once rebased to the window).
-        let notes: Vec<NoteEvent> = (0..32u32)
-            .map(|f| NoteEvent {
-                start_frame: f,
-                end_frame: f + 2,
-                pitch: 60 + f as u8,
-                velocity: 0.8,
-                instrument: Instrument::Harmony,
-                track: 0,
-                pan: 0.0,
-            })
-            .collect();
-        let mut rng = StdRng::seed_from_u64(1);
-        let songs = sample_random_windows(&notes, 8, 4.0, Some(true), &mut rng);
-        // coverage 4 × tiled 4 = 16 windows.
-        assert_eq!(songs.len(), 16);
-        let mut signatures: HashSet<Vec<u8>> = HashSet::new();
-        for s in &songs {
-            assert_eq!(s.n_frames, 8);
-            assert_eq!(s.chord_labels, vec![NO_CHORD; 8]);
-            assert_eq!(s.is_music, Some(true));
-            // Every note rebased into [0, 8).
-            assert!(s
-                .notes
-                .iter()
-                .all(|n| n.start_frame < 8 && n.end_frame <= 8));
-            let mut pitches: Vec<u8> = s.notes.iter().map(|n| n.pitch).collect();
-            pitches.sort();
-            signatures.insert(pitches);
-        }
-        // Phase diversity: random start offsets must yield >1 distinct window
-        // (pitch sets differ because each offset captures different frames).
-        assert!(
-            signatures.len() > 1,
-            "random offsets must yield phase-diverse windows"
-        );
-    }
-
-    #[test]
-    fn sample_random_windows_drops_song_shorter_than_window() {
-        use rand::rngs::StdRng;
-        use rand::SeedableRng;
-        // total 5 frames < seq_len 8 -> no window fits.
-        let notes = vec![NoteEvent {
-            start_frame: 0,
-            end_frame: 5,
-            pitch: 60,
-            velocity: 0.8,
-            instrument: Instrument::Harmony,
-            track: 0,
-            pan: 0.0,
-        }];
-        let mut rng = StdRng::seed_from_u64(2);
-        assert!(sample_random_windows(&notes, 8, 4.0, None, &mut rng).is_empty());
     }
 
     #[test]

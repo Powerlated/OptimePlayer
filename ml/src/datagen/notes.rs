@@ -71,7 +71,11 @@ fn synthetic_channel(instrument: Instrument) -> u8 {
 }
 
 /// A fully-arranged song: note events + per-frame labels + the global key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Implements `Default` (empty song) so construction sites can write only the
+/// fields they mean (`..Song::default()`) — the optional metadata tail
+/// (`is_music`/`source`/`doc_spans`/`label_mask`/`loop_frame`) defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Song {
     pub key_label: usize,
     pub n_frames: usize,
@@ -84,6 +88,28 @@ pub struct Song {
     /// is-music probe only; ignored by the chord/key/SSL objectives.
     #[serde(default)]
     pub is_music: Option<bool>,
+    /// Where the window came from: harvested archive's file stem (e.g.
+    /// `pokemon-emerald`), `""` for synthetic. Drives the dashboard's per-ROM data
+    /// breakdown. bincode isn't self-describing, so datasets saved before this field
+    /// existed don't load — regenerate/re-harvest.
+    #[serde(default)]
+    pub source: String,
+    /// Document layout for **packed** sequences: `(start, end)` frame spans of each
+    /// constituent song, in order. The slot at each span's `end` is that document's
+    /// **EOS slot**; frames after the last span's EOS are **pad**. Empty = the whole
+    /// window is one document with no EOS/pad (the m00–m02 fixed-window layout).
+    #[serde(default)]
+    pub doc_spans: Vec<(u32, u32)>,
+    /// Per-frame "this chord label is a real annotation" mask for partially
+    /// hand-labelled songs (`None` = every frame's label is trustworthy). Frames
+    /// with `false` are excluded from the supervised loss — an uncovered frame is
+    /// *unheard*, not no-chord.
+    #[serde(default)]
+    pub label_mask: Option<Vec<bool>>,
+    /// Frame at which the harvested song first looped (start of loop pass 2 of the
+    /// intro+loop+loop export). Diagnostics only — the model gets no loop marker.
+    #[serde(default)]
+    pub loop_frame: Option<u32>,
 }
 
 impl Song {
@@ -123,6 +149,20 @@ impl Song {
             notes,
             chord_labels,
             is_music: self.is_music,
+            source: self.source.clone(),
+            doc_spans: self.doc_spans.clone(),
+            label_mask: self.label_mask.clone(),
+            loop_frame: self.loop_frame,
+        }
+    }
+
+    /// Real (non-EOS, non-pad) frame count: sum of `doc_spans` lengths, or all of
+    /// `n_frames` when the song is a plain single-document window.
+    pub fn real_frames(&self) -> usize {
+        if self.doc_spans.is_empty() {
+            self.n_frames
+        } else {
+            self.doc_spans.iter().map(|&(s, e)| (e - s) as usize).sum()
         }
     }
 }
@@ -327,7 +367,8 @@ pub fn render_song<R: Rng>(rng: &mut R, key: &Key, n_frames: usize) -> Song {
         n_frames,
         notes,
         chord_labels,
-        is_music: None, // synthetic songs are unlabeled for the is-music probe
+        is_music: None,
+        ..Song::default() // synthetic songs are unlabeled for the is-music probe
     }
 }
 
@@ -461,6 +502,7 @@ mod tests {
                 Chord::new(7, Quality::Major).label(), // G
             ],
             is_music: Some(true),
+            ..Song::default()
         };
         // Up 2 semitones: C→D key, notes +2, chord roots +2 (C→D, G→A), quality kept.
         let t = song.transpose(2);

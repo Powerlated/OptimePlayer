@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 /// One window handed to the model: its notes and the truth for each frame.
 struct Cut {
     notes: Vec<NoteEvent>,
+    n_frames: usize,
     truth: Vec<Option<annotations::FrameLabel>>,
 }
 
@@ -126,9 +127,13 @@ fn main() {
         }
     };
 
-    // Gather every fully-annotated window. Partially-annotated ones are skipped: a frame nobody has
-    // listened to is not evidence either way, and counting it would fake the denominator.
+    // Fixed-window backbones: gather every fully-annotated 256-frame window
+    // (partially-annotated ones skipped — a frame nobody has listened to is not
+    // evidence either way). The VARLEN backbone (kda) takes each annotated song
+    // whole; only annotated frames are scored, so partial coverage is fine.
     let seq_len = 256;
+    let varlen = args.kind == Kind::Kda;
+    let max_frames = optime_ml::m03_kda::KdaModelConfig::new().n_frames;
     let mut cuts: Vec<Cut> = Vec::new();
     let mut labeled_frames = 0usize;
     let mut skipped_partial = 0usize;
@@ -147,12 +152,28 @@ fn main() {
             if !split.accepts(&file.source, ann.song_id) {
                 continue;
             }
-            let Some((notes, _)) = harvest_song_full(&**data, ann.song_id) else {
+            let Some(h) = harvest_song_full(&**data, ann.song_id) else {
                 continue;
             };
+            let notes = h.notes;
             let total = notes.iter().map(|n| n.end_frame).max().unwrap_or(0) as usize;
             let truth = ann.frame_labels(file.steps_per_beat, total);
             labeled_frames += truth.iter().filter(|t| t.is_some()).count();
+            if varlen {
+                // Whole song, truncated to the model's cap; unannotated frames
+                // simply aren't scored.
+                let cap = total.min(max_frames - 1);
+                let win_notes = optime_ml::harvest::clip_notes_to_window(&notes, 0, cap as u32);
+                if win_notes.is_empty() {
+                    continue;
+                }
+                cuts.push(Cut {
+                    notes: win_notes,
+                    n_frames: cap,
+                    truth: truth[..cap].to_vec(),
+                });
+                continue;
+            }
             for w in 0..(total / seq_len) {
                 let (a, b) = (w * seq_len, (w + 1) * seq_len);
                 let win = truth[a..b].to_vec();
@@ -167,6 +188,7 @@ fn main() {
                 }
                 cuts.push(Cut {
                     notes: win_notes,
+                    n_frames: seq_len,
                     truth: win,
                 });
             }
@@ -206,10 +228,10 @@ fn main() {
         std::process::exit(1);
     }
     let score = match args.kind {
-        Kind::Frame => run::<FrameModel<Back>>(&prefix, &cuts, seq_len, &device),
-        Kind::Event => run::<EventModel<Back>>(&prefix, &cuts, seq_len, &device),
-        Kind::Hier => run::<HierModel<Back>>(&prefix, &cuts, seq_len, &device),
-        Kind::Kda => run::<KdaModel<Back>>(&prefix, &cuts, seq_len, &device),
+        Kind::Frame => run::<FrameModel<Back>>(&prefix, &cuts, &device),
+        Kind::Event => run::<EventModel<Back>>(&prefix, &cuts, &device),
+        Kind::Hier => run::<HierModel<Back>>(&prefix, &cuts, &device),
+        Kind::Kda => run::<KdaModel<Back>>(&prefix, &cuts, &device),
     };
 
     println!("\nvs. hand labels ({}):", args.kind.name());
@@ -251,7 +273,7 @@ fn main() {
     );
 }
 
-fn run<M>(prefix: &Path, cuts: &[Cut], seq_len: usize, device: &MlDevice) -> Score
+fn run<M>(prefix: &Path, cuts: &[Cut], device: &MlDevice) -> Score
 where
     M: Backbone<Back> + AutodiffModule<Back>,
     M::InnerModule: Backbone<Inner, Batch = <M as Backbone<Back>>::Batch>,
@@ -259,7 +281,7 @@ where
     let model = backbone::load::<M, Back>(prefix, device);
     let mut score = Score::default();
     for cut in cuts {
-        let pred = infer::predict::<M>(&model, &cut.notes, seq_len, device).chord_labels;
+        let pred = infer::predict::<M>(&model, &cut.notes, cut.n_frames, device).chord_labels;
         for (t, p) in cut.truth.iter().zip(pred.iter()) {
             if let Some(t) = t {
                 score.add(*t, *p);

@@ -39,6 +39,9 @@ pub struct ArOutput<B: Backend> {
     pub pc_logits: Tensor<B, 3>,
     /// `[batch, n_frames, N_CHANNELS]`
     pub channel_logits: Tensor<B, 3>,
+    /// `[batch, n_frames, 1]` — "the next slot is EOS" logit, for backbones whose
+    /// sequences carry EOS tokens (packed long-context m03). `None` elsewhere.
+    pub eos_logits: Option<Tensor<B, 3>>,
 }
 
 /// A chord/key model generation.
@@ -57,6 +60,12 @@ pub trait Backbone<B: Backend>: Module<B> + Clone + Send + Sync + 'static {
     const DIR: &'static str;
     /// Human-readable name for log lines.
     const NAME: &'static str;
+
+    /// Whether this backbone accepts **variable-length** songs (no positional
+    /// table; batches pad to the longest song). Fixed-window backbones (`false`)
+    /// require every song to share `n_frames` and get their real-song data via
+    /// load-time windowing ([`crate::pack::window_dataset`]).
+    const VARLEN: bool = false;
 
     /// The config this generation is normally trained with.
     fn default_cfg() -> Self::Cfg;
@@ -77,8 +86,26 @@ pub trait Backbone<B: Backend>: Module<B> + Clone + Send + Sync + 'static {
     /// Per-window key labels (`batch`).
     fn key_labels(batch: &Self::Batch) -> &[usize];
 
+    /// Per-frame supervised-label validity weights (`batch * n_frames`, 1.0 =
+    /// count this frame in the chord loss/metrics). `None` = every frame counts
+    /// (the fixed-window layout). Variable-length backbones return the batch's
+    /// real-frame/annotation mask — EOS slots, pad, and unannotated frames are 0.
+    fn frame_mask(_batch: &Self::Batch) -> Option<&[f32]> {
+        None
+    }
+
     /// Supervised forward: per-frame factored chord logits + pooled key logits.
     fn forward_output(&self, batch: &Self::Batch, device: &B::Device) -> ModelOutput<B>;
+
+    /// Inference-time forward. Defaults to [`Self::forward_output`]; a **generative**
+    /// backbone (m03's read-then-generate formulation) overrides this with its
+    /// autoregressive decode, which is *not* the teacher-forced training pass.
+    /// [`crate::infer::predict`] (and therefore `eval_labeled` / `eval_real` /
+    /// `chord_export`) calls this; the train loop's val metrics call
+    /// `forward_output` and are teacher-forced for such a backbone.
+    fn infer_output(&self, batch: &Self::Batch, device: &B::Device) -> ModelOutput<B> {
+        self.forward_output(batch, device)
+    }
 
     /// Estimated FLOPs to push **one window** through [`forward_output`], under the
     /// matmul-only convention in [`crate::flops`].
@@ -107,6 +134,14 @@ pub trait ArBackbone<B: Backend>: Backbone<B> {
     /// Per-frame sounding-content multi-hots `(pc, channel)` for the AR target. The
     /// pretrain loss shifts these by one frame.
     fn ar_targets(batch: &Self::Batch) -> (Vec<f32>, Vec<f32>);
+
+    /// Per-slot kinds (`batch * n_frames`, [`crate::m01_event::SLOT_FRAME`] /
+    /// `SLOT_EOS` / `SLOT_PAD`) for backbones whose AR sequences are packed with
+    /// EOS/pad slots — drives the EOS-prediction target and the pad-exclusion
+    /// mask in the AR loss. `None` = plain all-frame windows.
+    fn ar_slot_kinds(_batch: &Self::Batch) -> Option<&[i64]> {
+        None
+    }
 }
 
 /// Load a checkpoint written by [`save`]: weights at `prefix`, config at
@@ -202,6 +237,7 @@ mod tests {
             ],
             chord_labels: vec![0; n_frames],
             is_music: None,
+            ..Song::default()
         }
     }
 
@@ -213,7 +249,10 @@ mod tests {
         let songs = [small_song(8), small_song(8)];
         let batch = M::build_batch(&songs);
         let (b, nf) = M::dims(&batch);
-        assert_eq!((b, nf), (2, 8), "{}: dims", M::NAME);
+        // Fixed-window backbones see exactly 8 slots; a VARLEN backbone pads
+        // (8 frames + EOS = 9).
+        assert_eq!(b, 2, "{}: batch", M::NAME);
+        assert_eq!(nf, if M::VARLEN { 9 } else { 8 }, "{}: slots", M::NAME);
         assert_eq!(M::chord_labels(&batch).len(), b * nf, "{}: chord", M::NAME);
         assert_eq!(M::key_labels(&batch).len(), b, "{}: key", M::NAME);
 
