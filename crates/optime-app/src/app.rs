@@ -3435,7 +3435,7 @@ impl OptimeApp {
                         rest passes untouched.",
                 );
                 ui.add(
-                    egui::Slider::new(&mut hbc.threshold_db, -60.0..=0.0)
+                    egui::Slider::new(&mut hbc.threshold_db, -80.0..=0.0)
                         .text("Threshold")
                         .suffix(" dB"),
                 )
