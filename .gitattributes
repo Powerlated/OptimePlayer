@@ -1,0 +1,3 @@
+# Normalize line endings: all text files are stored and checked out as LF.
+# Prevents accidental mass CRLF commits from polluting file history.
+* text=auto eol=lf
