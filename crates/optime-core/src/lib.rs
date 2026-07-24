@@ -28,6 +28,7 @@ pub mod waveform;
 
 pub use device_settings::{
     InstrumentResampleChoice, InstrumentResampleSettings, MixerResampleSettings, PerDeviceSettings,
+    PopSmoothingEdge,
 };
 pub use devices::nds::{
     BankInfo, InstrumentBank, InstrumentRecord, InstrumentType, Message, MessageType, Sdat,

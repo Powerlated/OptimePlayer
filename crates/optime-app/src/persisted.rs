@@ -1,7 +1,7 @@
 //! The user's persistent library — playlists, liked songs, play history — plus the
 //! serializable bundle of everything saved to eframe storage between sessions.
 
-pub use optime_core::{InstrumentResampleChoice, PerDeviceSettings};
+pub use optime_core::{InstrumentResampleChoice, PerDeviceSettings, PopSmoothingEdge};
 
 /// What happens when the current song ends (Spotify-style repeat cycle).
 #[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]

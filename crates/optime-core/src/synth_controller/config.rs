@@ -2,6 +2,8 @@
 //! that make up a [`PerDeviceSettings`](crate::PerDeviceSettings) — the struct the synthesis layer
 //! consumes directly.
 
+use crate::dsp::slewer::Direction;
+
 /// How the stereo expander's Haas delay lines react to a pan change while audio is flowing
 /// through them (a delay-length jump shifts the signal and clicks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -155,6 +157,11 @@ pub struct PopSmoothing {
     pub sampled: bool,
     /// Seconds the de-click ramp takes to cross the full gain range. `0` makes it instant.
     pub slew_seconds: f64,
+    /// Which gain moves get the ramp: [`Direction::UpOnly`] smooths only the attack (a note
+    /// turning on or getting louder), [`Direction::DownOnly`] only the release (a note fading or
+    /// being cut), [`Direction::UpAndDown`] both. The unramped direction jumps as the hardware
+    /// does.
+    pub direction: Direction,
 }
 
 impl Default for PopSmoothing {
@@ -163,6 +170,7 @@ impl Default for PopSmoothing {
             psg: false,
             sampled: false,
             slew_seconds: DEFAULT_POP_SLEW_SECONDS,
+            direction: Direction::UpAndDown,
         }
     }
 }

@@ -7,7 +7,7 @@ use crate::devices::VoicePitch;
 use crate::dsp::resample::{
     EffectiveGather, GatherSource, ResampleTables, effective_gather, gather_sinc, sinc_fc,
 };
-use crate::dsp::slewer::Slewer;
+use crate::dsp::slewer::{Direction, Slewer};
 use crate::synth_controller::{DEFAULT_POP_SLEW_SECONDS, PopSmoothing};
 use crate::tuning::{TuningSystem, midi_note_to_hz};
 use crate::waveform::{InstrumentResampleMode, Sample, Waveform};
@@ -75,19 +75,18 @@ impl WaveformInstrument {
         }
     }
 
-    /// Begins a note: sets the envelope volume and primes the applied gain. A pop-smoothed voice
-    /// starts from silence and slews up; everything else starts at `volume` exactly.
+    /// Begins a note: sets the envelope volume and primes the applied gain. A voice whose attack is
+    /// pop-smoothed starts from silence and slews up; everything else starts at `volume` exactly,
+    /// which includes a release-only smoothed voice — its note-on edge is meant to stay hard.
     pub fn begin_note(&mut self, volume: Sample, pops: PopSmoothing) {
         self.volume = volume;
-        // Adopt the configured slew time so the ramp speed follows the setting.
+        // Adopt the configured slew time and direction so the ramp follows the setting.
         self.pop_slew_seconds = pops.slew_seconds;
         self.refresh_pop_step();
-        self.gain
-            .set(if pops.enabled_for(self.waveform.is_psg_square) {
-                0.0
-            } else {
-                volume
-            });
+        self.gain.set_direction(pops.direction);
+        let ramps_attack = pops.enabled_for(self.waveform.is_psg_square)
+            && matches!(pops.direction, Direction::UpOnly | Direction::UpAndDown);
+        self.gain.set(if ramps_attack { 0.0 } else { volume });
         self.fading_out = false;
     }
 
@@ -784,6 +783,64 @@ mod tests {
             (hard.output - 1.0).abs() < 1e-12,
             "unsmoothed start must step to full gain, got {}",
             hard.output
+        );
+    }
+
+    #[test]
+    fn pop_smoothing_edge_selects_which_note_edge_ramps() {
+        // `Attack` ramps the note on but cuts it instantly; `Release` does the opposite. The edge
+        // that isn't ramped must arrive in a single sample, exactly as with smoothing off.
+        let out_rate = 48_000.0;
+        let mut waveform = Waveform::new(vec![1.0; 64], 440.0, out_rate, true, 0); // DC source
+        waveform.is_psg_square = true;
+        let waveform = Arc::new(waveform);
+        let pitch = VoicePitch::Midi {
+            note: 69.0,
+            sample_pitch_hz: 440.0,
+        };
+        let mode = InstrumentResampleMode::NearestNeighbor;
+
+        let start = |direction| {
+            let pops = PopSmoothing {
+                psg: true,
+                direction,
+                ..PopSmoothing::default()
+            };
+            let mut instr = WaveformInstrument::new(out_rate, waveform.clone());
+            instr.set_pitch(pitch, TuningSystem::Equal);
+            instr.playing = true;
+            instr.begin_note(1.0, pops);
+            instr.advance(mode, None, pops);
+            (instr, pops)
+        };
+
+        // Attack only: ramps up from silence, then the fade-out lands on zero in one sample.
+        let (mut attack, pops) = start(Direction::UpOnly);
+        assert!(
+            attack.output < 0.05,
+            "attack must ramp, got {}",
+            attack.output
+        );
+        attack.volume = 1.0;
+        attack.gain.set(1.0);
+        attack.begin_fade_out();
+        attack.advance(mode, None, pops);
+        assert_eq!(attack.output, 0.0, "an attack-only cut must be instant");
+        assert!(!attack.playing, "the instant cut must stop the voice");
+
+        // Release only: full gain on the first sample, then the fade-out takes many samples.
+        let (mut release, pops) = start(Direction::DownOnly);
+        assert!(
+            (release.output - 1.0).abs() < 1e-12,
+            "a release-only start must step to full gain, got {}",
+            release.output
+        );
+        release.begin_fade_out();
+        release.advance(mode, None, pops);
+        assert!(
+            release.output > 0.9 && release.playing,
+            "a release-only fade-out must ramp, got {}",
+            release.output
         );
     }
 

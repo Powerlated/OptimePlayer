@@ -14,7 +14,8 @@ use crate::annotation::{AnnotationState, BounceJob};
 use crate::chord_data;
 use crate::media_controls::{self, MediaAction};
 use crate::persisted::{
-    InstrumentResampleChoice, PerDeviceSettings, Persisted, RepeatMode, SortMode, TrackRef,
+    InstrumentResampleChoice, PerDeviceSettings, Persisted, PopSmoothingEdge, RepeatMode, SortMode,
+    TrackRef,
 };
 use crate::piano_roll::PianoRoll;
 use crate::player::{PlaybackCommand, PlaylistEntry};
@@ -3179,29 +3180,28 @@ impl OptimeApp {
             "Stereo separation: Apply a stereo widener to panned instruments",
         );
         ui.add_enabled_ui(d.stereo_separation, |ui| {
+            egui::ComboBox::from_id_salt("delay_smoothing")
+                .selected_text(match d.delay_smoothing_choice {
+                    1 => "No delay change during notes",
+                    _ => "No smoothing",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut d.delay_smoothing_choice, 0, "No smoothing")
+                        .on_hover_text("Pan changes move the widening delays immediately.");
+                    ui.selectable_value(
+                        &mut d.delay_smoothing_choice,
+                        1,
+                        "No delay change during notes",
+                    )
+                        .on_hover_text(
+                            "Defer widening-delay changes until the track is silent, so they \
+                             never pop in the middle of a playing note.",
+                        );
+                });
                 ui.checkbox(
                     &mut d.force_stereo_separation,
                     "Force stereo separation: Apply a contrived stereo widener to instruments that are center-panned",
                 );
-                ui.label("Stereo widener smoothing (anti-pop & clicks)");
-                egui::ComboBox::from_id_salt("delay_smoothing")
-                    .selected_text(match d.delay_smoothing_choice {
-                        1 => "No delay change during notes",
-                        _ => "No smoothing",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut d.delay_smoothing_choice, 0, "No smoothing")
-                            .on_hover_text("Pan changes move the widening delays immediately.");
-                        ui.selectable_value(
-                            &mut d.delay_smoothing_choice,
-                            1,
-                            "No delay change during notes",
-                        )
-                            .on_hover_text(
-                                "Defer widening-delay changes until the track is silent, so they \
-                            never pop in the middle of a playing note.",
-                            );
-                    });
                 ui.checkbox(&mut d.bass_mono, "Keep bass centered");
                 ui.horizontal(|ui| {
                     ui.add_enabled(
@@ -3217,6 +3217,76 @@ impl OptimeApp {
                         );
                 });
             });
+        ui.separator();
+        // Every de-click control lives here, whatever stage of the chain it acts on: the two
+        // pop-smoothing kinds, the ramp time and edge they share, pan smoothing, and the stereo
+        // widener's delay handling.
+        ui.label("Smoothing (anti-pop & clicks)");
+        ui.checkbox(
+            &mut d.instrument_resample.smooth_psg_pops,
+            "Smooth PSG pops",
+        )
+        .on_hover_text(
+            "Slew PSG channel gains so notes turning abruptly on and off don't click. Unchecked \
+                preserves the hardware's hard edges.",
+        );
+        ui.checkbox(
+            &mut d.instrument_resample.smooth_sample_pops,
+            "Smooth sample pops",
+        )
+        .on_hover_text(
+            "Slew sampled (DirectSound / SWAR) voice gains so notes starting or cut mid-waveform \
+                don't click. Unchecked preserves the original edges.",
+        );
+        let any_pop_smoothing =
+            d.instrument_resample.smooth_psg_pops || d.instrument_resample.smooth_sample_pops;
+        ui.add_enabled_ui(any_pop_smoothing, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Smooth on");
+                egui::ComboBox::from_id_salt("pop_smooth_edge")
+                    .selected_text(d.instrument_resample.pop_smooth_edge.text())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut d.instrument_resample.pop_smooth_edge,
+                            PopSmoothingEdge::Attack,
+                            PopSmoothingEdge::Attack.text(),
+                        )
+                        .on_hover_text(
+                            "Ramp only the rise, so a note fades in but is still cut off instantly.",
+                        );
+                        ui.selectable_value(
+                            &mut d.instrument_resample.pop_smooth_edge,
+                            PopSmoothingEdge::Release,
+                            PopSmoothingEdge::Release.text(),
+                        )
+                        .on_hover_text(
+                            "Ramp only the fall, so a note keeps its hard attack but is never cut \
+                             off mid-waveform.",
+                        );
+                        ui.selectable_value(
+                            &mut d.instrument_resample.pop_smooth_edge,
+                            PopSmoothingEdge::Both,
+                            PopSmoothingEdge::Both.text(),
+                        )
+                        .on_hover_text("Ramp both edges of every note.");
+                    })
+                    .response
+                    .on_hover_text(
+                        "Which edge of a note the de-click ramp applies to. The other edge keeps \
+                         the hardware's instant jump.",
+                    );
+            });
+            ui.add(
+                egui::Slider::new(&mut d.instrument_resample.pop_slew_ms, 0.1..=20.0)
+                    .text("De-click slew time")
+                    .suffix(" ms")
+                    .logarithmic(true),
+            )
+            .on_hover_text(
+                "How long the de-click gain ramp takes for the smoothed voices above. Longer is \
+                    gentler (fewer clicks) but softens note attacks; ~2 ms is a click-free default.",
+            );
+        });
         ui.checkbox(
             &mut d.smooth_pan,
             "Smooth panning changes (slew the pan to avoid clicks)",
@@ -3262,34 +3332,6 @@ impl OptimeApp {
             )
             .on_hover_text("Low-pass cutoff for the sampled (DirectSound / SWAR) channels.");
         }
-        // Pop smoothing is independent of the resampling mode, so it's always available.
-        ui.checkbox(
-            &mut d.instrument_resample.smooth_psg_pops,
-            "Smooth PSG pops",
-        )
-        .on_hover_text(
-            "Slew PSG channel gains over ~2 ms so notes turning abruptly on and off don't \
-                click. Unchecked preserves the hardware's hard edges.",
-        );
-        ui.checkbox(
-            &mut d.instrument_resample.smooth_sample_pops,
-            "Smooth sample pops",
-        )
-        .on_hover_text(
-            "Slew sampled (DirectSound / SWAR) voice gains so notes starting or cut mid-waveform \
-                don't click. Unchecked preserves the original edges.",
-        );
-        ui.add_enabled(
-            d.instrument_resample.smooth_psg_pops || d.instrument_resample.smooth_sample_pops,
-            egui::Slider::new(&mut d.instrument_resample.pop_slew_ms, 0.1..=20.0)
-                .text("De-click slew time")
-                .suffix(" ms")
-                .logarithmic(true),
-        )
-        .on_hover_text(
-            "How long the de-click gain ramp takes for the smoothed voices above. Longer is \
-                gentler (fewer clicks) but softens note attacks; ~2 ms is a click-free default.",
-        );
         if is_gba {
             ui.checkbox(&mut d.remove_sample_dc_offset, "Remove sample DC offset")
                 .on_hover_text(
@@ -4385,7 +4427,7 @@ impl eframe::App for OptimeApp {
 fn draw_gr_bar(ui: &mut egui::Ui, gr_db: f32) {
     /// Full-scale span (left edge = `−this` dB). Covers the typical pop/electronic 1–12 dB range
     /// with headroom for heavy limiting without pegging instantly.
-    const GR_FULL_SCALE_DB: f32 = 24.0;
+    const GR_FULL_SCALE_DB: f32 = 48.0;
     let accent = crate::theme::ACCENT;
     let warn = ui.visuals().warn_fg_color;
     let frac = (gr_db.abs() / GR_FULL_SCALE_DB).clamp(0.0, 1.0);

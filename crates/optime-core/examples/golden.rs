@@ -8,7 +8,7 @@
 
 use optime_core::{
     InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
-    PerDeviceSettings, SoundData, SynthController, load_all,
+    PerDeviceSettings, PopSmoothingEdge, SoundData, SynthController, load_all,
 };
 
 const SAMPLE_RATE: f64 = 32768.0;
@@ -53,6 +53,7 @@ fn configs() -> Vec<(&'static str, PerDeviceSettings)> {
                     smooth_psg_pops: false,
                     smooth_sample_pops: false,
                     pop_slew_ms: 2.0,
+                    pop_smooth_edge: PopSmoothingEdge::Both,
                 },
                 ..PerDeviceSettings::neutral()
             },
@@ -68,6 +69,7 @@ fn configs() -> Vec<(&'static str, PerDeviceSettings)> {
                     smooth_psg_pops: false,
                     smooth_sample_pops: false,
                     pop_slew_ms: 2.0,
+                    pop_smooth_edge: PopSmoothingEdge::Both,
                 },
                 ..PerDeviceSettings::neutral()
             },

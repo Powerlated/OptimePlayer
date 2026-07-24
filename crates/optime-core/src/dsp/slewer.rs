@@ -80,6 +80,13 @@ impl Slewer {
         self.step = step_per_sample.abs();
     }
 
+    /// Replaces the ramped direction on an existing slewer, for a control whose smoothing setting
+    /// can change while it is in use.
+    #[inline]
+    pub fn set_direction(&mut self, direction: Direction) {
+        self.direction = direction;
+    }
+
     /// Moves the held value one step toward `target` and returns the new value. Once the target is
     /// within a single step it lands exactly on it rather than overshooting, and a move that runs
     /// against the ramped direction arrives in this one call.

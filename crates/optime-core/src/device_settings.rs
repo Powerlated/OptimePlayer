@@ -6,6 +6,7 @@
 //! out-of-the-box values.
 
 use crate::TRACK_COUNT;
+use crate::dsp::slewer::Direction;
 use crate::synth_controller::{DelaySmoothing, HighBandCompressor, HighShelf, PopSmoothing};
 use crate::tuning::TuningSystem;
 use crate::waveform::InstrumentResampleMode;
@@ -31,6 +32,38 @@ impl InstrumentResampleChoice {
     }
 }
 
+/// Which edge of a note the de-click gain slew applies to. The unsmoothed edge keeps the
+/// hardware's instant jump.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+pub enum PopSmoothingEdge {
+    /// Ramp only the rise: a note turning on or getting louder.
+    Attack,
+    /// Ramp only the fall: a note fading out or being cut off.
+    Release,
+    /// Ramp both edges.
+    #[default]
+    Both,
+}
+
+impl PopSmoothingEdge {
+    pub fn text(self) -> &'static str {
+        match self {
+            PopSmoothingEdge::Attack => "Attack",
+            PopSmoothingEdge::Release => "Release",
+            PopSmoothingEdge::Both => "Both",
+        }
+    }
+
+    /// The slew direction this edge selection means.
+    pub fn direction(self) -> Direction {
+        match self {
+            PopSmoothingEdge::Attack => Direction::UpOnly,
+            PopSmoothingEdge::Release => Direction::DownOnly,
+            PopSmoothingEdge::Both => Direction::UpAndDown,
+        }
+    }
+}
+
 /// Per-device resampling settings — each console keeps its own, so e.g. the DS can play
 /// Crunchy sinc while the GBA plays Clean sinc.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -52,6 +85,10 @@ pub struct InstrumentResampleSettings {
     /// saved settings (which predate the field) load as the previous fixed 2 ms.
     #[serde(default = "default_pop_slew_ms")]
     pub pop_slew_ms: f32,
+    /// Which note edge the de-click ramp applies to, shared by the PSG and sampled smoothing above.
+    /// `#[serde(default)]` so old saved settings load as `Both`, the behavior they had.
+    #[serde(default)]
+    pub pop_smooth_edge: PopSmoothingEdge,
 }
 
 /// The previous fixed de-click ramp time (2 ms); the serde fallback for `pop_slew_ms` so old saves
@@ -220,6 +257,7 @@ impl PerDeviceSettings {
             psg: self.instrument_resample.smooth_psg_pops,
             sampled: self.instrument_resample.smooth_sample_pops,
             slew_seconds: f64::from(self.instrument_resample.pop_slew_ms.max(0.0)) / 1000.0,
+            direction: self.instrument_resample.pop_smooth_edge.direction(),
         }
     }
 
@@ -252,6 +290,7 @@ impl PerDeviceSettings {
                 smooth_psg_pops: false,
                 smooth_sample_pops: false,
                 pop_slew_ms: 2.0,
+                pop_smooth_edge: PopSmoothingEdge::Both,
             },
             // Clean reconstruction is the sane default for upsampling a finished bus.
             mixer_resample: MixerResampleSettings {
@@ -294,6 +333,7 @@ impl PerDeviceSettings {
                 smooth_psg_pops: false,
                 smooth_sample_pops: false,
                 pop_slew_ms: 2.0,
+                pop_smooth_edge: PopSmoothingEdge::Both,
             },
             use_mixer: true,
             mixer_sample_rate: 32768,
@@ -341,6 +381,7 @@ impl PerDeviceSettings {
                 smooth_psg_pops: false,
                 smooth_sample_pops: false,
                 pop_slew_ms: 2.0,
+                pop_smooth_edge: PopSmoothingEdge::Both,
             },
             use_mixer: true,
             mixer_sample_rate: 13379,
@@ -393,6 +434,7 @@ impl PerDeviceSettings {
                 smooth_psg_pops: false,
                 smooth_sample_pops: false,
                 pop_slew_ms: 2.0,
+                pop_smooth_edge: PopSmoothingEdge::Both,
             },
             use_mixer: true,
             mixer_sample_rate: 13379,

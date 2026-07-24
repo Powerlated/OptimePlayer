@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use optime_core::{
     InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
-    PerDeviceSettings, SynthController, load_all,
+    PerDeviceSettings, PopSmoothingEdge, SynthController, load_all,
 };
 
 fn main() {
@@ -51,6 +51,7 @@ fn main() {
                 smooth_psg_pops: false,
                 smooth_sample_pops: false,
                 pop_slew_ms: 2.0,
+                pop_smooth_edge: PopSmoothingEdge::Both,
             },
         ),
         (
@@ -63,6 +64,7 @@ fn main() {
                 smooth_psg_pops: false,
                 smooth_sample_pops: false,
                 pop_slew_ms: 2.0,
+                pop_smooth_edge: PopSmoothingEdge::Both,
             },
         ),
     ] {

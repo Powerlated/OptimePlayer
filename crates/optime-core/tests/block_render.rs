@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use optime_core::{
     InstrumentResampleChoice, InstrumentResampleSettings, MixerResampleSettings, PerDeviceSettings,
-    SoundData, SynthController, load_all,
+    PopSmoothingEdge, SoundData, SynthController, load_all,
 };
 
 fn load_demo() -> Box<dyn SoundData> {
@@ -34,6 +34,7 @@ fn instrument(
         smooth_psg_pops,
         smooth_sample_pops,
         pop_slew_ms: 2.0,
+        pop_smooth_edge: PopSmoothingEdge::Both,
     }
 }
 
