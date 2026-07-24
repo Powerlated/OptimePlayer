@@ -1,46 +1,55 @@
 //! Stepping a control value such as a gain, a pan position, or a filter cutoff straight to a new
-//! target produces an audible click, so [`Slewer`] spreads that change over a short linear ramp
-//! instead, which is the de-click mechanism behind pop smoothing and pan smoothing.
+//! target produces an audible click. [`Slewer`] spreads that change over a short linear ramp
+//! instead. It is the de-click mechanism behind pop smoothing and pan smoothing.
 
-/// Which direction of movement the ramp applies to, the opposite direction being taken in one jump.
-// The `dsp` module is private to the crate, so this stays dead code until a caller selects a
-// direction.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which direction of movement gets the ramp. A move the other way arrives in one jump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
-    /// Only a rise is ramped, and a fall happens at once.
+    /// Ramp a rise, drop instantly.
     UpOnly,
-    /// Only a fall is ramped, and a rise happens at once.
+    /// Ramp a fall, rise instantly.
     DownOnly,
-    /// Both a rise and a fall are ramped.
+    /// Ramp both, which is what de-clicking a gain or a pan position needs.
+    #[default]
     UpAndDown,
 }
 
-/// A value that moves toward whatever target it is given by at most a fixed amount per sample,
-/// measured in the same units as the target, so one `Slewer` serves a gain, a pan position, or a
+/// A value that moves toward whatever target it is given, by at most a fixed amount per sample.
+/// The step is in the same units as the target, so one `Slewer` serves a gain, a pan position or a
 /// cutoff equally well.
 #[derive(Debug, Clone, Copy)]
 pub struct Slewer {
     current: f32,
-    /// The furthest the value may move in one call to [`advance`](Slewer::advance), never negative.
+    /// The furthest the value may move in one call to [`advance`](Slewer::advance). Never negative.
     step: f32,
+    /// The direction that gets the ramp; the other one is jumped in a single call to
+    /// [`advance`](Slewer::advance).
+    direction: Direction,
 }
 
 impl Slewer {
-    /// Starts at `initial` and moves at most `step_per_sample` value units toward the target per
-    /// call to [`advance`](Self::advance), so a step of zero freezes the value where it is and a
-    /// very large step arrives on the target in a single call.
+    /// Starts at `initial` and moves at most `step_per_sample` value units toward the target on
+    /// each call to [`advance`](Self::advance). A step of zero freezes the value where it is; a
+    /// very large one arrives on the target in a single call.
     pub fn new(initial: f32, step_per_sample: f32) -> Self {
         Self {
             current: initial,
             step: step_per_sample.abs(),
+            direction: Direction::default(),
         }
     }
 
+    /// Restricts the ramp to `direction`, so a move the other way completes in one call to
+    /// [`advance`](Self::advance). Suits a control that must fall instantly but may rise gently, or
+    /// the reverse.
+    pub fn with_direction(mut self, direction: Direction) -> Self {
+        self.direction = direction;
+        self
+    }
+
     /// Starts at `initial` and picks the step that takes `seconds` to cross one whole unit of
-    /// value at `sample_rate` Hz, such as the full `0..1` gain range used by the de-click ramp,
-    /// with both arguments kept as `f64` because they are wall-clock timings rather than audio
-    /// values.
+    /// value at `sample_rate` Hz, such as the full `0..1` gain range the de-click ramp works in.
+    /// Both arguments stay `f64` because they are wall-clock timings rather than audio values.
     pub fn from_time(initial: f32, seconds: f64, sample_rate: f64) -> Self {
         let step = if seconds > 0.0 && sample_rate > 0.0 {
             (1.0 / (seconds * sample_rate)) as f32
@@ -57,8 +66,8 @@ impl Slewer {
         self.current
     }
 
-    /// Jumps straight to `value` without ramping, for the cases where a discontinuity is intended,
-    /// such as priming a voice's gain at the start of a note.
+    /// Jumps straight to `value` without ramping. Use it where a discontinuity is intended, such as
+    /// priming a voice's gain at the start of a note.
     #[inline]
     pub fn set(&mut self, value: f32) {
         self.current = value;
@@ -71,12 +80,18 @@ impl Slewer {
         self.step = step_per_sample.abs();
     }
 
-    /// Moves the held value one step toward `target`, landing exactly on it once it is within a
-    /// single step rather than overshooting, and returns the new value.
+    /// Moves the held value one step toward `target` and returns the new value. Once the target is
+    /// within a single step it lands exactly on it rather than overshooting, and a move that runs
+    /// against the ramped direction arrives in this one call.
     #[inline]
     pub fn advance(&mut self, target: f32) -> f32 {
         let d = target - self.current;
-        self.current = if d.abs() <= self.step {
+        let ramped = match self.direction {
+            Direction::UpOnly => d > 0.0,
+            Direction::DownOnly => d < 0.0,
+            Direction::UpAndDown => true,
+        };
+        self.current = if !ramped || d.abs() <= self.step {
             target
         } else {
             self.current + self.step.copysign(d)
@@ -116,7 +131,7 @@ mod tests {
         let sample_rate = 48_000.0;
         let seconds = 0.002;
         let mut s = Slewer::from_time(0.0, seconds, sample_rate);
-        // A 2 ms ramp at 48 kHz is 96 samples, which is how many steps crossing the whole `0..1`
+        // A 2 ms ramp at 48 kHz is 96 samples. That is how many steps crossing the whole `0..1`
         // range should take.
         let steps = (seconds * sample_rate) as usize;
         for _ in 0..steps {
@@ -130,6 +145,32 @@ mod tests {
             s2.advance(1.0);
         }
         assert!(s2.value() < 1.0);
+    }
+
+    #[test]
+    fn up_only_ramps_a_rise_and_drops_at_once() {
+        let mut s = Slewer::new(0.0, 0.25).with_direction(Direction::UpOnly);
+        assert_eq!(s.advance(1.0), 0.25);
+        assert_eq!(s.advance(1.0), 0.5);
+        // The fall runs against the ramped direction, so it arrives in this one call.
+        assert_eq!(s.advance(0.0), 0.0);
+    }
+
+    #[test]
+    fn down_only_ramps_a_fall_and_rises_at_once() {
+        let mut s = Slewer::new(1.0, 0.25).with_direction(Direction::DownOnly);
+        assert_eq!(s.advance(0.0), 0.75);
+        assert_eq!(s.advance(0.0), 0.5);
+        // The rise runs against the ramped direction, so it arrives in this one call.
+        assert_eq!(s.advance(1.0), 1.0);
+    }
+
+    #[test]
+    fn a_new_slewer_ramps_both_ways() {
+        let mut s = Slewer::new(0.0, 0.25);
+        assert_eq!(s.advance(1.0), 0.25);
+        assert_eq!(s.advance(0.0), 0.0);
+        assert_eq!(Direction::default(), Direction::UpAndDown);
     }
 
     #[test]

@@ -80,7 +80,9 @@ fn table_for(filename: Option<&str>, game_code: Option<&str>) -> Option<Vec<Song
 }
 
 /// Looks up curated metadata for `song_id`, identified by the loaded source `filename` and/or the
-/// GBA `game_code` (e.g. `"BPEE"`). `None` if the game has no table or the id isn't in it.
+/// GBA `game_code` (e.g. `"BPEE"`). `None` if the game has no table or the id isn't in it. A table
+/// may list one song id more than once, since an album can use the same ROM song in several places;
+/// the song then takes the title and listing position of its first entry.
 pub fn lookup(filename: Option<&str>, game_code: Option<&str>, song_id: u32) -> Option<SongMeta> {
     let table = table_for(filename, game_code)?;
     let order = table.iter().position(|e| e.song_id == song_id)?;
@@ -161,8 +163,11 @@ mod tests {
 
     #[test]
     fn known_emerald_songs_resolve() {
-        // The album's first mapped track sorts first.
-        assert_eq!(lookup(None, Some("BPEE"), 442).unwrap().order, 0);
+        // The album's first mapped track sorts first, and the rest follow it in album order.
+        let opening = lookup(None, Some("BPEE"), 414).unwrap();
+        assert_eq!(opening.title, "Introductions");
+        assert_eq!(opening.order, 0);
+        assert!(lookup(None, Some("BPEE"), 442).unwrap().order > opening.order);
         let title = lookup(None, Some("BPEE"), 413).unwrap();
         assert_eq!(title.title, "Title Screen: Main Theme");
         // An OST track sorts before a non-OST one (FRLG port).
@@ -201,15 +206,15 @@ mod tests {
     }
 
     #[test]
-    fn embedded_tables_parse_and_have_unique_ids() {
+    fn embedded_tables_parse_and_are_non_empty() {
         for (_, file, json) in JSONS_BY_GBA_GAME_CODE.iter() {
             let table: Vec<SongEntry> = serde_json::from_str(json)
                 .unwrap_or_else(|e| panic!("{file} must be valid JSON: {e}"));
-            let mut ids: Vec<u32> = table.iter().map(|e| e.song_id).collect();
-            let n = ids.len();
-            ids.sort_unstable();
-            ids.dedup();
-            assert_eq!(ids.len(), n, "song ids in {file} must be unique");
+            assert!(!table.is_empty(), "{file} must list at least one song");
+            assert!(
+                table.iter().all(|e| !e.title.trim().is_empty()),
+                "every song in {file} must have a title"
+            );
         }
     }
 

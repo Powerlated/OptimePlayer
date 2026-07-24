@@ -305,6 +305,10 @@ pub struct OptimeApp {
     /// collection's tracks. The audio thread owns the live (possibly shuffled) order + position;
     /// this is what the UI re-materializes from on a shuffle toggle.
     playlist: Vec<TrackRef>,
+    /// Positions in [`Self::playlist`] in the order last sent to the audio thread. It turns that
+    /// thread's index back into a natural-order one. Searching by identity cannot do this job: when
+    /// the same song sits in the list twice, it finds whichever copy comes first.
+    playlist_order: Vec<usize>,
     /// Last `playback.status_gen` the UI reconciled, to detect audio-thread-driven advances.
     last_status_gen: u64,
     /// A track waiting for its source archive to finish loading (cross-source playlist jump
@@ -413,6 +417,7 @@ impl OptimeApp {
             new_playlist_name: String::new(),
             current_source: String::new(),
             playlist: Vec::new(),
+            playlist_order: Vec::new(),
             last_status_gen: 0,
             pending_play: None,
             resume_paused: false,
@@ -828,15 +833,15 @@ impl OptimeApp {
         self.start_playlist(Some(start));
     }
 
-    /// Plays `tracks` as the playlist, starting at the track at `pos`.
+    /// Plays `tracks` as the playlist, starting at the track at `pos`. Starting by position means
+    /// that when the same song appears several times, playback begins at the copy the user clicked.
     fn play_collection_at(&mut self, tracks: Vec<TrackRef>, pos: usize) {
         if tracks.is_empty() {
             return;
         }
         let pos = pos.min(tracks.len() - 1);
-        let start = tracks[pos].clone();
         self.playlist = tracks;
-        self.start_playlist(Some(start));
+        self.start_playlist_at(Some(pos));
     }
 
     /// Plays `tracks` from the top (a random entry first when shuffle is on).
@@ -853,20 +858,31 @@ impl OptimeApp {
     /// shuffling when `None`). If the chosen start entry's source isn't loaded, defers: fetches the
     /// source and resumes from [`Self::load_bytes`] when it arrives.
     fn start_playlist(&mut self, start: Option<TrackRef>) {
+        let start = start.and_then(|s| self.playlist.iter().position(|t| t.same_song(&s)));
+        self.start_playlist_at(start);
+    }
+
+    /// The same as [`Self::start_playlist`], but starting at a position in [`Self::playlist`]. A
+    /// caller that knows which row was clicked should use this: a position names one copy of a
+    /// song, where a [`TrackRef`] matches every copy of it.
+    fn start_playlist_at(&mut self, start: Option<usize>) {
         self.paused = false;
         if self.playlist.is_empty() {
             return;
         }
         let natural = self.playlist.clone();
-        let ordered = if self.p.shuffle {
-            self.materialize_shuffle(&natural, start.as_ref())
+        let start = start.map(|s| s.min(natural.len() - 1));
+        let order = if self.p.shuffle {
+            self.shuffled_order(natural.len(), start)
         } else {
-            natural
+            (0..natural.len()).collect()
         };
-        let index = match &start {
-            Some(s) => ordered.iter().position(|t| t.same_song(s)).unwrap_or(0),
+        let index = match start {
+            Some(s) => order.iter().position(|&i| i == s).unwrap_or(0),
             None => 0,
         };
+        let ordered: Vec<TrackRef> = order.iter().map(|&i| natural[i].clone()).collect();
+        self.playlist_order = order;
         let start_track = ordered[index].clone();
         if start_track.source != self.current_source {
             // The chosen source isn't loaded — fetch it (demo) and resume on arrival.
@@ -894,14 +910,12 @@ impl OptimeApp {
         }
     }
 
-    /// A fresh shuffle (Fisher–Yates, xorshift64) of `tracks`, with `keep` — the song that should
-    /// start playing — moved to the front so it plays first and the rest follow shuffled.
-    fn materialize_shuffle(
-        &mut self,
-        tracks: &[TrackRef],
-        keep: Option<&TrackRef>,
-    ) -> Vec<TrackRef> {
-        let mut out: Vec<TrackRef> = tracks.to_vec();
+    /// A fresh shuffle (Fisher–Yates, xorshift64) of the playlist positions `0..len`, with `keep` —
+    /// the position that should start playing — lifted out first and put at the front so it plays
+    /// immediately and the rest follow shuffled. Shuffling positions rather than tracks keeps two
+    /// copies of the same song distinct, so the one the user picked is the one that plays.
+    fn shuffled_order(&mut self, len: usize, keep: Option<usize>) -> Vec<usize> {
+        let mut out: Vec<usize> = (0..len).filter(|i| Some(*i) != keep).collect();
         for i in (1..out.len()).rev() {
             self.rng ^= self.rng << 13;
             self.rng ^= self.rng >> 7;
@@ -909,13 +923,24 @@ impl OptimeApp {
             let j = (self.rng % (i as u64 + 1)) as usize;
             out.swap(i, j);
         }
-        if let Some(k) = keep
-            && let Some(pos) = out.iter().position(|t| t.same_song(k))
-        {
-            let item = out.remove(pos);
-            out.insert(0, item);
+        if let Some(k) = keep {
+            out.insert(0, k);
         }
         out
+    }
+
+    /// Where the song the audio thread is playing sits in [`Self::playlist`], mapped back through
+    /// the order last sent so that the right copy is found when a song appears more than once.
+    /// Falls back to matching by identity before the audio engine exists.
+    fn current_playlist_position(&self) -> Option<usize> {
+        if let Some(audio) = &self.audio
+            && let Ok(st) = audio.shared.lock()
+            && let Some(&natural) = self.playlist_order.get(st.playback.index)
+        {
+            return Some(natural);
+        }
+        let cur = self.current_track_ref()?;
+        self.playlist.iter().position(|t| t.same_song(&cur))
     }
 
     /// Maps playlist tracks to [`PlaylistEntry`]s, attaching the loaded source archive (or `None`
@@ -1001,17 +1026,18 @@ impl OptimeApp {
         if self.playlist.is_empty() {
             return;
         }
-        let cur = self.current_track_ref();
+        let cur = self.current_playlist_position();
         let natural = self.playlist.clone();
-        let ordered = if self.p.shuffle {
-            self.materialize_shuffle(&natural, cur.as_ref())
+        let order = if self.p.shuffle {
+            self.shuffled_order(natural.len(), cur)
         } else {
-            natural
+            (0..natural.len()).collect()
         };
         let index = cur
-            .as_ref()
-            .and_then(|c| ordered.iter().position(|t| t.same_song(c)))
+            .and_then(|c| order.iter().position(|&i| i == c))
             .unwrap_or(0);
+        let ordered: Vec<TrackRef> = order.iter().map(|&i| natural[i].clone()).collect();
+        self.playlist_order = order;
         let entries = self.build_entries(&ordered);
         self.send_command(PlaybackCommand::Reorder { entries, index });
     }
@@ -2889,18 +2915,21 @@ impl OptimeApp {
         }
     }
 
-    /// Adds song `i` to playlist `p` (deduplicated), reporting the result in the status line.
+    /// Adds song `i` to the end of playlist `p` and reports the result in the status line. A song
+    /// already in the list is added again rather than refused: a playlist is an ordered programme,
+    /// and a track may legitimately recur in one.
     fn add_song_to_playlist(&mut self, i: usize, p: usize) {
         let Some(t) = self.track_ref(i) else { return };
         let Some(pl) = self.p.library.playlists.get_mut(p) else {
             return;
         };
-        if pl.tracks.iter().any(|x| x.same_song(&t)) {
-            self.status = format!("Already in {}.", pl.name);
+        let copies = pl.tracks.iter().filter(|x| x.same_song(&t)).count();
+        self.status = if copies > 0 {
+            format!("Added to {} ({} times now).", pl.name, copies + 1)
         } else {
-            self.status = format!("Added to {}.", pl.name);
-            pl.tracks.push(t);
-        }
+            format!("Added to {}.", pl.name)
+        };
+        pl.tracks.push(t);
     }
 
     /// The library browser (liked / recent / playlists). Returns `true` if playback started.

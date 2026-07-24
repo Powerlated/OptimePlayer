@@ -19,7 +19,7 @@
 
 pub mod device_settings;
 pub mod devices;
-mod dsp;
+pub mod dsp;
 pub mod synth;
 pub mod synth_controller;
 pub mod tuning;
