@@ -1,21 +1,24 @@
 //! Extracts the MP2K audio data from a GBA ROM into an audio-only image (see
 //! `devices/gba/extract.rs`), verifies the result loads with the same song list and renders a
 //! few songs bit-identically, and writes it next to the input as `<stem>-audio.gba`.
-//!
-//! Usage: `cargo run -p optime-core --example extract_mp2k -- <ROM path>`
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::Args as ClapArgs;
 use optime_core::devices::gba::GbaRom;
 use optime_core::{PerDeviceSettings, SynthController, load_all};
 
-fn main() -> ExitCode {
-    let Some(path) = std::env::args().nth(1) else {
-        eprintln!("Usage: extract_mp2k <GBA ROM path>");
-        return ExitCode::FAILURE;
-    };
-    let bytes = match std::fs::read(&path) {
+#[derive(ClapArgs)]
+#[command(about = "Strip a GBA ROM down to an audio-only image and verify it renders identically.")]
+pub struct Args {
+    /// The GBA ROM to extract MP2K audio data from.
+    rom: PathBuf,
+}
+
+pub fn run(args: Args) -> ExitCode {
+    let path = args.rom.display().to_string();
+    let bytes = match std::fs::read(&args.rom) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("Failed to read '{path}': {e}");
@@ -85,7 +88,7 @@ fn main() -> ExitCode {
         println!("song {id}: 5 s render bit-identical OK");
     }
 
-    let stem = Path::new(&path).with_extension("");
+    let stem = args.rom.with_extension("");
     let out_path = format!("{}-audio.gba", stem.display());
     if let Err(e) = std::fs::write(&out_path, &extracted) {
         eprintln!("Failed to write '{out_path}': {e}");

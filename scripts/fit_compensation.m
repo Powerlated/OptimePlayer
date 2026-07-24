@@ -5,7 +5,7 @@ function fit_compensation(dirpath)
 % PSG path can be coloured the same way (compensating PSGs being too loud under
 % crunch).
 %
-% Inputs (written by the `mixer_resample_response` Rust example):
+% Inputs (written by `optime-cli mixer-response`):
 %   near.f32   raw f32 LE, mono, nearest-neighbour mixer->output
 %   crunch.f32 raw f32 LE, mono, output-Nyquist crunch mixer->output
 %   meta.txt   key=value lines (out_rate, ...)

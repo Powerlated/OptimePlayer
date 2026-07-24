@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/optime-core", "crates/optime-app"]
+members = ["crates/optime-core", "crates/optime-app", "crates/optime-cli"]
 
 [workspace.package]
 version = "1.0.0"

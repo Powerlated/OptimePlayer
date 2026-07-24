@@ -3,9 +3,10 @@
 //! refactors are behavior-preserving (the hashes must not change). Not a correctness oracle —
 //! just a bit-for-bit baseline of the current engine.
 //!
-//! Run with `cargo run -p optime-core --example golden` (add `--no-default-features` to capture a
-//! baseline for the scalar gather; the SIMD and scalar builds hash differently by design).
+//! Add `--no-default-features` to the cargo invocation to capture a baseline for the scalar gather;
+//! the SIMD and scalar builds hash differently by design.
 
+use clap::Args as ClapArgs;
 use optime_core::{
     InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
     PerDeviceSettings, PopSmoothingEdge, SoundData, SynthController, load_all,
@@ -77,9 +78,20 @@ fn configs() -> Vec<(&'static str, PerDeviceSettings)> {
     ]
 }
 
-fn main() {
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let demos_dir = manifest.join("../../demos");
+#[derive(ClapArgs)]
+#[command(
+    about = "Hash a fixed render of every demo SDAT under several settings (refactor guard)."
+)]
+pub struct Args {
+    /// Directory of `.sdat` demos to hash. Defaults to the repo's `demos/`.
+    #[arg(long)]
+    demos: Option<std::path::PathBuf>,
+}
+
+pub fn run(args: Args) -> std::process::ExitCode {
+    let demos_dir = args.demos.unwrap_or_else(|| {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../demos")
+    });
     let mut demos: Vec<_> = std::fs::read_dir(&demos_dir)
         .expect("read demos dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -99,4 +111,5 @@ fn main() {
             println!("{name:32} {cfg_name:14} {hash:016x}");
         }
     }
+    std::process::ExitCode::SUCCESS
 }

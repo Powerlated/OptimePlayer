@@ -4,46 +4,66 @@
 //! sequence, decodes the song's samples to `.wav`, and disassembles each track's bytecode using
 //! the decomp-derived event table.
 //!
-//! Usage:
-//!   cargo run -p optime-core --example dump_dse -- <bgm.swd> <bgm####.smd> [bgm####.swd] [out_dir]
-//!
-//! `bgm.swd` is the main bank (sample data); `bgm####.smd` is the song; the optional per-song
-//! `.swd` is parsed for program info. Decoded WAVs are written to `out_dir` (default: cwd).
+//! The `files` mode reads the SWDL/SMDL files directly; the `rom` mode runs the same data through
+//! the public `SoundData`/`DevicePlayer` pipeline the app uses.
 
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use clap::{Args as ClapArgs, Subcommand};
 use optime_core::devices::dse::{DseEvent, Smdl, Swdl, decode_track};
 use optime_core::synth_controller::messages::TickFeedback;
 use optime_core::waveform::Waveform;
 use optime_core::{FsVisController, PerDeviceSettings, SynthController, SynthEvent, load_all};
-use std::path::Path;
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    // ROM mode: exercise the real SoundData/DevicePlayer pipeline the app uses.
-    if let Some(first) = args.first()
-        && first.to_ascii_lowercase().ends_with(".nds")
-    {
-        rom_mode(
-            first,
-            args.get(1).map(|s| s.parse().unwrap_or(0)).unwrap_or(0),
-        );
-        return;
-    }
-    if args.len() < 2 {
-        eprintln!(
-            "usage: dump_dse <bgm.swd> <bgm####.smd> [bgm####.swd] [out_dir]\n\
-             or:    dump_dse <rom.nds> [song_id]   (full SoundData/DevicePlayer pipeline)\n\
-             e.g.  dump_dse '/d/Git/pmd-sky/files/SOUND/BGM/bgm.swd' \\\n\
-                          '/d/Git/pmd-sky/files/SOUND/BGM/bgm0001.smd'"
-        );
-        std::process::exit(2);
-    }
+#[derive(ClapArgs)]
+#[command(about = "Dump a DSE (Explorers of Sky) bank + sequence, proving the decode path.")]
+pub struct Args {
+    #[command(subcommand)]
+    mode: Mode,
+}
 
-    let main_bank = std::fs::read(&args[0]).expect("read main bank .swd");
-    let smd = std::fs::read(&args[1]).expect("read song .smd");
-    let song_bank = args
-        .get(2)
-        .map(|p| std::fs::read(p).expect("read song .swd"));
-    let out_dir = args.get(3).cloned().unwrap_or_else(|| ".".to_string());
+#[derive(Subcommand)]
+enum Mode {
+    /// Parse a main bank and a song sequence from loose SWDL/SMDL files.
+    Files {
+        /// The main bank `bgm.swd`, which holds the sample data.
+        main_bank: PathBuf,
+        /// The song `bgm####.smd`.
+        song: PathBuf,
+        /// The per-song `bgm####.swd`, parsed for program info.
+        song_bank: Option<PathBuf>,
+        /// Directory the decoded sample WAVs are written to.
+        #[arg(default_value = ".")]
+        out_dir: String,
+    },
+    /// Run a PMD `.nds` ROM through the full `SoundData`/`DevicePlayer` pipeline.
+    Rom {
+        /// The PMD `.nds` ROM.
+        rom: PathBuf,
+        /// Which song to play.
+        #[arg(default_value_t = 0)]
+        song_id: u32,
+    },
+}
+
+pub fn run(args: Args) -> ExitCode {
+    let (main_bank_path, song_path, song_bank_path, out_dir) = match args.mode {
+        Mode::Rom { rom, song_id } => {
+            rom_mode(&rom, song_id);
+            return ExitCode::SUCCESS;
+        }
+        Mode::Files {
+            main_bank,
+            song,
+            song_bank,
+            out_dir,
+        } => (main_bank, song, song_bank, out_dir),
+    };
+
+    let main_bank = std::fs::read(main_bank_path).expect("read main bank .swd");
+    let smd = std::fs::read(song_path).expect("read song .smd");
+    let song_bank = song_bank_path.map(|p| std::fs::read(p).expect("read song .swd"));
 
     // --- Main bank ---
     let main = Swdl::parse(&main_bank).expect("parse main bank");
@@ -222,15 +242,16 @@ fn main() {
         }
     }
     println!("\nwrote {written} WAV file(s).");
+    ExitCode::SUCCESS
 }
 
 /// Loads a PMD `.nds` ROM through the public `SoundData` API and ticks `DevicePlayer` for song
 /// `song_id`, reporting the standardized synth events the audio layer would consume.
-fn rom_mode(path: &str, song_id: u32) {
+fn rom_mode(path: &Path, song_id: u32) {
     let bytes = std::fs::read(path).expect("read ROM");
     let archives = load_all(&bytes);
     let Some(data) = archives.first() else {
-        eprintln!("No DSE/SDAT/GBA archive found in {path}");
+        eprintln!("No DSE/SDAT/GBA archive found in {}", path.display());
         std::process::exit(1);
     };
     let ids = data.song_ids();

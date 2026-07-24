@@ -15,15 +15,13 @@
 //! The input archive must already be decompressed (gunzip any `*.gbaaudio.gz` first). The JSON is
 //! the curated `[{ "songId", "title" }]` table (its array order is the album order).
 //!
-//! Usage: `cargo run -p optime-core --example export_album -- <archive> <names.json> <out.flac> [--max-silence S] [--limit N]`
-//!
 //! `--benchmark [PCT]` turns the tool into a render-performance benchmark instead of a FLAC export:
 //! it renders a deterministic, evenly-spread `PCT` (default `100%`) of the album with the same
 //! high-quality preset and reports wall time, realtime factor, and throughput (no FLAC, no temp
 //! files, on a fixed 4-thread pool through the same `parallel_render` path as the export). It also
 //! prints the engine's `Sample` width
 //! ([`optime_core::SAMPLE_SIZE_BYTES`]), so an `f32`-vs-`f64` build comparison is self-identifying.
-//! Example: `--example export_album -- mother-3.gbaaudio mother_3.json /dev/null --benchmark 10%`.
+//! Example: `export-album mother-3.gbaaudio mother_3.json /dev/null --benchmark 10%`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -31,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use clap::Parser;
+use clap::Args as ClapArgs;
 use ebur128::{EbuR128, Mode};
 use flac_codec::encode::{FlacSampleWriter, Options};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -48,11 +46,11 @@ const TARGET_LUFS: f64 = -16.0;
 /// A frame counts as silence when both channels are within this magnitude (~-66 dBFS).
 const SILENCE_I16: i16 = 16;
 
-#[derive(Parser)]
+#[derive(ClapArgs)]
 #[command(
     about = "Render an archive's songs into one -16 LUFS stereo FLAC, in song-name JSON order."
 )]
-struct Args {
+pub struct Args {
     /// Decompressed sound archive (DS SDAT, DSE, or GBA `.gbaaudio`).
     archive: PathBuf,
     /// Curated `[{ "songId", "title" }]` JSON; its array order is the album order.
@@ -251,9 +249,7 @@ fn trim_silence(samples: &[i16]) -> &[i16] {
     &samples[2 * first..2 * (last + 1)]
 }
 
-fn main() -> ExitCode {
-    let args = Args::parse();
-
+pub fn run(args: Args) -> ExitCode {
     let bytes = match fs::read(&args.archive) {
         Ok(b) => b,
         Err(e) => {

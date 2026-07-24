@@ -4,23 +4,34 @@
 //! real-time factor (rendered seconds / wall seconds). A factor well above 1× means the synth
 //! has real-time headroom; below 1× means it cannot keep up and the audio callback will underrun.
 //!
-//! Usage: `cargo run --release -p optime-core --example bench_resample [sseq_id] [half_taps]`
-//! Defaults to SSEQ 1025 from `demos/pokemon-platinum.sdat` at 64 taps (per side).
+//! Defaults to SSEQ 1025 from `demos/pokemon-platinum.sdat` at 64 taps (per side). Run it
+//! `--release` or the numbers are meaningless.
 //!
 //! The default build uses the nightly portable-SIMD gather plus `target-cpu=native` (see
 //! `.cargo/config.toml`); add `--no-default-features` to time the scalar gather instead.
 
+use std::process::ExitCode;
 use std::time::Instant;
 
+use clap::Args as ClapArgs;
 use optime_core::{
     InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
     PerDeviceSettings, PopSmoothingEdge, SynthController, load_all,
 };
 
-fn main() {
-    let mut args = std::env::args().skip(1);
-    let sseq_id: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1025);
-    let half_taps: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(64);
+#[derive(ClapArgs)]
+#[command(about = "Time the sinc resampler hot path and report the real-time factor.")]
+pub struct Args {
+    /// The SSEQ to render.
+    #[arg(default_value_t = 1025)]
+    sseq_id: u32,
+    /// Sinc taps per side.
+    #[arg(default_value_t = 64)]
+    half_taps: usize,
+}
+
+pub fn run(args: Args) -> ExitCode {
+    let Args { sseq_id, half_taps } = args;
 
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -74,7 +85,7 @@ fn main() {
         };
         let Some(mut controller) = SynthController::new(sr, &**data, sseq_id) else {
             eprintln!("SSEQ {sseq_id} not found");
-            return;
+            return ExitCode::FAILURE;
         };
         // Render through `fill` (the block path the app's audio callback uses), in chunks the
         // size of a typical device buffer.
@@ -99,4 +110,5 @@ fn main() {
              {render_secs:.0}s in {wall:.3}s  →  {rtf:.2}× real-time  (sink {acc:.1})"
         );
     }
+    ExitCode::SUCCESS
 }

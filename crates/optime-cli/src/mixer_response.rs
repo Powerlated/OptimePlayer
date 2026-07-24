@@ -12,11 +12,11 @@
 //! little-endian `f32` to the scratchpad, alongside a small meta file. Because the resampler is
 //! linear its transfer function is input-independent; real songs only supply the *spectral
 //! weighting* that makes the "average" power-loss number reflect actual musical content.
-//!
-//! Usage: `cargo run --release -p optime-core --example mixer_resample_response -- <out_dir>`
 
 use std::io::Write as _;
+use std::process::ExitCode;
 
+use clap::Args as ClapArgs;
 use optime_core::{
     InstrumentResampleMode, PerDeviceSettings, StreamResampler, SynthController, load_all,
 };
@@ -69,8 +69,16 @@ fn resample_bus(bus: &[(f32, f32)], mode: InstrumentResampleMode) -> Vec<f32> {
     out.iter().map(|&(l, r)| (l + r) * 0.5).collect()
 }
 
-fn main() {
-    let out_dir = std::env::args().nth(1).unwrap_or_else(|| ".".to_string());
+#[derive(ClapArgs)]
+#[command(about = "Capture the mixer-to-output resampler's effect on real DirectSound content.")]
+pub struct Args {
+    /// Directory to write `near.f32`, `crunch.f32` and `meta.txt` into.
+    #[arg(default_value = ".")]
+    out_dir: String,
+}
+
+pub fn run(args: Args) -> ExitCode {
+    let out_dir = args.out_dir;
 
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -144,4 +152,5 @@ fn main() {
     let meta_path = format!("{out_dir}/meta.txt");
     std::fs::write(&meta_path, meta).expect("write meta");
     println!("wrote {meta_path}");
+    ExitCode::SUCCESS
 }
