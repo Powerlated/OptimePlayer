@@ -1,18 +1,35 @@
-//! Eases a value toward a target a little at a time, so that a change of gain, pan, or cutoff
-//! ramps over a few milliseconds instead of jumping and clicking.
+//! Stepping a control value such as a gain, a pan position, or a filter cutoff straight to a new
+//! target produces an audible click, so [`Slewer`] spreads that change over a short linear ramp
+//! instead, which is the de-click mechanism behind pop smoothing and pan smoothing.
 
-/// A value that moves toward whatever target it is given, by at most a fixed amount each sample,
-/// in whatever units the caller works in.
+/// Which direction of movement the ramp applies to, the opposite direction being taken in one jump.
+// The `dsp` module is private to the crate, so this stays dead code until a caller selects a
+// direction.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Only a rise is ramped, and a fall happens at once.
+    UpOnly,
+    /// Only a fall is ramped, and a rise happens at once.
+    DownOnly,
+    /// Both a rise and a fall are ramped.
+    UpAndDown,
+}
+
+/// A value that moves toward whatever target it is given by at most a fixed amount per sample,
+/// measured in the same units as the target, so one `Slewer` serves a gain, a pan position, or a
+/// cutoff equally well.
 #[derive(Debug, Clone, Copy)]
 pub struct Slewer {
     current: f32,
-    /// The furthest the value may move in one step, never negative.
+    /// The furthest the value may move in one call to [`advance`](Slewer::advance), never negative.
     step: f32,
 }
 
 impl Slewer {
-    /// Starts at `initial` and moves at most `step_per_sample` toward the target on each step, so a
-    /// step of zero freezes the value and a huge one jumps straight there.
+    /// Starts at `initial` and moves at most `step_per_sample` value units toward the target per
+    /// call to [`advance`](Self::advance), so a step of zero freezes the value where it is and a
+    /// very large step arrives on the target in a single call.
     pub fn new(initial: f32, step_per_sample: f32) -> Self {
         Self {
             current: initial,
@@ -20,9 +37,10 @@ impl Slewer {
         }
     }
 
-    /// Starts at `initial` and picks a step that takes `seconds` to cross one whole unit of value
-    /// at `sample_rate` Hz, with both of those kept as `f64` because they are wall-clock timings
-    /// rather than audio values.
+    /// Starts at `initial` and picks the step that takes `seconds` to cross one whole unit of
+    /// value at `sample_rate` Hz, such as the full `0..1` gain range used by the de-click ramp,
+    /// with both arguments kept as `f64` because they are wall-clock timings rather than audio
+    /// values.
     pub fn from_time(initial: f32, seconds: f64, sample_rate: f64) -> Self {
         let step = if seconds > 0.0 && sample_rate > 0.0 {
             (1.0 / (seconds * sample_rate)) as f32
@@ -32,27 +50,29 @@ impl Slewer {
         Self::new(initial, step)
     }
 
-    /// The value as it stands right now.
+    /// The value last produced by [`advance`](Self::advance), or the initial value if it has not
+    /// run yet.
     #[inline]
     pub fn value(&self) -> f32 {
         self.current
     }
 
-    /// Jumps straight to `value` without ramping, for when a sudden change is what is wanted, such
-    /// as setting a voice's gain as a note starts.
+    /// Jumps straight to `value` without ramping, for the cases where a discontinuity is intended,
+    /// such as priming a voice's gain at the start of a note.
     #[inline]
     pub fn set(&mut self, value: f32) {
         self.current = value;
     }
 
-    /// Changes how far the value is allowed to move in one step.
+    /// Replaces the step with `step_per_sample` value units per call to
+    /// [`advance`](Self::advance).
     #[inline]
     pub fn set_step(&mut self, step_per_sample: f32) {
         self.step = step_per_sample.abs();
     }
 
-    /// Moves one step toward `target`, settling exactly on it once it is within a step's reach, and
-    /// returns the new value.
+    /// Moves the held value one step toward `target`, landing exactly on it once it is within a
+    /// single step rather than overshooting, and returns the new value.
     #[inline]
     pub fn advance(&mut self, target: f32) -> f32 {
         let d = target - self.current;
@@ -75,7 +95,8 @@ mod tests {
         assert_eq!(s.advance(1.0), 0.25);
         assert_eq!(s.advance(1.0), 0.5);
         assert_eq!(s.advance(1.0), 0.75);
-        // The last part-step lands exactly on the target instead of overshooting it.
+        // The last step is only 0.25 away from the target, so it lands exactly on it rather than
+        // overshooting to 1.25.
         assert_eq!(s.advance(1.0), 1.0);
         assert_eq!(s.advance(1.0), 1.0);
     }
@@ -83,7 +104,8 @@ mod tests {
     #[test]
     fn slews_downward_too() {
         let mut s = Slewer::new(1.0, 0.4);
-        // `0.4` cannot be stored exactly in an `f32`, so allow a small margin when comparing.
+        // `0.4` cannot be stored exactly in an `f32`, so compare within a small margin instead of
+        // for equality.
         assert!((s.advance(0.0) - 0.6).abs() < 1e-6);
         assert!((s.advance(0.0) - 0.2).abs() < 1e-6);
         assert_eq!(s.advance(0.0), 0.0);
@@ -94,13 +116,15 @@ mod tests {
         let sample_rate = 48_000.0;
         let seconds = 0.002;
         let mut s = Slewer::from_time(0.0, seconds, sample_rate);
-        // Crossing the whole range should take 96 samples here.
+        // A 2 ms ramp at 48 kHz is 96 samples, which is how many steps crossing the whole `0..1`
+        // range should take.
         let steps = (seconds * sample_rate) as usize;
         for _ in 0..steps {
             s.advance(1.0);
         }
         assert!((s.value() - 1.0).abs() < 1e-9, "got {}", s.value());
-        // One step short of the end it must not have arrived yet.
+        // One step short of the end the value must still be below the target, or the ramp is
+        // finishing early.
         let mut s2 = Slewer::from_time(0.0, seconds, sample_rate);
         for _ in 0..steps - 1 {
             s2.advance(1.0);
