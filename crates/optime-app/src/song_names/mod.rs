@@ -170,11 +170,28 @@ mod tests {
         assert!(lookup(None, Some("BPEE"), 442).unwrap().order > opening.order);
         let title = lookup(None, Some("BPEE"), 413).unwrap();
         assert_eq!(title.title, "Title Screen: Main Theme");
-        // An OST track sorts before a non-OST one (FRLG port).
+        // The table is the Emerald album, then the whole FireRed album, then everything else. An
+        // Emerald track therefore precedes a FireRed one, which precedes an unalbumed leftover.
         let cycling = lookup(None, Some("BPEE"), 403).unwrap().order;
         let union = lookup(None, Some("BPEE"), 539).unwrap();
         assert_eq!(union.title, "Union Room");
-        assert!(cycling < union.order, "OST track must precede a port");
+        assert!(cycling < union.order, "Emerald album must precede FireRed");
+        let frontier = lookup(None, Some("BPEE"), 457).unwrap();
+        assert_eq!(frontier.title, "Battle Frontier");
+        assert!(
+            union.order < frontier.order,
+            "FireRed album must precede the leftovers"
+        );
+        // Within the FireRed block, album order holds: Pallet Town (disc 1 track 4) comes before
+        // the Hall of Fame (track 71).
+        let pallet = lookup(None, Some("BPEE"), 512).unwrap();
+        assert_eq!(pallet.title, "Pallet Town");
+        assert!(pallet.order < lookup(None, Some("BPEE"), 498).unwrap().order);
+        // Both albums use song 367, which is listed twice; it must resolve to the first (Emerald)
+        // entry, so it sorts ahead of the FireRed album's opening track rather than inside it.
+        let level_up = lookup(None, Some("BPEE"), 367).unwrap();
+        let firered_start = lookup(None, Some("BPEE"), 489).unwrap().order;
+        assert!(level_up.order < firered_start);
         // Unknown game / id.
         assert!(lookup(None, Some("XXXX"), 413).is_none());
         assert!(lookup(None, Some("BPEE"), 99999).is_none());

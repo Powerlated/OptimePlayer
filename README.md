@@ -16,7 +16,7 @@ Thanks a lot to the https://github.com/pret/pokediamond and https://github.com/p
 
 Song-title data for the in-app library:
 
- * **Pokémon Emerald** — track titles follow the official *Pokémon Ruby, Pokémon Sapphire & Pokémon Emerald: Super Music Collection*, mapped to song ids via [pret/pokeemerald](https://github.com/pret/pokeemerald).
+ * **Pokémon Emerald** — track titles follow the official *Pokémon Ruby, Pokémon Sapphire & Pokémon Emerald: Super Music Collection*, mapped to song ids via [pret/pokeemerald](https://github.com/pret/pokeemerald). The ROM also carries the Kanto music ported from FireRed & LeafGreen; those tracks are titled and ordered after the official *Pokémon FireRed & Pokémon LeafGreen: Super Music Collection*, paired to song ids by audio-matching the album against the ROM (`optime-cli match-ost`) and confirmed against pokeemerald's `songs.h`.
  * **Mother 3** — English Sound Player track names are from the [MOTHER 3 Fan Translation](https://mother3.fobby.net/) by the MOTHER 3 Fan Translation Team (Tomato/Jeffman et al.), paired with each track's in-game song id from the Sound Player's slot table in the ROM.
 
 Vendored third-party code:

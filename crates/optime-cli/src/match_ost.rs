@@ -37,8 +37,15 @@ const MAX_HZ: f32 = 5000.0;
 /// The furthest the two recordings may be shifted against each other when scoring, in frames. A
 /// reference rip's lead-in and our render's start rarely differ by more than a couple of seconds.
 const MAX_LAG_FRAMES: usize = 40;
-/// A comparison needs at least this many overlapping frames to mean anything.
-const MIN_OVERLAP_FRAMES: usize = 30;
+/// A comparison needs at least this many overlapping frames to mean anything. Kept low because a
+/// game's short cues (a level-up flourish, a jingle for receiving an item) are only a second or two
+/// long, and refusing to score them at all is less useful than scoring them and flagging the result.
+const MIN_OVERLAP_FRAMES: usize = 8;
+/// Overlap (in frames) a comparison needs before its score is trusted at face value. A mean cosine
+/// over a handful of frames is mostly noise and will happily reach 0.9 between unrelated music, so
+/// shorter comparisons are scaled down in proportion. Without this a sub-second fragment elsewhere
+/// in the ROM outranks the real, correctly-sized match.
+const CONFIDENT_OVERLAP_FRAMES: usize = 30;
 /// Frames quieter than this (relative to the loudest frame) are treated as silence and trimmed off
 /// each end before scoring.
 const SILENCE_FLOOR: f32 = 0.02;
@@ -161,8 +168,9 @@ impl Chroma {
         Self { frames }
     }
 
-    /// The best mean per-frame cosine similarity between the two chroma sequences, over every
-    /// alignment within [`MAX_LAG_FRAMES`]. `-1.0` when they cannot be compared at all.
+    /// The best per-frame cosine similarity between the two chroma sequences, over every alignment
+    /// within [`MAX_LAG_FRAMES`], scaled down when the compared span is too short to trust (see
+    /// [`CONFIDENT_OVERLAP_FRAMES`]). `-1.0` when they cannot be compared at all.
     fn similarity(&self, other: &Chroma) -> f32 {
         let (a, b) = (&self.frames, &other.frames);
         if a.len() < MIN_OVERLAP_FRAMES || b.len() < MIN_OVERLAP_FRAMES {
@@ -185,7 +193,8 @@ impl Chroma {
                 let (fa, fb) = (&a[a_start + i], &b[b_start + i]);
                 sum += (0..12).map(|c| fa[c] * fb[c]).sum::<f32>();
             }
-            best = best.max(sum / overlap as f32);
+            let confidence = (overlap as f32 / CONFIDENT_OVERLAP_FRAMES as f32).min(1.0);
+            best = best.max(sum / overlap as f32 * confidence);
         }
         best
     }
