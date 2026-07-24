@@ -379,9 +379,12 @@ impl PerDeviceSettings {
                 psg_cutoff_hz: 15_000,
                 sampler_cutoff_hz: 15_000,
                 smooth_psg_pops: false,
-                smooth_sample_pops: false,
-                pop_slew_ms: 2.0,
-                pop_smooth_edge: PopSmoothingEdge::Both,
+                // DirectSound notes are cut mid-waveform and thump; a 10 ms fall removes that.
+                // The PSG channels keep their hard edges, and every attack stays instant, so the
+                // ramp never softens a note's start.
+                smooth_sample_pops: true,
+                pop_slew_ms: 10.0,
+                pop_smooth_edge: PopSmoothingEdge::Release,
             },
             use_mixer: true,
             mixer_sample_rate: 13379,
