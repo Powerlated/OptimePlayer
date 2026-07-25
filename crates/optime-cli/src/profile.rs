@@ -1,6 +1,8 @@
-//! Renders a whole soundtrack on the calling thread, for a sampling profiler (AMD uProf, Intel
-//! VTune). Defaults to the Pokémon Emerald demo archive and its curated song table, so the
-//! executable can be launched with no arguments at all.
+//! Renders a soundtrack on the calling thread, for a sampling profiler (AMD uProf, Intel VTune).
+//! Defaults to the first ten songs of the Pokémon Emerald demo archive, in its curated song table's
+//! order, so the executable can be launched with no arguments at all. Ten songs is a few minutes of
+//! rendering — long enough to fill a collection window with steady-state work, short enough that a
+//! capture with instrumentation overhead still finishes promptly. `--limit` changes it.
 //!
 //! The workload is exactly the album exporter's: [`album::render_song`] per song with the console's
 //! high-quality preset, in curated album order. The difference is the surrounding machinery, all of
@@ -43,7 +45,7 @@ const CHECKSUM_STRIDE: usize = 1021;
 #[derive(Parser)]
 #[command(
     name = "profile-emerald",
-    about = "Render a whole soundtrack single-threaded, for AMD uProf / Intel VTune.",
+    about = "Render a soundtrack single-threaded, for AMD uProf / Intel VTune.",
     version
 )]
 pub struct Args {
@@ -53,10 +55,11 @@ pub struct Args {
     /// Curated `[{ "songId", "title" }]` JSON; its array order is the render order.
     #[arg(default_value = DEFAULT_NAMES)]
     pub names_json: PathBuf,
-    /// Only render the first N songs.
-    #[arg(long)]
+    /// Only render the first N songs. Ten is enough to fill a collection window with steady-state
+    /// rendering; pass a number past the album length to render all of it.
+    #[arg(long, default_value = "10")]
     pub limit: Option<usize>,
-    /// Render the whole soundtrack this many times, to lengthen the profiler's collection window.
+    /// Render the selected songs this many times, to lengthen the profiler's collection window.
     #[arg(long, default_value_t = 1)]
     pub repeat: usize,
     /// Don't print a line per song (leaves stderr silent until the summary).
