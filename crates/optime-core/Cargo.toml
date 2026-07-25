@@ -9,12 +9,5 @@ repository.workspace = true
 [lib]
 doctest = false
 
-[features]
-default = ["simd"]
-# Vectorizes the sinc gather with `std::simd` (portable SIMD). Requires a nightly toolchain
-# (`cargo +nightly … --features simd`); best paired with `-C target-cpu=native` so the portable
-# gathers lower to real hardware gathers (AVX2+ on x86-64).
-simd = []
-
 [dependencies]
 serde = { version = "1", features = ["derive"] }

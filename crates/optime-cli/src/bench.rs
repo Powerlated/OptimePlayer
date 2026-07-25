@@ -7,8 +7,8 @@
 //! Defaults to SSEQ 1025 from `demos/pokemon-platinum.sdat` at 64 taps (per side). Run it
 //! `--release` or the numbers are meaningless.
 //!
-//! The default build uses the nightly portable-SIMD gather plus `target-cpu=native` (see
-//! `.cargo/config.toml`); add `--no-default-features` to time the scalar gather instead.
+//! The impulse gather is portable SIMD, built with `target-cpu=native` (see `.cargo/config.toml`)
+//! so it lowers to the host's widest vector instructions.
 
 use std::process::ExitCode;
 use std::time::Instant;

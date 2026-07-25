@@ -9,10 +9,6 @@ description = "Offline command-line tools for the Optime Player engine: renders,
 # `cargo run -p optime-cli -- <subcommand>` needs to be told which one it means.
 default-run = "optime-cli"
 
-[features]
-# Nightly portable-SIMD sinc gather (see optime-core's feature of the same name).
-simd = ["optime-core/simd"]
-
 [dependencies]
 optime-core = { path = "../optime-core" }
 clap = { version = "4", features = ["derive"] }

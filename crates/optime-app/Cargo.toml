@@ -7,10 +7,6 @@ repository.workspace = true
 description = "egui front-end (desktop + web) for the Optime Player DS sound engine."
 default-run = "optime-app"
 
-[features]
-# Nightly portable-SIMD sinc gather (see optime-core's feature of the same name).
-simd = ["optime-core/simd"]
-
 [lib]
 crate-type = ["cdylib", "rlib"]
 

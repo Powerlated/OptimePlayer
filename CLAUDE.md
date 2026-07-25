@@ -29,7 +29,7 @@ Three backends, each anchored to a pret decomp (accuracy via Rust unit tests tra
 
 ## Commands
 
-Nightly Rust (`rust-toolchain.toml`). Default `simd` cargo feature = `std::simd` in sinc resampler; `--no-default-features` on `optime-core` = scalar gather (stable). `.cargo/config.toml`: `-C target-cpu=native` (hot path needs AVX2/FMA) + `--cfg=web_sys_unstable_apis` for wasm (Media Session API).
+Nightly Rust (`rust-toolchain.toml`) — `std::simd` in the sinc resampler is the only reason. **No cargo features anywhere**: the impulse gather is portable SIMD unconditionally, and targets without vector instructions get it lowered to scalar by the backend rather than a hand-written scalar twin. `.cargo/config.toml`: `-C target-cpu=native` (hot path needs AVX2/FMA) + `--cfg=web_sys_unstable_apis` for wasm (Media Session API).
 
 - `cargo run -p optime-app` — native app (loads a `demos/` demo on start)
 - `cargo test --workspace` — all tests (unit + integration + pret transcription)

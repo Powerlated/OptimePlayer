@@ -1,4 +1,4 @@
-#![cfg_attr(feature = "simd", feature(portable_simd))]
+#![feature(portable_simd)]
 //! Platform-independent emulation of retro console sound systems.
 //!
 //! The crate is organized around a single data flow:

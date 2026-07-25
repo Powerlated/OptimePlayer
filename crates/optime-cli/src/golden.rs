@@ -2,9 +2,6 @@
 //! `PerDeviceSettings` variants and prints an FNV-1a hash of the rendered f32 bits. Used to verify that
 //! refactors are behavior-preserving (the hashes must not change). Not a correctness oracle —
 //! just a bit-for-bit baseline of the current engine.
-//!
-//! Add `--no-default-features` to the cargo invocation to capture a baseline for the scalar gather;
-//! the SIMD and scalar builds hash differently by design.
 
 use clap::Args as ClapArgs;
 use optime_core::{

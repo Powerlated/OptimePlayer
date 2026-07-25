@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust (with wasm target)
-        # Nightly: the default `simd` feature uses portable SIMD (see rust-toolchain.toml).
+        # Nightly: the sinc gather uses portable SIMD (see rust-toolchain.toml).
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32-unknown-unknown

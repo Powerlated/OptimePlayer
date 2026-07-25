@@ -28,8 +28,8 @@ rayon = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 # Only for `--features harvest`: run device sequencers headlessly to harvest real
-# game songs. Scalar gather (no `simd`) — the headless player never resamples audio.
-optime-core = { path = "../crates/optime-core", default-features = false, optional = true }
+# game songs. The headless player never resamples audio, so none of the DSP runs.
+optime-core = { path = "../crates/optime-core", optional = true }
 
 [[bin]]
 name = "harvest"
