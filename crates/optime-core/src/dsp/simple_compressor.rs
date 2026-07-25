@@ -112,40 +112,62 @@ impl SimpleCompressor {
         -over_db * (self.ratio - 1.0) / self.ratio
     }
 
-    /// Compresses one stereo sample in place. Returns the applied gain reduction in dB
-    /// (negative = attenuation, positive = makeup boost beyond the reduction).
-    #[inline]
-    pub fn process(&mut self, l: &mut Sample, r: &mut Sample) -> f64 {
-        // Sidechain: link channels by the louder of the two (the standard max-link convention).
-        let link = (f64::from(*l)).abs().max(f64::from(*r).abs()) + DC_OFFSET;
-        let key_db = 20.0 * link.log10();
-
-        // dB above threshold (clamped to 0 — no expansion below the knee).
-        let mut over_db = key_db - self.threshold_db;
-        if over_db < 0.0 {
-            over_db = 0.0;
-        }
-        // Add the DC offset before the envelope so the detector floor sits above the denormal pit.
-        over_db += DC_OFFSET;
-
-        // Attack on a rise, release on a fall (the dB-domain envelope is one-pole either way).
-        let next = if over_db > self.env_db {
-            self.attack.run(over_db, self.env_db)
-        } else {
-            self.release.run(over_db, self.env_db)
-        };
-        self.env_db = next;
-        let over_db = next - DC_OFFSET;
-
+    /// Compresses a block of consecutive stereo samples in place. Returns the gain reduction in dB
+    /// applied to the last sample (negative = attenuation, positive = makeup boost beyond the
+    /// reduction), or `self.makeup_db` for an empty block.
+    ///
+    /// The envelope feeds back into itself, so the samples are still walked one at a time; what the
+    /// block form saves is re-reading the threshold, ratio, makeup and detector coefficients from
+    /// the struct on every sample. They are constant across a block because they only change on a
+    /// device tick, and a block never spans one.
+    pub fn process_block(&mut self, l: &mut [Sample], r: &mut [Sample]) -> f64 {
+        debug_assert_eq!(l.len(), r.len());
+        let (attack, release) = (self.attack, self.release);
+        let (threshold_db, makeup_db) = (self.threshold_db, self.makeup_db);
         // Conventional compressor slope: output above threshold = overdB / R, so the gain
         // reduction is overdB − overdB/R = overdB · (R − 1) / R. At R = 1 the slope is 0 (unity);
         // as R → ∞ it approaches 1 (hard limit at the threshold).
         let slope = (self.ratio - 1.0) / self.ratio;
-        let gr_db = -over_db * slope + self.makeup_db;
-        let gr_lin = (10f64).powf(gr_db / 20.0) as Sample;
+        let mut env_db = self.env_db;
+        let mut gr_db = makeup_db;
 
-        *l *= gr_lin;
-        *r *= gr_lin;
+        for (l, r) in l.iter_mut().zip(r.iter_mut()) {
+            // Sidechain: link channels by the louder of the two (the standard max-link convention).
+            let link = (f64::from(*l)).abs().max(f64::from(*r).abs()) + DC_OFFSET;
+            let key_db = 20.0 * link.log10();
+
+            // dB above threshold (clamped to 0 — no expansion below the knee).
+            let mut over_db = key_db - threshold_db;
+            if over_db < 0.0 {
+                over_db = 0.0;
+            }
+            // Add the DC offset before the envelope so the detector floor sits above the denormal pit.
+            over_db += DC_OFFSET;
+
+            // Attack on a rise, release on a fall (the dB-domain envelope is one-pole either way).
+            env_db = if over_db > env_db {
+                attack.run(over_db, env_db)
+            } else {
+                release.run(over_db, env_db)
+            };
+            let over_db = env_db - DC_OFFSET;
+
+            gr_db = -over_db * slope + makeup_db;
+            let gr_lin = (10f64).powf(gr_db / 20.0) as Sample;
+            *l *= gr_lin;
+            *r *= gr_lin;
+        }
+
+        self.env_db = env_db;
+        gr_db
+    }
+
+    /// Compresses one stereo sample in place. A one-sample [`Self::process_block`].
+    #[inline]
+    pub fn process(&mut self, l: &mut Sample, r: &mut Sample) -> f64 {
+        let (mut lb, mut rb) = ([*l], [*r]);
+        let gr_db = self.process_block(&mut lb, &mut rb);
+        (*l, *r) = (lb[0], rb[0]);
         gr_db
     }
 }
@@ -154,6 +176,37 @@ impl SimpleCompressor {
 #[allow(unused_assignments)]
 mod tests {
     use super::*;
+
+    /// A block of any length must give bit-identical results to compressing one stereo sample at a
+    /// time, envelope and all.
+    #[test]
+    fn process_block_matches_per_sample() {
+        use crate::dsp::block::{TEST_BLOCK_LENGTHS, test_signal};
+
+        for n in TEST_BLOCK_LENGTHS {
+            // Scaled well above the -6 dBFS threshold so the detector spends the run attacking and
+            // releasing rather than sitting at the floor.
+            let signal: Vec<Sample> = test_signal(4 * n).iter().map(|x| x * 3.0).collect();
+            // The right channel is quieter and inverted, so the stereo-linked sidechain has to pick
+            // a genuine per-sample maximum rather than seeing two identical channels.
+            let right: Vec<Sample> = signal.iter().map(|x| -0.4 * x).collect();
+            let make = || SimpleCompressor::new(2.0, 50.0, 48_000.0, -6.0, 4.0, 1.5);
+
+            let mut blocked = make();
+            let (mut got_l, mut got_r) = (signal.clone(), right.clone());
+            for (l, r) in got_l.chunks_mut(n).zip(got_r.chunks_mut(n)) {
+                blocked.process_block(l, r);
+            }
+
+            let mut per_sample = make();
+            let (mut want_l, mut want_r) = (signal.clone(), right.clone());
+            for (l, r) in want_l.iter_mut().zip(want_r.iter_mut()) {
+                per_sample.process(l, r);
+            }
+
+            assert_eq!((got_l, got_r), (want_l, want_r), "block length {n}");
+        }
+    }
 
     /// At unity ratio the compressor must be a pure makeup gain, regardless of input level —
     /// pins the `gr = −overdB · (R − 1) / R` shape at the R = 1 boundary.

@@ -2,6 +2,7 @@
 //! that make up a [`PerDeviceSettings`](crate::PerDeviceSettings) — the struct the synthesis layer
 //! consumes directly.
 
+use crate::dsp::high_band_compressor::HighBandCompressorParams;
 use crate::dsp::slewer::Direction;
 
 /// How the stereo expander's Haas delay lines react to a pan change while audio is flowing
@@ -137,6 +138,21 @@ impl HighBandCompressor {
     /// there's an actual ratio to apply.
     pub fn is_active_sampled(&self) -> bool {
         self.enabled_sampled && self.ratio > 1.0
+    }
+
+    /// The runtime parameters a [`HighBandCompressorStage`] runs against. Both buses read the same
+    /// settings; only the `enabled_*` flags differ.
+    ///
+    /// [`HighBandCompressorStage`]: crate::dsp::high_band_compressor::HighBandCompressorStage
+    pub fn params(&self) -> HighBandCompressorParams {
+        HighBandCompressorParams {
+            cutoff_hz: self.cutoff_hz,
+            threshold_db: self.threshold_db,
+            ratio: self.ratio,
+            attack_ms: self.attack_ms,
+            release_ms: self.release_ms,
+            makeup_db: self.makeup_db,
+        }
     }
 }
 

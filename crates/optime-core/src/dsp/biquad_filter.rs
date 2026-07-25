@@ -66,23 +66,39 @@ impl BiquadFilter {
         }
     }
 
-    /// Processes one sample through the whole cascade, entirely in the [`Sample`] width — the
-    /// coefficients and per-section state are stored as `f32`, so no value is widened to `f64`.
-    pub fn transform(&mut self, in_sample: Sample) -> Sample {
-        let mut x = in_sample;
+    /// Filters a block of consecutive samples in place through the whole cascade, entirely in the
+    /// [`Sample`] width — the coefficients and per-section state are stored as `f32`, so no value is
+    /// widened to `f64`.
+    ///
+    /// The cascade is walked section by section, each running over the whole block before the next
+    /// begins. Every section is an independent recurrence that reads only the previous section's
+    /// output, so this produces exactly the same numbers as pushing each sample through all the
+    /// sections in turn, but the four state values stay in registers for the length of the block
+    /// instead of being loaded from and stored to their `Vec`s once per sample.
+    pub fn transform_block(&mut self, block: &mut [Sample]) {
+        let (a0, a1, a2, a3, a4) = (self.a0, self.a1, self.a2, self.a3, self.a4);
         for i in 0..self.num_cascade() {
-            let result = self.a0 * x + self.a1 * self.x1[i] + self.a2 * self.x2[i]
-                - self.a3 * self.y1[i]
-                - self.a4 * self.y2[i];
-
-            self.x2[i] = self.x1[i];
-            self.x1[i] = x;
-            self.y2[i] = self.y1[i];
-            self.y1[i] = result;
-
-            x = result;
+            let (mut x1, mut x2) = (self.x1[i], self.x2[i]);
+            let (mut y1, mut y2) = (self.y1[i], self.y2[i]);
+            for x in block.iter_mut() {
+                let result = a0 * *x + a1 * x1 + a2 * x2 - a3 * y1 - a4 * y2;
+                x2 = x1;
+                x1 = *x;
+                y2 = y1;
+                y1 = result;
+                *x = result;
+            }
+            (self.x1[i], self.x2[i]) = (x1, x2);
+            (self.y1[i], self.y2[i]) = (y1, y2);
         }
-        x
+    }
+
+    /// Processes one sample through the whole cascade. A one-sample [`Self::transform_block`].
+    #[inline]
+    pub fn transform(&mut self, in_sample: Sample) -> Sample {
+        let mut block = [in_sample];
+        self.transform_block(&mut block);
+        block[0]
     }
 
     /// Sets and normalizes the filter coefficients. The normalization divides are done in `f64`
@@ -259,6 +275,34 @@ fn quadratic_roots(a: f64, b: f64, c: f64) -> [(f64, f64); 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A block of any length must give bit-identical results to feeding the same samples through
+    /// one at a time. This is what lets the cascade run section-major (each section over the whole
+    /// block, keeping its state in registers) instead of sample-major.
+    #[test]
+    fn transform_block_matches_per_sample() {
+        use crate::dsp::block::{TEST_BLOCK_LENGTHS, test_signal};
+
+        // Every cascade depth the engine actually builds: master shelf 2, crossover and high-band
+        // split 4, PSG crunch compensation 6.
+        for order in [2, 4, 6] {
+            for n in TEST_BLOCK_LENGTHS {
+                let signal = test_signal(4 * n);
+                let make = || BiquadFilter::low_pass(order, 48_000.0, 3_000.0, 0.707);
+
+                let mut blocked = make();
+                let mut got = signal.clone();
+                for chunk in got.chunks_mut(n) {
+                    blocked.transform_block(chunk);
+                }
+
+                let mut per_sample = make();
+                let want: Vec<_> = signal.iter().map(|&x| per_sample.transform(x)).collect();
+
+                assert_eq!(got, want, "order {order}, block length {n}");
+            }
+        }
+    }
 
     #[test]
     #[should_panic(expected = "order not divisible by 2")]

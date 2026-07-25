@@ -394,15 +394,24 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
         device_rate,
         InstrumentResampleMode::SincSampleNyquist { half_taps: 8 },
     );
-    // The block resampler fills a scratch buffer of engine→device frames per chunk; the per-frame
-    // gain ramp is then applied while writing into the interleaved output.
+    // The block resampler fills a scratch buffer of engine→device frames per chunk, pulling
+    // engine-rate audio from the controller a block at a time — so the whole synthesis chain runs
+    // blocked, never a sample at a time. The per-frame gain ramp is then applied while writing into
+    // the interleaved output.
     const CHUNK: usize = 256;
-    let mut scratch = [(0.0f32, 0.0f32); CHUNK];
+    let mut scratch_l = [0.0f32; CHUNK];
+    let mut scratch_r = [0.0f32; CHUNK];
     if channels == 2 {
         for block in data.chunks_mut(2 * CHUNK) {
-            let frames = &mut scratch[..block.len() / 2];
-            resampler.process(frames, &mut || controller.next_sample(config));
-            for (out, &(l, r)) in block.chunks_exact_mut(2).zip(frames.iter()) {
+            let n = block.len() / 2;
+            resampler.process(&mut scratch_l[..n], &mut scratch_r[..n], &mut |l, r| {
+                controller.render(l, r, config)
+            });
+            for ((out, &l), &r) in block
+                .chunks_exact_mut(2)
+                .zip(&scratch_l[..n])
+                .zip(&scratch_r[..n])
+            {
                 let g = ramp.next() * pause.next();
                 out[0] = l * g;
                 out[1] = r * g;
@@ -416,9 +425,14 @@ fn write_audio(data: &mut [f32], channels: usize, shared: &Shared) {
     let frames_per_call = channels.max(1);
     for block in data.chunks_mut(frames_per_call * CHUNK) {
         let n = block.len() / frames_per_call;
-        let frames = &mut scratch[..n];
-        resampler.process(frames, &mut || controller.next_sample(config));
-        for (frame, &(l, r)) in block.chunks_mut(frames_per_call).zip(frames.iter()) {
+        resampler.process(&mut scratch_l[..n], &mut scratch_r[..n], &mut |l, r| {
+            controller.render(l, r, config)
+        });
+        for ((frame, &l), &r) in block
+            .chunks_mut(frames_per_call)
+            .zip(&scratch_l[..n])
+            .zip(&scratch_r[..n])
+        {
             let g = ramp.next() * pause.next();
             let (l, r) = (l * g, r * g);
             match frame.len() {
@@ -471,25 +485,39 @@ fn mix_annotation(data: &mut [f32], channels: usize, st: &mut crate::player::Aud
     );
 
     const CHUNK: usize = 256;
-    let mut scratch = [(0.0f32, 0.0f32); CHUNK];
+    let mut scratch_l = [0.0f32; CHUNK];
+    let mut scratch_r = [0.0f32; CHUNK];
     let frames_per_call = channels.max(1);
     for block in data.chunks_mut(frames_per_call * CHUNK) {
         let n = block.len() / frames_per_call;
-        let frames = &mut scratch[..n];
-        resampler.process(frames, &mut || {
-            let (l, r) = bounce.next_frame();
-            let p = pause.next();
-            let (mut l, mut r) = (l * p, r * p);
-            if let Some(c) = &mut bounce.chords
-                && bounce.chords_on
-            {
-                let (cl, cr) = c.next_frame();
-                l += cl;
-                r += cr;
-            }
-            (l, r)
-        });
-        for (frame, &(l, r)) in block.chunks_mut(frames_per_call).zip(frames.iter()) {
+        // The two buses are summed frame by frame inside the block the resampler asks for. Both
+        // sides are inherently per-frame here — one reads a prerendered buffer, the other steps
+        // per-frame chord envelopes — and annotation is a maintainer tool that never runs in the
+        // hot playback case.
+        resampler.process(
+            &mut scratch_l[..n],
+            &mut scratch_r[..n],
+            &mut |out_l, out_r| {
+                for (out_l, out_r) in out_l.iter_mut().zip(out_r.iter_mut()) {
+                    let (l, r) = bounce.next_frame();
+                    let p = pause.next();
+                    let (mut l, mut r) = (l * p, r * p);
+                    if let Some(c) = &mut bounce.chords
+                        && bounce.chords_on
+                    {
+                        let (cl, cr) = c.next_frame();
+                        l += cl;
+                        r += cr;
+                    }
+                    (*out_l, *out_r) = (l, r);
+                }
+            },
+        );
+        for ((frame, &l), &r) in block
+            .chunks_mut(frames_per_call)
+            .zip(&scratch_l[..n])
+            .zip(&scratch_r[..n])
+        {
             let g = ramp.next();
             let (l, r) = (l * g, r * g);
             match frame.len() {

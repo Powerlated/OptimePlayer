@@ -42,7 +42,8 @@ use std::sync::OnceLock;
 #[cfg(feature = "simd")]
 use std::simd::prelude::*;
 
-use crate::waveform::{Frame, InstrumentResampleMode, Sample};
+use crate::dsp::block::MAX_BLOCK;
+use crate::waveform::{InstrumentResampleMode, Sample};
 
 // ===========================================================================================
 // Kernel tables and lookups
@@ -683,9 +684,18 @@ pub fn gather_sinc(
 // [`effective_gather`]/[`sinc_fc`] resolution and the one [`resample_sinc`] gather; the only new
 // code is the ring-staging of the tap window, mirroring [`gather_sinc`]'s edge path.
 
-/// Recent-input ring length: wider than the widest possible tap window so the oldest tap a gather
-/// reads is never overwritten before it is read.
-const RING: usize = GATHER_BUF_LEN + 2;
+/// The ring must be wider than the widest possible tap window, so the oldest tap a gather reads is
+/// never overwritten before it is read, *and* wide enough to hold every input one whole output block
+/// consumes, so the block's input can be pulled in a single call. The second term dominates and
+/// depends on the conversion ratio (heavy downsampling eats many inputs per output), so the length
+/// is computed in [`StreamResampler::set`] rather than fixed here.
+///
+/// It is rounded up to a power of two so the wrap in [`StreamResampler::at`] and
+/// [`StreamResampler::push`] — both in the innermost loop — is a mask rather than a remainder.
+fn ring_len_for(step: f32) -> usize {
+    let per_block = (step.max(0.0) * MAX_BLOCK as f32).ceil() as usize;
+    (GATHER_BUF_LEN + per_block + 2).next_power_of_two()
+}
 
 /// A streaming, fixed-ratio stereo resampler driven by an [`InstrumentResampleMode`].
 ///
@@ -710,8 +720,9 @@ pub struct StreamResampler {
     pos_frac: f32,
     /// Count of inputs pushed so far (the absolute index of the next push).
     loaded: i64,
-    ring_l: [f32; RING],
-    ring_r: [f32; RING],
+    /// Recent-input rings, both a power of two long (see [`ring_len_for`]) so the wrap is a mask.
+    ring_l: Vec<f32>,
+    ring_r: Vec<f32>,
 }
 
 impl Default for StreamResampler {
@@ -723,6 +734,7 @@ impl Default for StreamResampler {
 impl StreamResampler {
     /// An idle nearest-neighbour resampler at unity ratio. Call [`Self::set`] before use.
     pub fn new() -> Self {
+        let ring = ring_len_for(1.0);
         Self {
             gather: EffectiveGather::Nearest,
             tables: None,
@@ -731,8 +743,8 @@ impl StreamResampler {
             pos_int: 0,
             pos_frac: 0.0,
             loaded: 0,
-            ring_l: [0.0; RING],
-            ring_r: [0.0; RING],
+            ring_l: vec![0.0; ring],
+            ring_r: vec![0.0; ring],
         }
     }
 
@@ -747,6 +759,19 @@ impl StreamResampler {
         } else {
             1.0
         };
+        // Grow the ring if the new ratio needs more input per block. It is never shrunk, so a
+        // render call that only re-states the current settings — which is every one of them —
+        // cannot allocate on the audio thread.
+        let needed = ring_len_for(self.step);
+        if needed > self.ring_l.len() {
+            self.ring_l = vec![0.0; needed];
+            self.ring_r = vec![0.0; needed];
+            // The rings are indexed by absolute input position masked to the ring length, so
+            // changing that length moves every stored sample. Start clean rather than read garbage.
+            self.pos_int = 0;
+            self.pos_frac = 0.0;
+            self.loaded = 0;
+        }
         // A finished stereo bus has no PSG/sampled split, so resolve against a non-PSG signal.
         self.gather = effective_gather(mode, false);
         if let EffectiveGather::Sinc {
@@ -773,35 +798,42 @@ impl StreamResampler {
         self.pos_int = 0;
         self.pos_frac = 0.0;
         self.loaded = 0;
-        self.ring_l = [0.0; RING];
-        self.ring_r = [0.0; RING];
-    }
-
-    #[inline]
-    fn push(&mut self, l: Sample, r: Sample) {
-        let slot = (self.loaded as usize) % RING;
-        self.ring_l[slot] = l;
-        self.ring_r[slot] = r;
-        self.loaded += 1;
+        self.ring_l.fill(0.0);
+        self.ring_r.fill(0.0);
     }
 
     /// Reads the input sample at absolute index `k` from the ring (zero before the stream start).
+    /// The ring length is a power of two, so the wrap is a mask.
     #[inline]
-    fn at(ring: &[f32; RING], k: i64) -> f32 {
+    fn at(ring: &[f32], k: i64) -> f32 {
         if k < 0 {
             0.0
         } else {
-            ring[(k as usize) % RING]
+            ring[(k as usize) & (ring.len() - 1)]
         }
     }
 
-    /// Pulls input from `next_in` until the ring holds the sample at absolute index `k`.
-    #[inline]
-    fn fill_to(&mut self, k: i64, next_in: &mut impl FnMut() -> Frame) {
-        while self.loaded <= k {
-            let (l, r) = next_in();
-            self.push(l, r);
+    /// Pulls input from `fill_in` until the ring holds the sample at absolute index `k`, in one
+    /// call. The ring is sized so a whole output block's input fits, so the pull never has to wrap
+    /// onto samples the block still needs.
+    fn fill_to(&mut self, k: i64, fill_in: &mut impl FnMut(&mut [Sample], &mut [Sample])) {
+        let wanted = k + 1 - self.loaded;
+        if wanted <= 0 {
+            return;
         }
+        let len = self.ring_l.len();
+        let start = self.loaded as usize & (len - 1);
+        let n = wanted as usize;
+        debug_assert!(n <= len, "pull larger than the ring");
+        // The run wraps at most once, since the ring holds more than one block's worth of input.
+        let first = (len - start).min(n);
+        let (head_l, tail_l) = self.ring_l.split_at_mut(start);
+        let (head_r, tail_r) = self.ring_r.split_at_mut(start);
+        fill_in(&mut tail_l[..first], &mut tail_r[..first]);
+        if n > first {
+            fill_in(&mut head_l[..n - first], &mut head_r[..n - first]);
+        }
+        self.loaded += wanted;
     }
 
     /// Advances the read position by one output sample, keeping the fraction in `[0, 1)` and folding
@@ -814,48 +846,103 @@ impl StreamResampler {
         self.pos_frac -= carry;
     }
 
-    /// Fills `out` with output stereo samples, pulling mixer-rate input from `next_in` as the read
+    /// The highest absolute input index the next `n` output samples will read, walking the read
+    /// position with the same arithmetic [`Self::advance`] uses so the answer matches the positions
+    /// the gather loop will actually visit.
+    fn last_input_needed(&self, n: usize) -> i64 {
+        let (mut pos_int, mut pos_frac) = (self.pos_int, self.pos_frac);
+        let mut highest = self.pos_int;
+        for _ in 0..n {
+            let needed = match self.gather {
+                EffectiveGather::Nearest => pos_int,
+                EffectiveGather::Linear => pos_int + 1,
+                EffectiveGather::Sinc { .. } => {
+                    let tables = self.tables.as_ref().expect("sinc gather has tables");
+                    let syn_pos = tables.half_taps as f32 + pos_frac;
+                    let (syn_lo, syn_hi) = tap_window(tables, syn_pos);
+                    pos_int - tables.half_taps as i64 + (syn_hi - syn_lo)
+                }
+            };
+            highest = highest.max(needed);
+            pos_frac += self.step;
+            let carry = pos_frac.floor();
+            pos_int += carry as i64;
+            pos_frac -= carry;
+        }
+        highest
+    }
+
+    /// Fills `out_l`/`out_r` with output stereo samples, pulling input from `fill_in` as the read
     /// window requires it.
     ///
-    /// Block-only: the gather is matched and its per-mode setup (the sinc table handle, half-tap
-    /// count, and cutoff) is hoisted out of the per-sample loop, so a whole buffer's worth of output
-    /// is produced with one dispatch. Output is bit-identical regardless of how the caller chunks it
-    /// (the same input is pulled in the same order and the position advances identically), so a
-    /// single `process(&mut buf, cb)` equals repeated one-sample calls.
-    pub fn process(&mut self, out: &mut [Frame], next_in: &mut impl FnMut() -> Frame) {
+    /// `fill_in` is handed a block of ring slots to write, not asked for one sample at a time, so
+    /// whatever produces the input can itself work in blocks — which is what lets the whole engine
+    /// upstream of this stage run blocked. It may be called twice for one output block, when the
+    /// input run wraps the ring.
+    ///
+    /// Per-mode setup (the sinc table handle, half-tap count, and cutoff) is hoisted out of the
+    /// per-sample loop, and each block's input is pulled in one go before any of it is read. Output
+    /// is bit-identical regardless of how the caller chunks it — the same input is pulled in the
+    /// same order and the position advances identically — so a single call over a whole buffer
+    /// equals repeated one-sample calls.
+    pub fn process(
+        &mut self,
+        out_l: &mut [Sample],
+        out_r: &mut [Sample],
+        fill_in: &mut impl FnMut(&mut [Sample], &mut [Sample]),
+    ) {
+        debug_assert_eq!(out_l.len(), out_r.len());
+        // The ring holds one MAX_BLOCK block's input, so longer runs go through in pieces. This is
+        // invisible to the caller: chunking cannot change the output.
+        for (l, r) in out_l.chunks_mut(MAX_BLOCK).zip(out_r.chunks_mut(MAX_BLOCK)) {
+            self.process_block(l, r, fill_in);
+        }
+    }
+
+    /// One block of at most [`MAX_BLOCK`] output samples: pull all the input it needs, then gather.
+    fn process_block(
+        &mut self,
+        out_l: &mut [Sample],
+        out_r: &mut [Sample],
+        fill_in: &mut impl FnMut(&mut [Sample], &mut [Sample]),
+    ) {
+        if out_l.is_empty() {
+            return;
+        }
+        self.fill_to(self.last_input_needed(out_l.len()), fill_in);
+
         match self.gather {
             EffectiveGather::Nearest => {
-                for o in out.iter_mut() {
+                for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
                     // Zero-order hold: the most recent input at or before `pos`.
                     let idx = self.pos_int;
-                    self.fill_to(idx, next_in);
-                    *o = (Self::at(&self.ring_l, idx), Self::at(&self.ring_r, idx));
+                    *l = Self::at(&self.ring_l, idx);
+                    *r = Self::at(&self.ring_r, idx);
                     self.advance();
                 }
             }
             EffectiveGather::Linear => {
-                for o in out.iter_mut() {
+                for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
                     let i = self.pos_int;
                     let frac = self.pos_frac;
-                    self.fill_to(i + 1, next_in);
-                    let lerp = |ring: &[f32; RING]| -> Sample {
+                    let lerp = |ring: &[f32]| -> Sample {
                         let a = Self::at(ring, i);
                         let b = Self::at(ring, i + 1);
                         a + (b - a) * frac
                     };
-                    *o = (lerp(&self.ring_l), lerp(&self.ring_r));
+                    *l = lerp(&self.ring_l);
+                    *r = lerp(&self.ring_r);
                     self.advance();
                 }
             }
             EffectiveGather::Sinc { step_mode, .. } => {
-                // Resolve the (cheap, half-width-only) table handle and cutoff once per block; the
-                // pull loop then borrows `self` mutably while staging each window.
+                // Resolve the (cheap, half-width-only) table handle and cutoff once per block.
                 let tables = self.tables.clone().expect("sinc gather has tables");
                 let p = tables.half_taps as i64;
                 let fc = self.fc;
                 let mut buf_l = [0.0f32; GATHER_BUF_LEN];
                 let mut buf_r = [0.0f32; GATHER_BUF_LEN];
-                for o in out.iter_mut() {
+                for (l, r) in out_l.iter_mut().zip(out_r.iter_mut()) {
                     // Express the read position as a small synthetic offset in `[P, P+1)`: the exact
                     // integer part lives in `pos_int`, so the kernel never sees a large float. Its
                     // own `tap_window` then yields `k_lo = 0`, aligned with the absolute window we
@@ -865,16 +952,13 @@ impl StreamResampler {
                     debug_assert_eq!(syn_lo, 0);
                     let n = (syn_hi - syn_lo + 1) as usize;
                     let k_lo = self.pos_int - p; // absolute index of the first staged tap (src[0])
-                    self.fill_to(k_lo + n as i64 - 1, next_in);
                     for (j, (sl, sr)) in buf_l[..n].iter_mut().zip(&mut buf_r[..n]).enumerate() {
                         let k = k_lo + j as i64;
                         *sl = Self::at(&self.ring_l, k);
                         *sr = Self::at(&self.ring_r, k);
                     }
-                    *o = (
-                        resample_sinc(&tables, &buf_l[..n], syn_pos, fc, step_mode),
-                        resample_sinc(&tables, &buf_r[..n], syn_pos, fc, step_mode),
-                    );
+                    *l = resample_sinc(&tables, &buf_l[..n], syn_pos, fc, step_mode);
+                    *r = resample_sinc(&tables, &buf_r[..n], syn_pos, fc, step_mode);
                     self.advance();
                 }
             }
@@ -1036,21 +1120,30 @@ mod tests {
         }
     }
 
+    /// Feeds a fixed list of inputs (then `tail` forever) into a block pull, with the right channel
+    /// the negation of the left.
+    fn pull_list(inputs: &[f32], tail: f32) -> impl FnMut(&mut [Sample], &mut [Sample]) + use<'_> {
+        let mut next = 0usize;
+        move |l, r| {
+            for (l, r) in l.iter_mut().zip(r.iter_mut()) {
+                let v = inputs.get(next).copied().unwrap_or(tail);
+                next += 1;
+                (*l, *r) = (v, -v);
+            }
+        }
+    }
+
     /// Nearest-neighbour (zero-order hold) repeats each input across the upsample ratio.
     #[test]
     fn nearest_holds_input_samples() {
         let mut rs = StreamResampler::new();
         rs.set(1.0, 4.0, InstrumentResampleMode::NearestNeighbor); // 4× upsample, step = 0.25
         let inputs = [1.0f32, 2.0, 3.0];
-        let mut it = inputs.into_iter();
-        let mut pull = move || {
-            let v = it.next().unwrap_or(0.0);
-            (v, -v)
-        };
+        let mut pull = pull_list(&inputs, 0.0);
         // pos = 0, .25, .5, .75 → floor 0 → input[0]; then 1.0,1.25,.. → input[1]; ...
-        let mut got = [(0.0f32, 0.0f32); 12];
-        rs.process(&mut got, &mut pull);
-        for (i, &(l, r)) in got.iter().enumerate() {
+        let (mut got_l, mut got_r) = ([0.0f32; 12], [0.0f32; 12]);
+        rs.process(&mut got_l, &mut got_r, &mut pull);
+        for (i, (&l, &r)) in got_l.iter().zip(&got_r).enumerate() {
             let expected = inputs[i / 4];
             assert_eq!(l, expected, "sample {i}");
             assert_eq!(r, -expected, "sample {i} right");
@@ -1063,15 +1156,11 @@ mod tests {
         let mut rs = StreamResampler::new();
         rs.set(1.0, 2.0, InstrumentResampleMode::Linear); // 2× upsample, step = 0.5
         let inputs = [0.0f32, 2.0, 4.0];
-        let mut it = inputs.into_iter();
-        let mut pull = move || {
-            let v = it.next().unwrap_or(4.0);
-            (v, 0.0)
-        };
+        let mut pull = pull_list(&inputs, 4.0);
         // pos = 0, .5, 1, 1.5, 2 → 0, 1, 2, 3, 4 (left channel).
-        let mut got = [(0.0f32, 0.0f32); 5];
-        rs.process(&mut got, &mut pull);
-        for (i, &(l, _)) in got.iter().enumerate() {
+        let (mut got_l, mut got_r) = ([0.0f32; 5], [0.0f32; 5]);
+        rs.process(&mut got_l, &mut got_r, &mut pull);
+        for (i, &l) in got_l.iter().enumerate() {
             assert!((l - i as f32).abs() < 1e-6, "sample {i}: got {l}");
         }
     }
@@ -1103,10 +1192,13 @@ mod tests {
         ] {
             let mut rs = StreamResampler::new();
             rs.set(8000.0, 48000.0, mode);
-            let mut pull = || (1.0, 0.5);
-            let mut buf = [(0.0f32, 0.0f32); 2000];
-            rs.process(&mut buf, &mut pull);
-            let last = buf[1999];
+            let mut pull = |l: &mut [Sample], r: &mut [Sample]| {
+                l.fill(1.0);
+                r.fill(0.5);
+            };
+            let (mut buf_l, mut buf_r) = ([0.0f32; 2000], [0.0f32; 2000]);
+            rs.process(&mut buf_l, &mut buf_r, &mut pull);
+            let last = (buf_l[1999], buf_r[1999]);
             assert!((last.0 - 1.0).abs() < 1e-3, "left DC gain off: {}", last.0);
             assert!((last.1 - 0.5).abs() < 1e-3, "right DC gain off: {}", last.1);
         }
@@ -1124,24 +1216,33 @@ mod tests {
             rs
         };
         // A deterministic pseudo-random stereo stream so successive inputs differ.
-        let stream = |seed: &mut u32| {
-            *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-            let l = (*seed >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
-            (l, -l)
+        let stream = |seed: &mut u32, l: &mut [Sample], r: &mut [Sample]| {
+            for (l, r) in l.iter_mut().zip(r.iter_mut()) {
+                *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                *l = (*seed >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
+                *r = -*l;
+            }
         };
 
-        let mut whole = [(0.0f32, 0.0f32); 500];
+        let (mut whole_l, mut whole_r) = ([0.0f32; 500], [0.0f32; 500]);
         let mut s = 1;
-        make().process(&mut whole, &mut || stream(&mut s));
+        make().process(&mut whole_l, &mut whole_r, &mut |l, r| stream(&mut s, l, r));
 
-        let mut chunked = [(0.0f32, 0.0f32); 500];
-        let mut s2 = 1;
-        let mut rs = make();
-        let mut pull = || stream(&mut s2);
-        for chunk in chunked.chunks_mut(37) {
-            rs.process(chunk, &mut pull);
+        // Chunk sizes that are not multiples of each other, including a single sample: the caller
+        // may hand this any length and must get the same stream back.
+        for size in [1, 7, 37, 256, 500] {
+            let (mut chunked_l, mut chunked_r) = ([0.0f32; 500], [0.0f32; 500]);
+            let mut s2 = 1;
+            let mut rs = make();
+            let mut pull = |l: &mut [Sample], r: &mut [Sample]| stream(&mut s2, l, r);
+            for (l, r) in chunked_l.chunks_mut(size).zip(chunked_r.chunks_mut(size)) {
+                rs.process(l, r, &mut pull);
+            }
+            assert_eq!(
+                (whole_l, whole_r),
+                (chunked_l, chunked_r),
+                "chunk size {size}"
+            );
         }
-
-        assert_eq!(whole, chunked);
     }
 }

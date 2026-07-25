@@ -8,6 +8,7 @@
 //! paths sum to unity, so the stage is transparent there.
 
 use crate::dsp::biquad_filter::BiquadFilter;
+use crate::dsp::block;
 use crate::dsp::simple_compressor::SimpleCompressor;
 use crate::waveform::{Frame, Sample};
 
@@ -162,26 +163,93 @@ impl HighBandCompressorStage {
         self.comp.last_reduction_db()
     }
 
-    /// Processes one stereo sample: splits at `cutoff_hz` → compresses the high band → re-sums.
-    /// The low band is touched only by its LPF; summing with the (gain-matched) HPF path restores
-    /// unity at unity compressor gain, so the stage is transparent in that case.
+    /// Processes a block of consecutive stereo samples in place: splits at `cutoff_hz` → compresses
+    /// the high band → re-sums. The low band is touched only by its LPF; summing with the
+    /// (gain-matched) HPF path restores unity at unity compressor gain, so the stage is transparent
+    /// in that case.
+    ///
+    /// `high_l`/`high_r` are caller-supplied scratch for the high band, at least as long as the
+    /// block. Passing them in keeps this stage free of buffers of its own, so the controller can
+    /// hold one set of scratch for the whole chain.
+    ///
+    /// `configure` runs once for the block rather than once per sample; the parameters cannot change
+    /// mid-block because they only change on a device tick.
+    pub fn process_block(
+        &mut self,
+        l: &mut [Sample],
+        r: &mut [Sample],
+        params: HighBandCompressorParams,
+        high_l: &mut [Sample],
+        high_r: &mut [Sample],
+    ) {
+        self.configure(params);
+        let n = block::stereo_len(l, r);
+        let (high_l, high_r) = (&mut high_l[..n], &mut high_r[..n]);
+        high_l.copy_from_slice(l);
+        high_r.copy_from_slice(r);
+        self.hp_l.transform_block(high_l);
+        self.hp_r.transform_block(high_r);
+        self.lp_l.transform_block(l);
+        self.lp_r.transform_block(r);
+        self.comp.process_block(high_l, high_r);
+        for (low, high) in l.iter_mut().zip(high_l.iter()) {
+            *low += *high;
+        }
+        for (low, high) in r.iter_mut().zip(high_r.iter()) {
+            *low += *high;
+        }
+    }
+
+    /// Processes one stereo sample. A one-sample [`Self::process_block`].
     #[inline]
     pub fn process(&mut self, input: Frame, params: HighBandCompressorParams) -> Frame {
-        self.configure(params);
-        let (l, r) = input;
-        let h_l = self.hp_l.transform(l);
-        let h_r = self.hp_r.transform(r);
-        let low_l = self.lp_l.transform(l);
-        let low_r = self.lp_r.transform(r);
-        let (mut h_l, mut h_r): (Sample, Sample) = (h_l, h_r);
-        self.comp.process(&mut h_l, &mut h_r);
-        (low_l + h_l, low_r + h_r)
+        let (mut l, mut r) = ([input.0], [input.1]);
+        let (mut high_l, mut high_r) = ([0.0], [0.0]);
+        self.process_block(&mut l, &mut r, params, &mut high_l, &mut high_r);
+        (l[0], r[0])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A block of any length must give bit-identical results to processing one stereo sample at a
+    /// time, across the split filters and the high-band compressor's envelope alike.
+    #[test]
+    fn process_block_matches_per_sample() {
+        use crate::dsp::block::{MAX_BLOCK, TEST_BLOCK_LENGTHS, test_signal};
+
+        let params = HighBandCompressorParams {
+            cutoff_hz: 3000.0,
+            threshold_db: -18.0,
+            ratio: 4.0,
+            attack_ms: 2.0,
+            release_ms: 80.0,
+            makeup_db: 1.0,
+        };
+        for n in TEST_BLOCK_LENGTHS {
+            let signal = test_signal(4 * n);
+            let right: Vec<Sample> = signal.iter().map(|x| -0.4 * x).collect();
+
+            let mut blocked = HighBandCompressorStage::new(48_000.0);
+            let (mut high_l, mut high_r) = ([0.0; MAX_BLOCK], [0.0; MAX_BLOCK]);
+            let (mut got_l, mut got_r) = (signal.clone(), right.clone());
+            for (l, r) in got_l.chunks_mut(n).zip(got_r.chunks_mut(n)) {
+                blocked.process_block(l, r, params, &mut high_l, &mut high_r);
+            }
+
+            let mut per_sample = HighBandCompressorStage::new(48_000.0);
+            let (mut want_l, mut want_r) = (Vec::new(), Vec::new());
+            for (&l, &r) in signal.iter().zip(&right) {
+                let (l, r) = per_sample.process((l, r), params);
+                want_l.push(l);
+                want_r.push(r);
+            }
+
+            assert_eq!((got_l, got_r), (want_l, want_r), "block length {n}");
+        }
+    }
 
     /// DC passes through the LPF unchanged and is blocked by the HPF; with the compressor at unity
     /// ratio the stage must leave a DC input untouched. Pins the "low band is transparent" half of

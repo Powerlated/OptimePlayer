@@ -1,7 +1,9 @@
-//! The block renderer (`SynthController::fill`) must be bit-identical to the per-sample path
-//! (`SynthController::next_sample` in a loop): same clock evolution, same voice math, same mixing
-//! order. Rendered against a real demo SDAT so the full engine (sequencer, ADSR/LFO ticks,
-//! looping samples, stereo stage) is exercised.
+//! How a render is chunked must not change a single sample. The whole signal chain works in blocks
+//! bounded by device ticks, so these tests pin that rendering a run in one call, in uneven pieces,
+//! or one sample at a time (`SynthController::next_sample`) all agree bit-for-bit: same clock
+//! evolution, same voice math, same mixing order. Rendered against a real demo SDAT so the full
+//! engine (sequencer, ADSR/LFO ticks, looping samples, stereo stage, intermediate mixer) is
+//! exercised.
 
 use std::path::PathBuf;
 
@@ -205,6 +207,71 @@ fn fill_matches_next_sample_intermediate_mixer_linear() {
         ..PerDeviceSettings::neutral()
     };
     assert_fill_matches_next_sample(&config, "intermediate mixer (linear)");
+}
+
+/// The planar `SynthController::render` is the whole chain, so its output must not depend on how
+/// the caller splits a run — down to one sample per call, which is the length a consumer that
+/// genuinely needs sample-at-a-time control passes.
+///
+/// The `fill` tests above already cover this indirectly, but they go through the interleaving
+/// wrapper and always split on the same handful of sizes. This drives the chain directly, at chunk
+/// sizes that fall on none of the block's natural boundaries (the 256-sample cap, the ~171-sample
+/// DS tick at 32768 Hz), with the intermediate mixer engaged so the resampler's own block pull is
+/// re-chunked underneath.
+#[test]
+fn render_is_chunk_invariant_down_to_one_sample() {
+    let config = PerDeviceSettings {
+        instrument_resample: instrument(
+            InstrumentResampleChoice::SincOutputNyquist,
+            16,
+            10_000,
+            12_000,
+            true,
+            true,
+        ),
+        stereo_separation: true,
+        bass_mono: true,
+        smooth_pan: true,
+        // HoldDuringNotes defers a Haas delay-length change until the track falls silent, so the
+        // change lands mid-block on whatever sample the last voice stopped. That sample must not
+        // move with the block length.
+        delay_smoothing_choice: 1,
+        use_mixer: true,
+        mixer_sample_rate: 13_379,
+        mixer_resample: MixerResampleSettings {
+            choice: InstrumentResampleChoice::SincOutputNyquist,
+            sinc_taps: 16,
+            cutoff_hz: 12_000,
+        },
+        ..PerDeviceSettings::neutral()
+    };
+    let data = load_demo();
+    let sr = 32768.0;
+    const FRAMES: usize = 20_000;
+
+    let mut whole = SynthController::new(sr, &*data, 0).expect("SSEQ 0");
+    let (mut want_l, mut want_r) = (vec![0.0f32; FRAMES], vec![0.0f32; FRAMES]);
+    whole.render(&mut want_l, &mut want_r, &config);
+
+    for size in [1usize, 3, 97, 171, 256, 257, 1000] {
+        let mut chunked = SynthController::new(sr, &*data, 0).expect("SSEQ 0");
+        let (mut got_l, mut got_r) = (vec![0.0f32; FRAMES], vec![0.0f32; FRAMES]);
+        for (l, r) in got_l.chunks_mut(size).zip(got_r.chunks_mut(size)) {
+            chunked.render(l, r, &config);
+        }
+        for (i, (((&gl, &gr), &wl), &wr)) in got_l
+            .iter()
+            .zip(&got_r)
+            .zip(&want_l)
+            .zip(&want_r)
+            .enumerate()
+        {
+            assert!(
+                gl == wl && gr == wr,
+                "chunk size {size}: frame {i} differs: ({gl}, {gr}) vs ({wl}, {wr})"
+            );
+        }
+    }
 }
 
 /// Regression: the sampled-bus high-band compressor runs at the **output** rate, not the mixer

@@ -21,9 +21,4 @@ pub use synthesizer::WaveformSynthesizer;
 /// filters for the analysis popup without duplicating the constant.
 pub const CROSSOVER_Q: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
-/// Maximum block length (in output samples) accepted by [`WaveformSynthesizer::render_block`] and
-/// [`SynthController::fill`]'s internal blocking. Sized to cover one full sequencer tick at common
-/// output rates (≈251 samples at 48 kHz) so a block rarely splits.
-///
-/// [`SynthController::fill`]: crate::synth_controller::SynthController::fill
-pub const MAX_BLOCK: usize = 256;
+pub use crate::dsp::block::MAX_BLOCK;

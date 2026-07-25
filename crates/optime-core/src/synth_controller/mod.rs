@@ -32,10 +32,10 @@ pub use vis::{FsVisController, SongOverview, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
 use crate::dsp::biquad_filter::BiquadFilter;
-use crate::dsp::high_band_compressor::{HighBandCompressorParams, HighBandCompressorStage};
+use crate::dsp::block::{self, MAX_BLOCK};
+use crate::dsp::high_band_compressor::HighBandCompressorStage;
 use crate::dsp::resample::StreamResampler;
-use crate::synth::MAX_BLOCK;
-use crate::waveform::{Frame, InstrumentResampleMode, Sample};
+use crate::waveform::{InstrumentResampleMode, Sample};
 use crate::{PerDeviceSettings, TRACK_COUNT, WaveformSynthesizer};
 use reverb::Reverb;
 
@@ -95,21 +95,22 @@ fn find_slot(slot_owner: &SlotOwners, track: usize, voice: VoiceId) -> Option<us
         .position(|o| o.is_some_and(|o| o.voice == voice))
 }
 
-/// Advances every voice in a set by one sample and returns the enabled-track stereo sum.
-fn render_set(
+/// Advances every voice in a set by one block and writes the enabled-track stereo sum into
+/// `out_l`/`out_r` (overwriting whatever was there). Disabled tracks still advance, so muting one
+/// does not change how the others sound.
+fn render_set_block(
     synths: &mut [WaveformSynthesizer],
     enables: &[bool],
     config: &PerDeviceSettings,
-) -> Frame {
-    let (mut l, mut r): Frame = (0.0, 0.0);
+    out_l: &mut [Sample],
+    out_r: &mut [Sample],
+) {
+    let n = block::stereo_len(out_l, out_r);
+    out_l.fill(0.0);
+    out_r.fill(0.0);
     for (synth, &enabled) in synths.iter_mut().zip(enables) {
-        synth.next_sample(config);
-        if enabled {
-            l += synth.val_l;
-            r += synth.val_r;
-        }
+        synth.render_block(config, n, out_l, out_r, enabled);
     }
-    (l, r)
 }
 
 /// Quantizes one mixer-bus sample to `bits`-bit signed exactly as the GBA m4a software mixer does
@@ -125,6 +126,13 @@ fn bitcrush_sample(x: Sample, bits: u32) -> Sample {
     let mask = (1i64 << bits) - 1; // 0xFF at 8-bit
     let wrapped = ((code & mask) ^ sign) - sign; // sign-extend the low `bits` → two's-complement wrap
     wrapped as Sample / scale
+}
+
+/// Quantizes a block of mixer-bus samples in place (see [`bitcrush_sample`]).
+fn bitcrush_block(block: &mut [Sample], bits: u32) {
+    for x in block.iter_mut() {
+        *x = bitcrush_sample(*x, bits);
+    }
 }
 
 /// Cuts one-shot samples in a set that ran out (only the synthesizer knows their playback
@@ -149,6 +157,38 @@ fn cut_finished(
                 notes_on[t][owner.key as usize] = 0;
                 feedback.ended_voices.push((t, owner.voice));
             }
+        }
+    }
+}
+
+/// The buffers one block of the signal chain needs beyond the caller's output: the output-set
+/// (PSG) bus, the upsampled mixer bus, the high-band compressors' split scratch, and the per-sample
+/// fade gain.
+///
+/// Built on the stack for the duration of a render call rather than kept on the controller, so the
+/// controller stays cheap to move and there is no question of who is borrowing what mid-chain. At
+/// [`MAX_BLOCK`] samples each that is about 7 KB, which the audio callback's stack absorbs on
+/// native and in the browser alike.
+struct ChainScratch {
+    acc_l: [Sample; MAX_BLOCK],
+    acc_r: [Sample; MAX_BLOCK],
+    mix_l: [Sample; MAX_BLOCK],
+    mix_r: [Sample; MAX_BLOCK],
+    high_l: [Sample; MAX_BLOCK],
+    high_r: [Sample; MAX_BLOCK],
+    gain: [f32; MAX_BLOCK],
+}
+
+impl ChainScratch {
+    fn new() -> Self {
+        Self {
+            acc_l: [0.0; MAX_BLOCK],
+            acc_r: [0.0; MAX_BLOCK],
+            mix_l: [0.0; MAX_BLOCK],
+            mix_r: [0.0; MAX_BLOCK],
+            high_l: [0.0; MAX_BLOCK],
+            high_r: [0.0; MAX_BLOCK],
+            gain: [0.0; MAX_BLOCK],
         }
     }
 }
@@ -202,13 +242,15 @@ impl Bank {
         rate_change
     }
 
-    /// One upsampled stereo sample, pulling the mixer-rate bus from `render` on demand. The stream
-    /// resampler is block-only; here it is driven one output sample at a time (the mixer bus is
-    /// consumed per output sample as the device clock advances).
-    fn route(&mut self, render: &mut impl FnMut() -> Frame) -> Frame {
-        let mut out = [(0.0, 0.0)];
-        self.resampler.process(&mut out, render);
-        out[0]
+    /// Upsamples a block of the mixer-rate bus to the output rate, pulling the bus from `render` in
+    /// blocks as the read window requires it.
+    fn route_block(
+        &mut self,
+        out_l: &mut [Sample],
+        out_r: &mut [Sample],
+        render: &mut impl FnMut(&mut [Sample], &mut [Sample]),
+    ) {
+        self.resampler.process(out_l, out_r, render);
     }
 }
 
@@ -389,25 +431,39 @@ impl Transition {
         }
     }
 
-    /// Returns the gain for this output sample and advances by one, emitting `Finished` the first
-    /// time the ramp reaches silence (then holding at zero).
-    fn advance(&mut self, messages: &mut Vec<PlaybackEvent>) -> f32 {
-        self.total_samples += 1;
-        match self.elapsed {
-            None => 1.0,
-            Some(n) => {
-                let g = self.gain();
-                if g <= 0.0 {
-                    if !self.finished {
-                        self.finished = true;
-                        messages.push(PlaybackEvent::Finished);
-                    }
-                    return 0.0;
-                }
-                self.elapsed = Some(n + 1);
-                g
-            }
+    /// Writes the fade gain for each sample of a block into `out` and advances by the block length,
+    /// emitting `Finished` the first time the ramp reaches silence (then holding at zero).
+    ///
+    /// Until a fade is triggered the gain is a flat 1.0, which is the case almost all of the time,
+    /// so that path fills the block and moves the sample counter on without touching the ramp.
+    fn advance_block(&mut self, out: &mut [f32], messages: &mut Vec<PlaybackEvent>) {
+        self.total_samples += out.len() as u64;
+        if self.elapsed.is_none() {
+            out.fill(1.0);
+            return;
         }
+        for slot in out.iter_mut() {
+            let g = self.gain();
+            if g <= 0.0 {
+                if !self.finished {
+                    self.finished = true;
+                    messages.push(PlaybackEvent::Finished);
+                }
+                *slot = 0.0;
+                continue;
+            }
+            self.elapsed = self.elapsed.map(|n| n + 1);
+            *slot = g;
+        }
+    }
+
+    /// Returns the gain for this output sample and advances by one. A one-sample
+    /// [`Self::advance_block`], which is how the ramp tests step through the fade.
+    #[cfg(test)]
+    fn advance(&mut self, messages: &mut Vec<PlaybackEvent>) -> f32 {
+        let mut out = [0.0];
+        self.advance_block(&mut out, messages);
+        out[0]
     }
 }
 
@@ -495,13 +551,18 @@ impl SynthController {
         })
     }
 
-    /// Applies the master high-shelf EQ to one final stereo sample (a transparent pass when the
-    /// shelf is disabled / 0 dB), reconfiguring the biquads when the parameters change.
-    #[inline]
-    fn master_filter(&mut self, l: Sample, r: Sample, config: &PerDeviceSettings) -> Frame {
+    /// Applies the master high-shelf EQ to a block of final stereo samples in place (a transparent
+    /// pass when the shelf is disabled / 0 dB), reconfiguring the biquads when the parameters
+    /// change.
+    fn master_filter_block(
+        &mut self,
+        l: &mut [Sample],
+        r: &mut [Sample],
+        config: &PerDeviceSettings,
+    ) {
         let hs = config.shelf;
         if !hs.is_active() {
-            return (l, r);
+            return;
         }
         if self.shelf_params != Some(hs) {
             let order = (hs.order.max(2)) & !1; // even, ≥ 2
@@ -528,92 +589,82 @@ impl SynthController {
             }
             self.shelf_params = Some(hs);
         }
-        (self.shelf_l.transform(l), self.shelf_r.transform(r))
+        self.shelf_l.transform_block(l);
+        self.shelf_r.transform_block(r);
     }
 
-    /// Colours one PSG-bus (output-set) stereo sample with the crunch-compensation low-pass when
+    /// Colours a block of the PSG (output-set) bus with the crunch-compensation low-pass when
     /// active, matching the high-frequency darkening the mixer-to-output crunch gives DirectSound.
     /// A transparent pass otherwise; the biquad state is cleared on the inactive→active edge so a
     /// fresh enable starts clean.
-    #[inline]
-    fn psg_compensate(&mut self, l: Sample, r: Sample, config: &PerDeviceSettings) -> Frame {
+    fn psg_compensate_block(
+        &mut self,
+        l: &mut [Sample],
+        r: &mut [Sample],
+        config: &PerDeviceSettings,
+    ) {
         if !psg_comp_active(config) {
             self.psg_comp_was_active = false;
-            return (l, r);
+            return;
         }
         if !self.psg_comp_was_active {
             self.psg_comp_l.reset_state();
             self.psg_comp_r.reset_state();
             self.psg_comp_was_active = true;
         }
-        (self.psg_comp_l.transform(l), self.psg_comp_r.transform(r))
+        self.psg_comp_l.transform_block(l);
+        self.psg_comp_r.transform_block(r);
     }
 
-    /// Tames the high band of the PSG (output-set) bus with [`HighBandCompressorStage`]. A
-    /// transparent pass when `use_mixer` is off or the PSG flag is off; the stage's filter +
+    /// Tames the high band of a block of the PSG (output-set) bus with [`HighBandCompressorStage`].
+    /// A transparent pass when `use_mixer` is off or the PSG flag is off; the stage's filter +
     /// envelope state is cleared on the inactive->active edge so a fresh enable starts clean.
-    /// Mirrors the [`Self::psg_compensate`] gating pattern.
-    #[inline]
-    fn compress_psg_high_band(
+    /// Mirrors the [`Self::psg_compensate_block`] gating pattern.
+    fn compress_psg_high_band_block(
         &mut self,
-        l: Sample,
-        r: Sample,
+        l: &mut [Sample],
+        r: &mut [Sample],
         config: &PerDeviceSettings,
-    ) -> Frame {
+        high_l: &mut [Sample],
+        high_r: &mut [Sample],
+    ) {
         let hbc = &config.high_band_compress;
         if !config.use_mixer || !hbc.is_active_psg() {
             self.high_comp_psg_was_active = false;
-            return (l, r);
+            return;
         }
         if !self.high_comp_psg_was_active {
             self.high_comp_psg.reset_state();
             self.high_comp_psg_was_active = true;
         }
-        self.high_comp_psg.process(
-            (l, r),
-            HighBandCompressorParams {
-                cutoff_hz: hbc.cutoff_hz,
-                threshold_db: hbc.threshold_db,
-                ratio: hbc.ratio,
-                attack_ms: hbc.attack_ms,
-                release_ms: hbc.release_ms,
-                makeup_db: hbc.makeup_db,
-            },
-        )
+        self.high_comp_psg
+            .process_block(l, r, hbc.params(), high_l, high_r);
     }
 
-    /// Tames the high band of the sampled (DirectSound) bus with [`HighBandCompressorStage`],
-    /// after the bank has upsampled it to the output rate. Running at the output rate keeps the
-    /// band-split cutoff bounded by the output Nyquist (not the much lower mixer Nyquist — at the
-    /// GBA mixer rate of 13379 Hz the slider's 14 kHz ceiling is *above* Nyquist, which used to
-    /// push the RBJ coefficients unstable and silence the bus).
-    #[inline]
-    fn compress_sampled_high_band(
+    /// Tames the high band of a block of the sampled (DirectSound) bus with
+    /// [`HighBandCompressorStage`], after the bank has upsampled it to the output rate. Running at
+    /// the output rate keeps the band-split cutoff bounded by the output Nyquist (not the much
+    /// lower mixer Nyquist — at the GBA mixer rate of 13379 Hz the slider's 14 kHz ceiling is
+    /// *above* Nyquist, which used to push the RBJ coefficients unstable and silence the bus).
+    fn compress_sampled_high_band_block(
         &mut self,
-        l: Sample,
-        r: Sample,
+        l: &mut [Sample],
+        r: &mut [Sample],
         config: &PerDeviceSettings,
-    ) -> Frame {
+        high_l: &mut [Sample],
+        high_r: &mut [Sample],
+    ) {
         let hbc = &config.high_band_compress;
         if !config.use_mixer || !hbc.is_active_sampled() {
             self.high_comp_sampled_was_active = false;
-            return (l, r);
+            return;
         }
         if !self.high_comp_sampled_was_active {
             self.high_comp_sampled.reset_state();
             self.high_comp_sampled_was_active = true;
         }
-        self.high_comp_sampled.process(
-            (l, r),
-            HighBandCompressorParams {
-                cutoff_hz: hbc.cutoff_hz,
-                threshold_db: hbc.threshold_db,
-                ratio: hbc.ratio,
-                attack_ms: hbc.attack_ms,
-                release_ms: hbc.release_ms,
-                makeup_db: hbc.makeup_db,
-            },
-        )
+        self.high_comp_sampled
+            .process_block(l, r, hbc.params(), high_l, high_r);
     }
 
     /// The audio sample rate this controller renders at.
@@ -738,10 +789,15 @@ impl SynthController {
         self.reverb.set_rate(self.bank.rate);
     }
 
-    /// One upsampled stereo sample routed from the mixer set through the bank: the resampler pulls
-    /// mixer-rate samples (each a fresh advance + stereo mix of the mixer set) only as its read
-    /// window consumes them.
-    fn route_mixer(&mut self, config: &PerDeviceSettings) -> Frame {
+    /// Routes a block of the mixer set through the bank, upsampled to the output rate. The
+    /// resampler pulls blocks of mixer-rate audio (each a fresh advance + stereo mix of the mixer
+    /// set) only as its read window consumes them.
+    fn route_mixer_block(
+        &mut self,
+        out_l: &mut [Sample],
+        out_r: &mut [Sample],
+        config: &PerDeviceSettings,
+    ) {
         let mixer_synths = &mut self.mixer_synths;
         let reverb = &mut self.reverb;
         let enables = &config.track_enables;
@@ -752,70 +808,45 @@ impl SynthController {
         // mirroring m4a's 8-bit DirectSound buffer (the crushed samples are what would be DMA'd out).
         let bitcrush = config.bitcrush_mixer.then_some(config.bitcrush_bits);
         // The high-band compressor no longer runs in here — it now runs at the output rate after
-        // the bank upsamples (see `compress_sampled_high_band`), so the band-split cutoff is
+        // the bank upsamples (see `compress_sampled_high_band_block`), so the band-split cutoff is
         // bounded by the output Nyquist rather than the much lower mixer Nyquist.
-        let mut render = || {
-            let (l, r) = render_set(mixer_synths, enables, config);
-            let (l, r) = reverb.process(l, r, reverb_on);
-            match bitcrush {
-                Some(bits) => (bitcrush_sample(l, bits), bitcrush_sample(r, bits)),
-                None => (l, r),
+        let mut render = |l: &mut [Sample], r: &mut [Sample]| {
+            render_set_block(mixer_synths, enables, config, l, r);
+            reverb.process_block(l, r, reverb_on);
+            if let Some(bits) = bitcrush {
+                bitcrush_block(l, bits);
+                bitcrush_block(r, bits);
             }
         };
-        self.bank.route(&mut render)
+        self.bank.route_block(out_l, out_r, &mut render);
     }
 
-    /// Advances the device master clock and returns one mixed stereo sample.
+    /// Renders `out_l.len()` mixed stereo samples into the two channel buffers.
     ///
-    /// This is the single place where the hardware tick math lives: the device clock is
-    /// accumulated per output sample and the player is ticked every `cycles_per_tick` cycles.
-    pub fn next_sample(&mut self, config: &PerDeviceSettings) -> (f32, f32) {
-        self.prepare_mixer(config);
-        self.timer += self.player.clock_rate();
-        let threshold = self.player.cycles_per_tick() * self.sample_rate;
-        while self.timer >= threshold {
-            self.timer -= threshold;
-            self.tick(config);
-        }
-
-        let (val_l, val_r) = render_set(&mut self.synths, &config.track_enables, config);
-        // The output set is PSG-only when the mixer is engaged; darken it to match DirectSound.
-        let (val_l, val_r) = self.psg_compensate(val_l, val_r, config);
-        // Per-bus high-band compression. Both stages run at the output rate (PSG voices bypass the
-        // mixer; the sampled bus is compressed after the bank upsamples — see
-        // [`Self::compress_sampled_high_band`]). Both gated on `use_mixer` so direct mode is unaffected.
-        let (mut val_l, mut val_r) = self.compress_psg_high_band(val_l, val_r, config);
-        if config.use_mixer {
-            let (ml, mr) = self.route_mixer(config);
-            // Compress the upsampled sampled bus at the output rate, matching the PSG stage.
-            let (ml, mr) = self.compress_sampled_high_band(ml, mr, config);
-            val_l += ml;
-            val_r += mr;
-        }
-        let (val_l, val_r) = self.master_filter(val_l, val_r, config);
-        // The end-of-song fade is applied here, once per output sample, so it lives in one place.
-        let g = self.transition.advance(&mut self.messages);
-        (val_l * g, val_r * g)
-    }
-
-    /// Fills `out` with interleaved stereo (L, R, L, R, …) samples.
+    /// This is the whole signal chain and the only place it exists. The device master clock is
+    /// accumulated per output sample and the player ticked every `cycles_per_tick` cycles; the
+    /// audio between two ticks is one block, because voice parameters change only on ticks. Every
+    /// stage after the voices then runs over that block rather than a sample at a time.
     ///
-    /// Renders in blocks between device ticks (voice parameters only change on ticks), so each
-    /// voice runs one tight loop per block instead of re-deriving its setup per sample. The clock
-    /// is advanced with the same per-sample additions as [`Self::next_sample`], so the output is
-    /// bit-identical to calling that in a loop.
-    pub fn fill(&mut self, out: &mut [f32], config: &PerDeviceSettings) {
+    /// The block boundaries are an implementation detail: rendering a run in one call, in pieces,
+    /// or one sample at a time all produce the same samples.
+    pub fn render(
+        &mut self,
+        out_l: &mut [Sample],
+        out_r: &mut [Sample],
+        config: &PerDeviceSettings,
+    ) {
+        debug_assert_eq!(out_l.len(), out_r.len());
+        let frames = out_l.len();
         self.prepare_mixer(config);
         let threshold = self.player.cycles_per_tick() * self.sample_rate;
         let clock = self.player.clock_rate();
-        let frames = out.len() / 2;
-        let mut acc_l: [Sample; MAX_BLOCK] = [0.0; MAX_BLOCK];
-        let mut acc_r: [Sample; MAX_BLOCK] = [0.0; MAX_BLOCK];
+        let mut scratch = ChainScratch::new();
 
         let mut frame = 0;
         while frame < frames {
-            // First sample of the block: advance the clock and run any due ticks (mirroring
-            // `next_sample`'s ordering: the tick fires before the sample is synthesized).
+            // First sample of the block: advance the clock and run any due ticks (the tick fires
+            // before the sample it applies to is synthesized).
             self.timer += clock;
             while self.timer >= threshold {
                 self.timer -= threshold;
@@ -829,39 +860,76 @@ impl SynthController {
                 n += 1;
             }
 
-            // The output set renders the whole block at once; the mixer set is pulled per output
-            // sample (its consumption is data-dependent), matching `next_sample` bit-for-bit.
-            acc_l[..n].fill(0.0);
-            acc_r[..n].fill(0.0);
-            for (synth, &enabled) in self.synths.iter_mut().zip(&config.track_enables) {
-                synth.render_block(config, n, &mut acc_l, &mut acc_r, enabled);
-            }
-            let block_out = &mut out[2 * frame..2 * (frame + n)];
-            for (i, frame_out) in block_out.chunks_exact_mut(2).enumerate() {
-                // The block-rendered output set is the PSG bus when the mixer is engaged.
-                let (l, r) = self.psg_compensate(acc_l[i], acc_r[i], config);
-                // Per-bus high-band compression. Both stages at the output rate (PSG stage; the
-                // sampled stage runs after `route_mixer` upsamples). Matches `next_sample`.
-                let (mut l, mut r) = self.compress_psg_high_band(l, r, config);
-                if config.use_mixer {
-                    let (ml, mr) = self.route_mixer(config);
-                    let (ml, mr) = self.compress_sampled_high_band(ml, mr, config);
-                    l += ml;
-                    r += mr;
+            let (acc_l, acc_r) = (&mut scratch.acc_l[..n], &mut scratch.acc_r[..n]);
+            render_set_block(
+                &mut self.synths,
+                &config.track_enables,
+                config,
+                acc_l,
+                acc_r,
+            );
+
+            // The output set is PSG-only when the mixer is engaged; darken it to match DirectSound.
+            self.psg_compensate_block(acc_l, acc_r, config);
+            // Per-bus high-band compression. Both stages run at the output rate: PSG voices bypass
+            // the mixer, and the sampled bus is compressed after the bank upsamples it (see
+            // `compress_sampled_high_band_block`). Both gated on `use_mixer`, so direct mode is
+            // unaffected.
+            let (high_l, high_r) = (&mut scratch.high_l, &mut scratch.high_r);
+            self.compress_psg_high_band_block(acc_l, acc_r, config, high_l, high_r);
+
+            if config.use_mixer {
+                let (mix_l, mix_r) = (&mut scratch.mix_l[..n], &mut scratch.mix_r[..n]);
+                self.route_mixer_block(mix_l, mix_r, config);
+                self.compress_sampled_high_band_block(mix_l, mix_r, config, high_l, high_r);
+                for (acc, &m) in acc_l.iter_mut().zip(mix_l.iter()) {
+                    *acc += m;
                 }
-                let (l, r) = self.master_filter(l, r, config);
-                // Per-sample fade gain (see `next_sample`), keeping the block path bit-identical.
-                let g = self.transition.advance(&mut self.messages);
-                frame_out[0] = l * g;
-                frame_out[1] = r * g;
+                for (acc, &m) in acc_r.iter_mut().zip(mix_r.iter()) {
+                    *acc += m;
+                }
+            }
+            self.master_filter_block(acc_l, acc_r, config);
+
+            // The end-of-song fade is applied here, once per output sample, so it lives in one place.
+            let gain = &mut scratch.gain[..n];
+            self.transition.advance_block(gain, &mut self.messages);
+            for ((o, &v), &g) in out_l[frame..].iter_mut().zip(acc_l.iter()).zip(gain.iter()) {
+                *o = v * g;
+            }
+            for ((o, &v), &g) in out_r[frame..].iter_mut().zip(acc_r.iter()).zip(gain.iter()) {
+                *o = v * g;
             }
             frame += n;
         }
+    }
 
-        // Odd trailing f32 (half a frame): render one more stereo sample, keep its left channel.
-        if out.len() % 2 == 1 {
-            let (l, _) = self.next_sample(config);
-            out[out.len() - 1] = l;
+    /// Advances the device master clock and returns one mixed stereo sample. A one-sample
+    /// [`Self::render`].
+    pub fn next_sample(&mut self, config: &PerDeviceSettings) -> (f32, f32) {
+        let (mut l, mut r) = ([0.0], [0.0]);
+        self.render(&mut l, &mut r, config);
+        (l[0], r[0])
+    }
+
+    /// Fills `out` with interleaved stereo (L, R, L, R, …) samples, for a consumer that wants one
+    /// buffer rather than two channels. [`Self::render`] does the work; this only interleaves.
+    pub fn fill(&mut self, out: &mut [f32], config: &PerDeviceSettings) {
+        let mut buf_l: [Sample; MAX_BLOCK] = [0.0; MAX_BLOCK];
+        let mut buf_r: [Sample; MAX_BLOCK] = [0.0; MAX_BLOCK];
+        for chunk in out.chunks_mut(2 * MAX_BLOCK) {
+            let n = chunk.len() / 2;
+            self.render(&mut buf_l[..n], &mut buf_r[..n], config);
+            for ((frame_out, &l), &r) in chunk.chunks_exact_mut(2).zip(&buf_l[..n]).zip(&buf_r[..n])
+            {
+                frame_out[0] = l;
+                frame_out[1] = r;
+            }
+            // Odd trailing f32 (half a frame): render one more stereo sample, keep its left channel.
+            if chunk.len() % 2 == 1 {
+                let (l, _) = self.next_sample(config);
+                *chunk.last_mut().expect("odd-length chunk is non-empty") = l;
+            }
         }
     }
 
@@ -882,18 +950,52 @@ impl SynthController {
         let threshold = self.player.cycles_per_tick() * rate;
         let clock = self.player.clock_rate();
         let frames = out.len() / 2;
-        for frame in 0..frames {
+        let (mut bus_l, mut bus_r): ([Sample; MAX_BLOCK], [Sample; MAX_BLOCK]) =
+            ([0.0; MAX_BLOCK], [0.0; MAX_BLOCK]);
+        let (mut sink_l, mut sink_r): ([Sample; MAX_BLOCK], [Sample; MAX_BLOCK]) =
+            ([0.0; MAX_BLOCK], [0.0; MAX_BLOCK]);
+
+        let mut frame = 0;
+        while frame < frames {
+            // The block runs to the next tick, exactly as `render` blocks the normal path.
             self.timer += clock;
             while self.timer >= threshold {
                 self.timer -= threshold;
                 self.tick(config);
             }
-            let (l, r) = render_set(&mut self.mixer_synths, &config.track_enables, config);
+            let max_n = (frames - frame).min(MAX_BLOCK);
+            let mut n = 1;
+            while n < max_n && self.timer + clock < threshold {
+                self.timer += clock;
+                n += 1;
+            }
+
+            let enables = &config.track_enables;
+            render_set_block(
+                &mut self.mixer_synths,
+                enables,
+                config,
+                &mut bus_l[..n],
+                &mut bus_r[..n],
+            );
             // Advance the output (PSG) set too so one-shot endings / voice-steal feedback stay
             // consistent with a normal render; its audio is discarded.
-            let _ = render_set(&mut self.synths, &config.track_enables, config);
-            out[2 * frame] = l;
-            out[2 * frame + 1] = r;
+            render_set_block(
+                &mut self.synths,
+                enables,
+                config,
+                &mut sink_l[..n],
+                &mut sink_r[..n],
+            );
+            for ((frame_out, &l), &r) in out[2 * frame..2 * (frame + n)]
+                .chunks_exact_mut(2)
+                .zip(&bus_l[..n])
+                .zip(&bus_r[..n])
+            {
+                frame_out[0] = l;
+                frame_out[1] = r;
+            }
+            frame += n;
         }
     }
 

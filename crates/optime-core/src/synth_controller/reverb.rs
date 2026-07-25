@@ -27,7 +27,9 @@
 //! sampled (mixer-set) bus only, matching the hardware where reverb touches the PCM buffer but not
 //! the CGB/PSG channels.
 
-use crate::waveform::{Frame, Sample};
+#[cfg(test)]
+use crate::waveform::Frame;
+use crate::waveform::Sample;
 
 /// One GBA VBlank in seconds: `CYCLES_PER_FRAME / GBA_CLOCK_RATE` (280896 / 16_777_216 ≈ 16.74 ms).
 /// `pcmSamplesPerVBlank` at the mix rate is `mixer_rate * VBLANK_SECONDS` (≈ 224 at 13379 Hz).
@@ -86,35 +88,88 @@ impl Reverb {
         self.rate = mixer_rate;
     }
 
-    /// Processes one mixer-rate stereo sample. When the stage is disabled (`enabled` false or amount
-    /// 0) this is a bit-exact pass-through (the ring is left untouched). Otherwise it adds the mono
-    /// reverb tail (two full-buffer-delayed taps) to both channels and feeds the summed output back.
-    #[inline]
-    pub fn process(&mut self, dry_l: Sample, dry_r: Sample, enabled: bool) -> Frame {
+    /// Processes a block of consecutive mixer-rate stereo samples in place. When the stage is
+    /// disabled (`enabled` false or amount 0) this is a bit-exact pass-through (the ring is left
+    /// untouched). Otherwise it adds the mono reverb tail (two full-buffer-delayed taps) to both
+    /// channels and feeds the summed output back.
+    ///
+    /// The taps sit a whole PCM buffer behind the write cursor — thousands of samples at any real
+    /// mixer rate — so a block's writes can never reach its own taps. The samples are still walked
+    /// one at a time because the second tap is only one VBlank ahead of the cursor and a very small
+    /// ring (a degenerate rate) could bring the two within a block of each other; the gain here is
+    /// hoisting the amount, the tap offset and the disabled check out of the loop.
+    pub fn process_block(&mut self, l: &mut [Sample], r: &mut [Sample], enabled: bool) {
         if !enabled || self.amount == 0 {
-            return (dry_l, dry_r);
+            return;
         }
         let len = self.buf.len();
-        // Tap 1 = this slot's content from one full ring ago (`dst`, delay = whole buffer).
-        // Tap 2 = the slot one VBlank ahead (`src`, delay = buffer − one VBlank), still unread this
-        // cycle. Both are L+R sums, matching the hardware's `dstL+dstR + srcL+srcR`.
-        let tap1 = self.buf[self.pos];
-        let tap2 = self.buf[(self.pos + self.vblank_samples) % len];
-        let seed = (tap1 + tap2) * Sample::from(self.amount) / REVERB_SHIFT_DIV;
-        let (out_l, out_r) = (dry_l + seed, dry_r + seed);
-        // Store the L+R sum of what this slot now holds (mono seed on both channels + stereo dry).
-        self.buf[self.pos] = out_l + out_r;
-        self.pos += 1;
-        if self.pos >= len {
-            self.pos = 0;
+        let (vblank, gain) = (self.vblank_samples, Sample::from(self.amount));
+        let mut pos = self.pos;
+        for (l, r) in l.iter_mut().zip(r.iter_mut()) {
+            // Tap 1 = this slot's content from one full ring ago (`dst`, delay = whole buffer).
+            // Tap 2 = the slot one VBlank ahead (`src`, delay = buffer − one VBlank), still unread
+            // this cycle. Both are L+R sums, matching the hardware's `dstL+dstR + srcL+srcR`.
+            let tap1 = self.buf[pos];
+            let tap2 = self.buf[(pos + vblank) % len];
+            let seed = (tap1 + tap2) * gain / REVERB_SHIFT_DIV;
+            (*l, *r) = (*l + seed, *r + seed);
+            // Store the L+R sum of what this slot now holds (mono seed on both channels + stereo dry).
+            self.buf[pos] = *l + *r;
+            pos += 1;
+            if pos >= len {
+                pos = 0;
+            }
         }
-        (out_l, out_r)
+        self.pos = pos;
+    }
+
+    /// Processes one mixer-rate stereo sample. A one-sample [`Self::process_block`], which is how
+    /// the impulse-response tests below walk the delay taps.
+    #[cfg(test)]
+    fn process(&mut self, dry_l: Sample, dry_r: Sample, enabled: bool) -> Frame {
+        let (mut l, mut r) = ([dry_l], [dry_r]);
+        self.process_block(&mut l, &mut r, enabled);
+        (l[0], r[0])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dsp::block::{TEST_BLOCK_LENGTHS, test_signal};
+
+    /// A block of any length must give bit-identical results to processing one stereo sample at a
+    /// time, including once the ring has filled and the taps start feeding back.
+    #[test]
+    fn process_block_matches_per_sample() {
+        for n in TEST_BLOCK_LENGTHS {
+            // Long enough to run well past the ~1568-sample echo delay, so the taps are live.
+            let signal = test_signal(4000);
+            let right: Vec<Sample> = signal.iter().map(|x| -0.4 * x).collect();
+            let make = || {
+                let mut r = Reverb::new();
+                r.set_rate(13_379.0);
+                r.set_amount(80);
+                r
+            };
+
+            let mut blocked = make();
+            let (mut got_l, mut got_r) = (signal.clone(), right.clone());
+            for (l, r) in got_l.chunks_mut(n).zip(got_r.chunks_mut(n)) {
+                blocked.process_block(l, r, true);
+            }
+
+            let mut per_sample = make();
+            let (mut want_l, mut want_r) = (Vec::new(), Vec::new());
+            for (&l, &r) in signal.iter().zip(&right) {
+                let (l, r) = per_sample.process(l, r, true);
+                want_l.push(l);
+                want_r.push(r);
+            }
+
+            assert_eq!((got_l, got_r), (want_l, want_r), "block length {n}");
+        }
+    }
 
     #[test]
     fn disabled_is_passthrough() {

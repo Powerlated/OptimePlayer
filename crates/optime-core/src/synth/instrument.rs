@@ -48,6 +48,11 @@ pub struct WaveformInstrument {
     freq_ratio: f64,
     /// Last computed output sample.
     pub output: Sample,
+    /// Index within the block just rendered at which a fading-out voice reached silence and stopped
+    /// itself, or `None` if it did not stop during that block. The synthesizer needs the exact
+    /// sample — not just the fact that it happened — so that things which key off the pool going
+    /// quiet land where they would have with one-sample-at-a-time rendering.
+    pub(super) stopped_at: Option<usize>,
 }
 
 impl WaveformInstrument {
@@ -72,6 +77,7 @@ impl WaveformInstrument {
             finetune_lfo: 0.0,
             freq_ratio: 0.0,
             output: 0.0,
+            stopped_at: None,
         }
     }
 
@@ -229,6 +235,7 @@ impl WaveformInstrument {
         pops: PopSmoothing,
         out: &mut [Sample],
     ) {
+        self.stopped_at = None;
         // Only the sinc modes are worth hoisting; the 1–2 tap modes (and the missing-tables
         // fallback) just take the per-sample path.
         let effective = effective_gather(mode, self.waveform.is_psg_square);
@@ -240,8 +247,12 @@ impl WaveformInstrument {
             Some(tbl),
         ) = (effective, tables)
         else {
-            for slot in out.iter_mut() {
+            for (i, slot) in out.iter_mut().enumerate() {
+                let was_playing = self.playing;
                 self.advance(mode, tables, pops);
+                if was_playing && !self.playing {
+                    self.stopped_at.get_or_insert(i);
+                }
                 *slot += self.output;
             }
             return;
@@ -275,6 +286,11 @@ impl WaveformInstrument {
                 wrapped |= w;
             }
             if self.fading_out && !out.is_empty() {
+                // The gain is already zero on entry, so per-sample rendering would stop the voice
+                // on the block's very first sample.
+                if self.playing {
+                    self.stopped_at = Some(0);
+                }
                 self.playing = false;
             }
             self.sample_t = pos;
@@ -288,7 +304,7 @@ impl WaveformInstrument {
         let fc = sinc_fc(r, self.inv_sample_rate as Sample, step_mode, cutoff_hz);
 
         let mut last = 0.0;
-        for slot in out.iter_mut() {
+        for (i, slot) in out.iter_mut().enumerate() {
             pos += r;
             let (p, w) = fold_pos(pos, fold, data_len_f, loop_len_f);
             pos = p;
@@ -300,6 +316,9 @@ impl WaveformInstrument {
                 target
             };
             if self.fading_out && g == 0.0 {
+                if self.playing {
+                    self.stopped_at = Some(i);
+                }
                 self.playing = false;
             }
             if g == 0.0 {

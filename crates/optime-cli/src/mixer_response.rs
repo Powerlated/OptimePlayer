@@ -59,14 +59,19 @@ fn resample_bus(bus: &[(f32, f32)], mode: InstrumentResampleMode) -> Vec<f32> {
     rs.set(MIXER_RATE as f32, OUT_RATE as f32, mode);
     let n_out = ((bus.len() as f64) * OUT_RATE / MIXER_RATE).floor() as usize;
     let mut idx = 0usize;
-    let mut pull = || {
-        let s = bus.get(idx).copied().unwrap_or((0.0, 0.0));
-        idx += 1;
-        s
+    let mut pull = |l: &mut [f32], r: &mut [f32]| {
+        for (l, r) in l.iter_mut().zip(r.iter_mut()) {
+            (*l, *r) = bus.get(idx).copied().unwrap_or((0.0, 0.0));
+            idx += 1;
+        }
     };
-    let mut out = vec![(0.0f32, 0.0f32); n_out];
-    rs.process(&mut out, &mut pull);
-    out.iter().map(|&(l, r)| (l + r) * 0.5).collect()
+    let (mut out_l, mut out_r) = (vec![0.0f32; n_out], vec![0.0f32; n_out]);
+    rs.process(&mut out_l, &mut out_r, &mut pull);
+    out_l
+        .iter()
+        .zip(&out_r)
+        .map(|(&l, &r)| (l + r) * 0.5)
+        .collect()
 }
 
 #[derive(ClapArgs)]

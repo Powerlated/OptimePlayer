@@ -87,29 +87,81 @@ impl Slewer {
         self.direction = direction;
     }
 
-    /// Moves the held value one step toward `target` and returns the new value. Once the target is
-    /// within a single step it lands exactly on it rather than overshooting, and a move that runs
-    /// against the ramped direction arrives in this one call.
+    /// Writes the next `out.len()` values of a ramp toward `target` into `out`, one per sample, and
+    /// leaves the held value at the last of them. Once the ramp is within a single step of the
+    /// target it lands exactly on it rather than overshooting, and every value from there on is the
+    /// target itself.
+    ///
+    /// The target is constant across a block because it only changes on a device tick, and a block
+    /// never spans one.
+    pub fn advance_block(&mut self, out: &mut [f32], target: f32) {
+        let (step, direction) = (self.step, self.direction);
+        let mut current = self.current;
+        for slot in out.iter_mut() {
+            let d = target - current;
+            let ramped = match direction {
+                Direction::UpOnly => d > 0.0,
+                Direction::DownOnly => d < 0.0,
+                Direction::UpAndDown => true,
+            };
+            current = if !ramped || d.abs() <= step {
+                target
+            } else {
+                current + step.copysign(d)
+            };
+            *slot = current;
+        }
+        self.current = current;
+    }
+
+    /// Moves the held value one step toward `target` and returns the new value. A one-sample
+    /// [`Self::advance_block`].
     #[inline]
     pub fn advance(&mut self, target: f32) -> f32 {
-        let d = target - self.current;
-        let ramped = match self.direction {
-            Direction::UpOnly => d > 0.0,
-            Direction::DownOnly => d < 0.0,
-            Direction::UpAndDown => true,
-        };
-        self.current = if !ramped || d.abs() <= self.step {
-            target
-        } else {
-            self.current + self.step.copysign(d)
-        };
-        self.current
+        let mut out = [0.0];
+        self.advance_block(&mut out, target);
+        out[0]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A block of any length must give bit-identical results to advancing one sample at a time,
+    /// for every ramp direction and whether or not the ramp reaches its target mid-block.
+    #[test]
+    fn advance_block_matches_per_sample() {
+        use crate::dsp::block::TEST_BLOCK_LENGTHS;
+
+        for direction in [Direction::UpAndDown, Direction::UpOnly, Direction::DownOnly] {
+            for n in TEST_BLOCK_LENGTHS {
+                // Targets that alternate above and below, so a run of blocks exercises rises,
+                // falls, and holding on the target once it lands.
+                let targets: Vec<f32> = (0..8)
+                    .map(|i| if i % 2 == 0 { 1.0 } else { -0.3 })
+                    .collect();
+                let make = || Slewer::new(0.0, 0.01).with_direction(direction);
+
+                let mut blocked = make();
+                let mut got = Vec::new();
+                for &target in &targets {
+                    let mut chunk = vec![0.0; n];
+                    blocked.advance_block(&mut chunk, target);
+                    got.extend_from_slice(&chunk);
+                }
+
+                let mut per_sample = make();
+                let want: Vec<f32> = targets
+                    .iter()
+                    .flat_map(|&target| (0..n).map(move |_| target))
+                    .map(|target| per_sample.advance(target))
+                    .collect();
+
+                assert_eq!(got, want, "{direction:?}, block length {n}");
+            }
+        }
+    }
 
     #[test]
     fn advances_in_bounded_steps_and_lands_exactly() {
