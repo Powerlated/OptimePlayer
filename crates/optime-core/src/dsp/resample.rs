@@ -57,8 +57,6 @@ const OVERSAMPLE: usize = 512;
 /// Maximum tabulated `τ = 2·fc·d`. For the hot path (`fc ≤ 0.5`, `d ≤ P ≤ 64`) this bounds `τ`.
 /// Beyond it (only reachable on cheap step-mode upsampling) the kernel is evaluated directly.
 const TAU_MAX: usize = 64;
-/// Samples in the Blackman window table over the normalized half-support `x = d/P ∈ [0, 1]`.
-const WIN_OVERSAMPLE: usize = 4096;
 /// Largest supported `half_taps` (`P`). [`ResampleTables::new`] clamps to this, so callers may size
 /// stack buffers for the widest possible gather window (see [`tap_window`]).
 pub const MAX_HALF_TAPS: usize = TAU_MAX;
@@ -90,20 +88,22 @@ fn kernel_weight(d: f32, fc: f32, p: f32) -> f32 {
     sinc(2.0 * fc * d) * blackman(d.abs() / p)
 }
 
-/// Process-wide oversampled kernel tables. None of these depend on `fc` or `P`, so they are built
+/// The process-wide oversampled kernel table. It depends on neither `fc` nor `P`, so it is built
 /// exactly once and shared across every voice.
+///
+/// This is the only tabulated factor left in the resampler: the sine integral has no elementary
+/// closed form, while every other factor (the bare sinc, the Blackman window) is cheaper to evaluate
+/// analytically in the gathers than to look up.
 ///
 /// The whole resampler — table build, lookups, and gathers — runs in `f32`; no value is ever
 /// widened to `f64`. The one-time cumulative integral below is summed with Kahan compensation so
 /// its `f32` accumulation stays as accurate as the old `f64` build. At `OVERSAMPLE` resolution the
 /// linear-interp error already dwarfs the `~6e-8` `f32` rounding, and the narrow type halves the
-/// cache footprint (each table ~128 KB) and the load cost in the strided gather.
+/// cache footprint (~128 KB) and the load cost in the strided gather.
 struct Kernels {
     /// `sinc_int[k] = ∫₀^{k/OVERSAMPLE} sinc(t) dt = (1/π)·Si(π·τ)`, the cumulative integral of the
     /// bare sinc (the BLEP step), odd in `τ` with asymptote `0.5` as `τ → ∞`.
     sinc_int: Vec<f32>,
-    /// `win[k] = blackman(k / WIN_OVERSAMPLE)` for `k` in `0..=WIN_OVERSAMPLE`.
-    win: Vec<f32>,
 }
 
 fn kernels() -> &'static Kernels {
@@ -141,13 +141,7 @@ fn kernels() -> &'static Kernels {
             }
         }
 
-        Kernels {
-            sinc_int,
-            // Blackman window over the normalized half-support.
-            win: (0..=WIN_OVERSAMPLE)
-                .map(|k| blackman(k as f32 / WIN_OVERSAMPLE as f32))
-                .collect(),
-        }
+        Kernels { sinc_int }
     })
 }
 
@@ -176,53 +170,99 @@ fn sinc_int_at(k: &Kernels, idx: f32) -> f32 {
     if idx < 0.0 { -v } else { v }
 }
 
-/// Blackman window looked up at the **pre-scaled index** `idx = (|d|/P)·WIN_OVERSAMPLE` (0 past the
-/// support edge).
-#[inline]
-fn win_at(k: &Kernels, idx: f32) -> f32 {
-    if idx >= WIN_OVERSAMPLE as f32 {
-        0.0
-    } else {
-        lerp(&k.win, idx)
-    }
-}
-
 // ===========================================================================================
-// Scalar BLEP step gather
+// BLEP step gather
 // ===========================================================================================
 //
 // The step gather sums a staged tap window against the boxcar-integrated windowed-sinc kernel,
-// returning the `(Σ src·w, Σ w)` pair the caller DC-normalizes. It stays scalar: its cumulative-sinc
-// table lookup carries one edge value across iterations, which measures faster than any vectorized
-// variant (the table reads dominate).
+// returning the `(Σ src·w, Σ w)` pair the caller DC-normalizes.
+//
+// Unlike the impulse kernel, this one cannot be evaluated analytically: its `S` factor is the sine
+// integral, which has no elementary closed form, so the oversampled table stays. What is analytic is
+// the Blackman window multiplying it, so only `S` is looked up — one lane-wise gather per four taps
+// instead of the two interpolated table reads per tap the scalar version needed.
 
-/// Scalar BLEP gather of the boxcar-integrated windowed kernel: tap `j` weighs its source-sample
-/// bin `[pos−k−1, pos−k]` (where `d_hi = d0 − j = pos − k`) by the band-limited step rise across
-/// it,
+/// The BLEP step `S(τ) = ∫₀^τ sinc` for `LANES` pre-scaled signed indices at once, mirroring
+/// [`sinc_int_at`] lane for lane: odd in `τ`, saturating to `±0.5` past the tabulated range.
+///
+/// Lanes past the table read index 0 so the gather stays in bounds; their value is replaced by the
+/// asymptote afterwards, so what they loaded is irrelevant.
+#[inline]
+fn sinc_int_simd(k: &Kernels, idx: Fv) -> Fv {
+    let mag = idx.abs();
+    let past_end = mag.simd_ge(Fv::splat((k.sinc_int.len() - 1) as f32));
+    let mag = past_end.select(Fv::splat(0.0), mag);
+    let i = mag.cast::<usize>();
+    let frac = mag - i.cast::<f32>();
+    let lo = Fv::gather_or_default(&k.sinc_int, i);
+    let hi = Fv::gather_or_default(&k.sinc_int, i + Simd::splat(1));
+    let v = past_end.select(Fv::splat(0.5), lo + (hi - lo) * frac);
+    idx.simd_lt(Fv::splat(0.0)).select(-v, v)
+}
+
+/// The Blackman window from `c = cos(π·x)`, where `x` is the offset normalized to the half-support.
+///
+/// `0.42 + 0.5·cos(πx) + 0.08·cos(2πx)` with the second harmonic folded into the first through
+/// `cos(2θ) = 2cos²θ − 1`, which is what lets one rotating phasor cover the whole window:
+/// `0.42 + 0.5c + 0.08(2c² − 1) = 0.34 + c(0.5 + 0.16c)`. The caller masks off `|x| ≥ 1`.
+#[inline]
+fn blackman_from_cos(c: Fv) -> Fv {
+    Fv::splat(0.34) + (Fv::splat(0.5) + Fv::splat(0.16) * c) * c
+}
+
+/// BLEP gather of the boxcar-integrated windowed kernel: tap `j` weighs its source-sample bin
+/// `[pos−k−1, pos−k]` (where `d_hi = d0 − j = pos − k`) by the band-limited step rise across it,
 ///     `[S(2fc·d_hi) − S(2fc·(d_hi−1))] · blackman(|bin-center| / P)`,
-/// where `S` is the cumulative sinc integral. The bin's upper-edge `S` value is the next bin's
-/// lower edge, so it is carried across iterations (one `sinc_int` lookup per tap). Normalizing by
-/// the weight sum forces exact DC unity (and absorbs the window). Returns `(Σ src·w, Σ w)`.
-fn gather_step(
-    k: &Kernels,
-    src: &[f32],
-    d0: f32,
-    sinc_idx_step: f32,
-    win_idx_step: f32,
-) -> (f32, f32) {
-    let mut out = 0.0f32;
-    let mut wsum = 0.0f32;
-    let mut si_hi = sinc_int_at(k, sinc_idx_step * d0);
-    let mut lo_idx = sinc_idx_step * (d0 - 1.0); // S index of the bin's lower edge
-    let mut mid_idx = win_idx_step * (d0 - 0.5); // window index of the bin centre (signed)
-    for &s in src {
-        let si_lo = sinc_int_at(k, lo_idx);
-        let w = win_at(k, mid_idx.abs()) * (si_hi - si_lo);
+/// where `S` is the cumulative sinc integral. Normalizing by the weight sum forces exact DC unity
+/// (and absorbs the window). Returns `(Σ src·w, Σ w)`.
+///
+/// A bin's upper edge is the previous bin's lower edge, so each chunk's `S` values are reused as the
+/// next chunk's upper edges — shifted one lane, with `carry` supplying the lane the shift vacates.
+/// That keeps it at one `S` lookup per tap, as the scalar walk had.
+fn gather_step(k: &Kernels, src: &[f32], d0: f32, sinc_idx_step: f32, p: f32) -> (f32, f32) {
+    let lane_offsets = Fv::from_array([0.0, 1.0, 2.0, 3.0]);
+    // Bin centres sit half a source sample below the bin's upper edge, so the window phasor starts
+    // at `d0 − 0.5` and steps by one source sample per tap, like the impulse gather's.
+    let mut ph_win = Phasor::new(PI / p, d0 - 0.5);
+    let (mut out, mut wsum) = (Fv::splat(0.0), Fv::splat(0.0));
+    // `S` at the very first tap's upper edge; every later upper edge comes from a lower edge.
+    let mut carry = sinc_int_at(k, sinc_idx_step * d0);
+    // Offset of the current chunk's first tap's *lower* edge. Recomputed per chunk from `d0` rather
+    // than accumulated per tap, so the tap offsets carry no running rounding error.
+    let mut base = d0 - 1.0;
+
+    for chunk in src.chunks_exact(LANES) {
+        let d_lo = Fv::splat(base) - lane_offsets;
+        let s_lo = sinc_int_simd(k, d_lo * Fv::splat(sinc_idx_step));
+        let mut s_hi = s_lo.rotate_elements_right::<1>();
+        s_hi.as_mut_array()[0] = carry;
+        carry = s_lo.as_array()[LANES - 1];
+
+        // blackman(|d_mid| / P), 0 outside the ±P support.
+        let d_mid = Fv::splat(base + 0.5) - lane_offsets;
+        let inside = d_mid.abs().simd_lt(Fv::splat(p));
+        let w = inside.select(
+            blackman_from_cos(ph_win.cos) * (s_hi - s_lo),
+            Fv::splat(0.0),
+        );
+
+        out += Fv::from_slice(chunk) * w;
+        wsum += w;
+        base -= LANES as f32;
+        ph_win.rotate();
+    }
+    let (mut out, mut wsum) = (out.reduce_sum(), wsum.reduce_sum());
+
+    // Taps past the last full chunk, walked scalar from the same carry.
+    let done = src.len() - src.chunks_exact(LANES).remainder().len();
+    let mut si_hi = carry;
+    for (j, &s) in src.iter().enumerate().skip(done) {
+        let d_hi = d0 - j as f32;
+        let si_lo = sinc_int_at(k, sinc_idx_step * (d_hi - 1.0));
+        let w = blackman((d_hi - 0.5).abs() / p) * (si_hi - si_lo);
         out += s * w;
         wsum += w;
         si_hi = si_lo;
-        lo_idx -= sinc_idx_step;
-        mid_idx -= win_idx_step;
     }
     (out, wsum)
 }
@@ -296,8 +336,7 @@ fn gather_impulse_simd(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32, f32) {
     let a = PI * 2.0 * fc;
     let b = PI / p;
     let mut ph_sinc = Phasor::new(a, d0); // sin(a·d) / (a·d) = sinc(2fc·d)
-    let mut ph_win1 = Phasor::new(b, d0); // cos(π·d/P)
-    let mut ph_win2 = Phasor::new(2.0 * b, d0); // cos(2π·d/P)
+    let mut ph_win = Phasor::new(b, d0); // cos(π·d/P); the 2π·d/P term folds into it
 
     let (mut out, mut wsum) = (Fv::splat(0.0), Fv::splat(0.0));
     let mut d = Fv::splat(d0) - Fv::from_array([0.0, 1.0, 2.0, 3.0]);
@@ -307,16 +346,14 @@ fn gather_impulse_simd(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32, f32) {
         let near_zero = arg.abs().simd_lt(Fv::splat(1e-7));
         let sinc = near_zero.select(Fv::splat(1.0), ph_sinc.sin / arg);
         // blackman(|d|/P), 0 outside the ±P support.
-        let win = Fv::splat(0.42) + Fv::splat(0.5) * ph_win1.cos + Fv::splat(0.08) * ph_win2.cos;
         let inside = d.abs().simd_lt(Fv::splat(p));
-        let w = inside.select(sinc * win, Fv::splat(0.0));
+        let w = inside.select(sinc * blackman_from_cos(ph_win.cos), Fv::splat(0.0));
 
         out += Fv::from_slice(chunk) * w;
         wsum += w;
         d -= Fv::splat(LANES as f32);
         ph_sinc.rotate();
-        ph_win1.rotate();
-        ph_win2.rotate();
+        ph_win.rotate();
     }
     let (mut out, mut wsum) = (out.reduce_sum(), wsum.reduce_sum());
 
@@ -484,20 +521,19 @@ pub fn resample_sinc(
     } else {
         fc.clamp(1e-6, 0.5)
     };
-    // Table-index steps: fold the per-tap `·OVERSAMPLE` / `·WIN_OVERSAMPLE` scaling into the walk so
-    // each tap advances the indices by a constant add instead of recomputing scaled products.
+    // Folds the per-tap `·OVERSAMPLE` scaling into the walk, so a tap offset in source samples
+    // converts to a table index with one multiply.
     let sinc_idx_step = 2.0 * fc * OVERSAMPLE as f32; // Δ index per unit τ-step (one source sample)
-    let win_idx_step = WIN_OVERSAMPLE as f32 / tables.half_taps as f32; // Δ window index per source sample
 
     let d0 = pos - k_lo as f32; // offset of the first tap from the read position (≈ P)
-    // The two modes take different kernels. Step mode reads the cumulative-sinc table, carrying one
-    // edge value across iterations, which measures faster scalar than vectorized (the table reads
-    // dominate). Impulse mode vectorizes well because its kernel can be evaluated analytically with
-    // rotating phasors — no table traffic at all. Both return the same `(Σ src·w, Σ w)` pair.
+    let p = tables.half_taps as f32;
+    // The two modes take different kernels: step mode integrates the sinc across each source-sample
+    // bin (one `sinc_int` lookup per tap), impulse mode evaluates the bare sinc at the tap. Both
+    // vectorize the same way and return the same `(Σ src·w, Σ w)` pair.
     let (out, wsum): (Sample, Sample) = if step_mode {
-        gather_step(k, src, d0, sinc_idx_step, win_idx_step)
+        gather_step(k, src, d0, sinc_idx_step, p)
     } else {
-        gather_impulse_simd(src, d0, fc, tables.half_taps as f32)
+        gather_impulse_simd(src, d0, fc, p)
     };
     let wsum = if step_mode { wsum.abs() } else { wsum };
 
@@ -945,6 +981,74 @@ mod tests {
             let tau = -(TAU_MAX as f64) + 2.0 * TAU_MAX as f64 * i as f64 / 2000.0;
             let s = f64::from(sinc_int_at(k, (tau * OVERSAMPLE as f64) as f32));
             assert!((-0.6..=0.6).contains(&s), "S({tau}) = {s} out of band");
+        }
+    }
+
+    /// The folded second harmonic (`cos 2θ = 2cos²θ − 1`) must reproduce the Blackman window that
+    /// both gathers used to read from a table.
+    #[test]
+    fn blackman_folding_matches_the_direct_window() {
+        for i in 0..=200 {
+            let x = i as f64 / 200.0;
+            let folded = f64::from(blackman_from_cos(Fv::splat((PI * x).cos() as f32))[0]);
+            assert!(
+                close(folded, f64::from(blackman(x as f32)), 1e-6),
+                "blackman({x}): folded={folded}"
+            );
+        }
+    }
+
+    /// The vectorized step gather against a scalar oracle of the same kernel, written out tap by tap
+    /// with both bin edges looked up independently. This is what pins the lane plumbing — the
+    /// one-lane shift and the carry that feeds it — since a misplaced edge still yields a plausible
+    /// kernel, and `resample_sinc` normalizes by the weight sum, which hides a wrong window from the
+    /// DC tests entirely.
+    #[test]
+    fn step_gather_matches_a_scalar_oracle() {
+        let k = kernels();
+        let oracle = |src: &[f32], d0: f32, sinc_idx_step: f32, p: f32| -> (f64, f64) {
+            let (mut out, mut wsum) = (0.0f64, 0.0f64);
+            for (j, &s) in src.iter().enumerate() {
+                let d_hi = d0 - j as f32;
+                let rise = sinc_int_at(k, sinc_idx_step * d_hi)
+                    - sinc_int_at(k, sinc_idx_step * (d_hi - 1.0));
+                let w = f64::from(blackman((d_hi - 0.5).abs() / p) * rise);
+                out += f64::from(s) * w;
+                wsum += w;
+            }
+            (out, wsum)
+        };
+
+        // Deterministic pseudo-random taps, so no accidental symmetry can mask a lane error.
+        let mut seed = 0x1234_5678u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 9) as f32 / (1u32 << 23) as f32 - 0.5
+        };
+
+        for p in [1usize, 3, 16, 32, 64] {
+            // Tap counts around a LANES boundary, so the scalar remainder is exercised too.
+            for n in [2 * p, 2 * p + 1, 2 * p + 2] {
+                for fc in [0.5, 0.25, 0.5 / 8.0, 1.5] {
+                    for frac in [0.0, 0.13, 0.5, 0.87] {
+                        let src: Vec<f32> = (0..n).map(|_| next()).collect();
+                        let d0 = p as f32 + frac;
+                        let step = 2.0 * fc * OVERSAMPLE as f32;
+                        let (got_o, got_w) = gather_step(k, &src, d0, step, p as f32);
+                        let (want_o, want_w) = oracle(&src, d0, step, p as f32);
+                        // Relative to the weight sum: the taps are O(1), so is the kernel.
+                        let scale = want_w.abs().max(1e-3);
+                        assert!(
+                            close(f64::from(got_o), want_o, 1e-5 * scale),
+                            "out at p={p} n={n} fc={fc} frac={frac}: {got_o} vs {want_o}"
+                        );
+                        assert!(
+                            close(f64::from(got_w), want_w, 1e-5 * scale),
+                            "wsum at p={p} n={n} fc={fc} frac={frac}: {got_w} vs {want_w}"
+                        );
+                    }
+                }
+            }
         }
     }
 
