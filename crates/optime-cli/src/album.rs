@@ -41,7 +41,7 @@ use optime_core::{
 use rayon::prelude::*;
 use serde_json::Value;
 
-const SR: u32 = 32_768; // matches the app's EXPORT_SAMPLE_RATE
+pub const SR: u32 = 32_768; // matches the app's EXPORT_SAMPLE_RATE
 const TARGET_LUFS: f64 = -16.0;
 /// A frame counts as silence when both channels are within this magnitude (~-66 dBFS).
 const SILENCE_I16: i16 = 16;
@@ -164,9 +164,60 @@ fn run_benchmark(
     ExitCode::SUCCESS
 }
 
+/// The engine's high-quality preset for whichever console `data` came from, together with whether
+/// that console is the GBA (callers label their output with it).
+pub fn high_quality_preset(data: &dyn SoundData) -> (PerDeviceSettings, bool) {
+    let is_gba = data.as_any().downcast_ref::<GbaRom>().is_some();
+    let config = if is_gba {
+        PerDeviceSettings::enhanced_gba()
+    } else {
+        PerDeviceSettings::high_quality_nintendo_ds()
+    };
+    (config, is_gba)
+}
+
+/// The album order for an archive: the curated `[{ "songId", "title" }]` JSON's array order,
+/// restricted to song ids the archive can actually play, truncated to the first `limit` entries.
+/// The `Err` string is a finished, printable message.
+pub fn album_order(
+    data: &dyn SoundData,
+    names_json: &Path,
+    limit: Option<usize>,
+) -> Result<Vec<(u32, String)>, String> {
+    let text = fs::read_to_string(names_json)
+        .map_err(|e| format!("Failed to read '{}': {e}", names_json.display()))?;
+    let json: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("Failed to parse '{}': {e}", names_json.display()))?;
+    let playable: HashSet<u32> = data.song_ids().into_iter().collect();
+    let album: Vec<(u32, String)> = json
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|e| {
+            let id = u32::try_from(e["songId"].as_u64()?).ok()?;
+            playable
+                .contains(&id)
+                .then(|| (id, e["title"].as_str().unwrap_or("").to_string()))
+        })
+        .take(limit.unwrap_or(usize::MAX))
+        .collect();
+    if album.is_empty() {
+        return Err(format!(
+            "No playable songs from '{}' are present in the archive.",
+            names_json.display()
+        ));
+    }
+    Ok(album)
+}
+
 /// Renders one song to stereo frames using the shared controller fade policy (one loop then a
 /// 3-second fade, capped at 480s), applying the same 0.5 headroom gain as the app's WAV export.
-fn render_song(data: &dyn SoundData, song_id: u32, config: &PerDeviceSettings) -> Vec<(f32, f32)> {
+pub fn render_song(
+    data: &dyn SoundData,
+    song_id: u32,
+    config: &PerDeviceSettings,
+) -> Vec<(f32, f32)> {
     let sr = f64::from(SR);
     let Some(mut controller) = SynthController::new(sr, data, song_id) else {
         return Vec::new();
@@ -266,46 +317,15 @@ pub fn run(args: Args) -> ExitCode {
     };
 
     // High-quality preset for the archive's console.
-    let is_gba = data.as_any().downcast_ref::<GbaRom>().is_some();
-    let config = if is_gba {
-        PerDeviceSettings::enhanced_gba()
-    } else {
-        PerDeviceSettings::high_quality_nintendo_ds()
-    };
+    let (config, is_gba) = high_quality_preset(&*data);
 
-    // Album order = the JSON array order, restricted to songs actually present in the archive.
-    let json: Value = match fs::read_to_string(&args.names_json).map(|s| serde_json::from_str(&s)) {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            eprintln!("Failed to parse '{}': {e}", args.names_json.display());
-            return ExitCode::FAILURE;
-        }
+    let album = match album_order(&*data, &args.names_json, args.limit) {
+        Ok(a) => a,
         Err(e) => {
-            eprintln!("Failed to read '{}': {e}", args.names_json.display());
+            eprintln!("{e}");
             return ExitCode::FAILURE;
         }
     };
-    let playable: HashSet<u32> = data.song_ids().into_iter().collect();
-    let album: Vec<(u32, String)> = json
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|e| {
-            let id = u32::try_from(e["songId"].as_u64()?).ok()?;
-            playable
-                .contains(&id)
-                .then(|| (id, e["title"].as_str().unwrap_or("").to_string()))
-        })
-        .take(args.limit.unwrap_or(usize::MAX))
-        .collect();
-    if album.is_empty() {
-        eprintln!(
-            "No playable songs from '{}' are present in the archive.",
-            args.names_json.display()
-        );
-        return ExitCode::FAILURE;
-    }
 
     // Benchmark mode: render a deterministic slice of the album and report performance; no FLAC.
     if let Some(pct) = &args.benchmark {

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Offline command-line tools for the Optime Player engine: renders, exports, dumps, benchmarks."
+# The crate ships a second executable (`profile-emerald`, a profiler target), so plain
+# `cargo run -p optime-cli -- <subcommand>` needs to be told which one it means.
+default-run = "optime-cli"
 
 [features]
 # Nightly portable-SIMD sinc gather (see optime-core's feature of the same name).

@@ -7,20 +7,14 @@
 //!
 //! Run `cargo run -p optime-cli -- --help` for the list, or `-- <subcommand> --help` for one
 //! tool's arguments. Anything measuring performance wants `--release`.
-
-mod album;
-mod bench;
-mod dse;
-mod extract;
-mod golden;
-mod match_ost;
-mod mixer_response;
-mod render;
-mod wav;
+//!
+//! The crate's other executable is `profile-emerald` (`src/bin/profile-emerald.rs`), which is
+//! separate only so a sampling profiler can launch it without a subcommand.
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use optime_cli::{album, bench, dse, extract, golden, match_ost, mixer_response, render};
 
 #[derive(Parser)]
 #[command(
