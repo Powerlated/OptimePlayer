@@ -62,9 +62,9 @@ const MAX_DS_CHANNELS: usize = m4a::MAX_DIRECTSOUND_CHANNELS;
 /// `SOUND_MODE_MASVOL` value every Pokémon game passes to `m4aSoundMode`.
 const MASTER_VOLUME: u8 = 12;
 
-const DS_MIXER_FULL_SCALE: f64 = 128.0;
+const DS_MIXER_FULL_SCALE: f64 = 256.0;
 
-const CGB_FULL_SCALE_GAIN: f64 = 1.0;
+const CGB_FULL_SCALE_GAIN: f64 = 0.5;
 
 /// The synth-side identity of a hardware channel slot: which voice it drives and what we last told
 /// the [`SynthController`](crate::SynthController) about it.
