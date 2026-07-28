@@ -3506,7 +3506,7 @@ impl OptimeApp {
                         rest passes untouched.",
                 );
                 ui.add(
-                    egui::Slider::new(&mut hbc.threshold_db, -80.0..=0.0)
+                    egui::Slider::new(&mut hbc.threshold_db, -120.0..=0.0)
                         .text("Threshold")
                         .suffix(" dB"),
                 )
@@ -4425,9 +4425,8 @@ impl eframe::App for OptimeApp {
 /// `−GR_FULL_SCALE_DB` at the left, fill grows leftward as `gr_db` goes more negative. Industry
 /// convention (compression-only, no makeup); silent (0 dB) when neither bus is active.
 fn draw_gr_bar(ui: &mut egui::Ui, gr_db: f32) {
-    /// Full-scale span (left edge = `−this` dB). Covers the typical pop/electronic 1–12 dB range
-    /// with headroom for heavy limiting without pegging instantly.
-    const GR_FULL_SCALE_DB: f32 = 48.0;
+    /// Full-scale span (left edge = `−this` dB). 
+    const GR_FULL_SCALE_DB: f32 = 96.0;
     let accent = crate::theme::ACCENT;
     let warn = ui.visuals().warn_fg_color;
     let frac = (gr_db.abs() / GR_FULL_SCALE_DB).clamp(0.0, 1.0);

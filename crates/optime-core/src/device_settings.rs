@@ -399,11 +399,11 @@ impl PerDeviceSettings {
                 cutoff_hz: 13379,
             },
             shelf: HighShelf {
-                enabled: false,
-                order: 6,
-                q: 0.707,
-                cutoff_hz: 14000.0,
-                gain_db: -24.0,
+                enabled: true,
+                gain_db: -1.0,
+                cutoff_hz: 6000.0,
+                q: 0.5,
+                order: 2,
             },
             high_band_compress: HighBandCompressor {
                 enabled_psg: true,
