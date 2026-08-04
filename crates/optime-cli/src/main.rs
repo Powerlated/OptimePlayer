@@ -1,3 +1,5 @@
+//! Command-line entry point: parses the subcommand and dispatches to its module.
+
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};

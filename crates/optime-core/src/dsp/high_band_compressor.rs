@@ -1,3 +1,5 @@
+//! Splits a signal at a crossover and compresses only the high band.
+
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::block;
 use crate::dsp::simple_compressor::SimpleCompressor;

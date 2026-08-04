@@ -1,3 +1,5 @@
+//! The console-independent device interface: the sound-data and player traits, and archive probing.
+
 pub mod dse;
 pub mod gba;
 pub mod nds;

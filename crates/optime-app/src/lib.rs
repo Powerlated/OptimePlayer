@@ -1,3 +1,5 @@
+//! Crate root for the player application: the module list and the native and wasm entry points.
+
 mod annotation;
 mod app;
 mod audio;

@@ -1,3 +1,5 @@
+//! The cpal output stream and the audio-thread loop that advances the playlist and mixes the annotation buses.
+
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use optime_core::{
     InstrumentResampleMode, LoopAndTransitionOptions, PlaybackEvent, SynthController,

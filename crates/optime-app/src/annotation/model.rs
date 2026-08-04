@@ -1,3 +1,5 @@
+//! The chord-annotation data model: chords, spans, keys, and the JSON shape that is the contract with the ml crate.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

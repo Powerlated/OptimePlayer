@@ -1,3 +1,5 @@
+//! Measures the sinc resampler's real-time factor on a single song.
+
 use std::process::ExitCode;
 use std::time::Instant;
 

@@ -1,3 +1,5 @@
+//! The DSE low-frequency oscillators behind vibrato, tremolo, and auto-pan.
+
 use super::envelope::USEC_PER_DRIVER_TICK;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

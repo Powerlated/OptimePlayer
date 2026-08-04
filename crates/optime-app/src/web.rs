@@ -1,3 +1,5 @@
+//! Browser-only helpers: file download, demo fetching, and the shareable track URL.
+
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;

@@ -1,3 +1,5 @@
+//! Media-key integration: the system transport natively, the Media Session API on the web.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub enum MediaAction {

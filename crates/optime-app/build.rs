@@ -1,3 +1,5 @@
+//! Build script for the app: stamps the git revision and build time into the binary, and generates the local-only song-name tables and demo entries listed in `local_extras.txt`.
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};

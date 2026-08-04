@@ -1,3 +1,5 @@
+//! Converts a DSE note key into a PCM playback rate through the game's pitch tables.
+
 pub const DSE_SOUND_CLOCK: u32 = 0x00FF_B0FF;
 
 #[rustfmt::skip]

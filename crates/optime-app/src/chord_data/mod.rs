@@ -1,3 +1,5 @@
+//! Chord tables baked into the binary and looked up per game, feeding the piano roll's chord lane.
+
 use std::collections::HashMap;
 use std::sync::OnceLock;
 

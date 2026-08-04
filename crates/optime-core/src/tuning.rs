@@ -1,3 +1,5 @@
+//! Note-to-frequency conversion for the supported tuning systems.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TuningSystem {
     #[default]

@@ -1,3 +1,5 @@
+//! Parses the SMDL sequence container: header, song chunk, and track chunks.
+
 use crate::util::{read_u16, read_u32};
 
 const HEADER_LEN: usize = 0x40;

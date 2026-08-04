@@ -1,3 +1,5 @@
+//! The egui style: palette, fonts, and the shared widget helpers built on them.
+
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, TextStyle, Vec2};
 
 pub const BG: Color32 = Color32::from_rgb(0x0b, 0x0b, 0x0f);

@@ -1,3 +1,5 @@
+//! The DSE volume envelope, stepped per driver tick through the game's own duration tables.
+
 pub const USEC_PER_DRIVER_TICK: i64 = 10_000;
 
 const OFF: u8 = 0;

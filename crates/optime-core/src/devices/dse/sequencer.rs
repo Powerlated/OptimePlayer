@@ -1,3 +1,5 @@
+//! Walks decoded SMDL tracks in time, resolving pauses, loops, and tempo into flat sequencer operations.
+
 use super::events::{PAUSE_TICKS, control_info};
 use super::smdl::Smdl;
 use crate::util::{read_u8, read_u16};

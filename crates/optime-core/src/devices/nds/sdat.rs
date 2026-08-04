@@ -1,3 +1,5 @@
+//! Parses the SDAT archive: its symbol, info, file-allocation, and bank sections.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

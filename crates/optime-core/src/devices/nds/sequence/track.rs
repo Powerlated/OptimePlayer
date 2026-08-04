@@ -1,3 +1,5 @@
+//! One SSEQ track: its registers and call stack.
+
 #[derive(Debug, Clone)]
 pub struct SequenceTrack {
     pub active: bool,

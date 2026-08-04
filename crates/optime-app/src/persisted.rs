@@ -1,3 +1,5 @@
+//! Everything the app keeps between runs: library, playlists, per-device settings, and annotations.
+
 pub use optime_core::{InstrumentResampleChoice, PerDeviceSettings, PopSmoothingEdge};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]

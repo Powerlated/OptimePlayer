@@ -1,3 +1,5 @@
+//! Look-ahead note extraction for the visualizers, from a second headless player.
+
 use crate::PerDeviceSettings;
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback};
 use crate::util::CircularBuffer;

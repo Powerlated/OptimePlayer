@@ -1,3 +1,5 @@
+//! Renders every playable song in an archive to WAV files plus a manifest.
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 

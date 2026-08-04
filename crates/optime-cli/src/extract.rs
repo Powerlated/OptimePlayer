@@ -1,3 +1,5 @@
+//! Writes an audio-only copy of a GBA ROM.
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 

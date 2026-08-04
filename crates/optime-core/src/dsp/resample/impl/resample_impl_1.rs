@@ -1,3 +1,5 @@
+//! Resampler implementation 1: windowed-sinc interpolation, with a band-limited step mode for square and other stepped waveforms.
+
 use core::f32::consts::PI;
 use std::simd::prelude::*;
 use std::sync::OnceLock;

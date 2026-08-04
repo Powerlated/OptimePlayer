@@ -1,3 +1,5 @@
+//! Writes mixer-bus renders at two resample settings, the measurement the compensation filter is fit to.
+
 use std::io::Write as _;
 use std::process::ExitCode;
 

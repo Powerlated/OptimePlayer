@@ -1,3 +1,5 @@
+//! The DSE device player: runs the sequencer, envelopes, and LFOs, and emits the synth event stream.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

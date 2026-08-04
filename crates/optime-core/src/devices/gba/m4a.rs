@@ -1,3 +1,5 @@
+//! The MP2K sound driver's C half: its data structures, and the routines that start, stop, fade, and configure a song.
+
 #![allow(
     non_snake_case,
     non_upper_case_globals,

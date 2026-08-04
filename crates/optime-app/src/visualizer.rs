@@ -1,3 +1,5 @@
+//! The keyboard strip above the piano roll and the note snapshot it draws from.
+
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
 
 use crate::TRACK_COUNT;

@@ -1,3 +1,5 @@
+//! The DS device player: runs the sequencer behind the BPM timer, owns each note's ADSR and LFO, and emits synth events.
+
 use std::sync::Arc;
 
 use super::lfo::{LfoParams, lfo_tick, lfo_type};

@@ -1,3 +1,5 @@
+//! A single-band compressor and the envelope detector driving it.
+
 use crate::waveform::Sample;
 
 const DC_OFFSET: f64 = 1.0e-25;

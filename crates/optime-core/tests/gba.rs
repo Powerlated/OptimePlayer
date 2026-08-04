@@ -1,3 +1,5 @@
+//! End-to-end MP2K test against a synthetic in-memory ROM.
+
 use optime_core::devices::gba::GbaRom;
 use optime_core::{
     LoopAndTransitionOptions, PerDeviceSettings, PlaybackEvent, SoundData, SynthController,

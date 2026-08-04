@@ -1,3 +1,5 @@
+//! Crate root for the offline tools; the subcommand modules live here so both binaries share them.
+
 pub mod album;
 pub mod bench;
 pub mod dse;

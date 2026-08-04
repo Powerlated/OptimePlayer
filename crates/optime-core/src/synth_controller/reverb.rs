@@ -1,3 +1,5 @@
+//! The GBA driver's echo, modelled from the timing of its DMA buffer.
+
 #[cfg(test)]
 use crate::waveform::Frame;
 use crate::waveform::Sample;

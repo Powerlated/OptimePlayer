@@ -1,3 +1,5 @@
+//! A cascaded biquad filter with the usual designs, in scalar and block form.
+
 use core::f64::consts::PI;
 
 use crate::waveform::Sample;

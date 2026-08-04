@@ -1,3 +1,5 @@
+//! The state shared between the UI and the audio thread, including the playlist the audio thread owns and offline WAV rendering.
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 

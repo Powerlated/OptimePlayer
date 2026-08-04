@@ -1,3 +1,5 @@
+//! The SSEQ sequencer: sixteen tracks, the state they share, and the message queue the player drains.
+
 mod interpreter;
 mod message;
 mod track;

@@ -1,3 +1,5 @@
+//! Renders a soundtrack single-threaded, so a sampling profiler sees one stack and nothing else.
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;

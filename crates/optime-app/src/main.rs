@@ -1,3 +1,5 @@
+//! Native entry point; opens the application window.
+
 fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     {

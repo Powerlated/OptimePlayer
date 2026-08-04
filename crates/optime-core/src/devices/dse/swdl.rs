@@ -1,3 +1,5 @@
+//! Parses the SWDL bank container and decodes the waveforms it holds.
+
 use crate::util::{read_u16, read_u32};
 use crate::waveform::{Waveform, decode_adpcm, decode_pcm8, decode_pcm16};
 

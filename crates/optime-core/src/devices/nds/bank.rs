@@ -1,3 +1,5 @@
+//! The DS instrument bank: its regions and records, plus the ADSR coefficient helpers they need.
+
 use super::tables::{ATTACK_COEFF_TABLE, DECIBEL_SQUARE_TABLE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

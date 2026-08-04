@@ -1,3 +1,5 @@
+//! The DSE integer volume chain, from velocity and expression down to a voice amplitude.
+
 #[inline]
 fn sdiv_magic(x: i32, magic: u32, shift: u32) -> i32 {
     let high = ((magic as i32 as i64) * i64::from(x)) >> 32;

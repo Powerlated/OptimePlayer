@@ -1,3 +1,5 @@
+//! Renders a curated soundtrack into one loudness-normalised FLAC album, and the shared render machinery the benchmark reuses.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};

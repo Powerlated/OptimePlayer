@@ -1,3 +1,5 @@
+//! Executes one SSEQ track's bytecode: the opcode dispatch itself.
+
 use super::MessageType;
 use super::{Sequence, ValType};
 use crate::TRACK_COUNT;

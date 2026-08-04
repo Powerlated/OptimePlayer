@@ -1,3 +1,5 @@
+//! Small shared helpers: bounds-checked binary reads, byte search, and a circular buffer.
+
 #[inline]
 pub fn read_u8(data: &[u8], offset: usize) -> u8 {
     data.get(offset).copied().unwrap_or(0)

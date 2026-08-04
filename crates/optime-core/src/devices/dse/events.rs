@@ -1,3 +1,5 @@
+//! Decodes SMDL track bytecode into events, following the opcode and operand table of the game's parser.
+
 pub const PAUSE_TICKS: [u16; 16] = [96, 72, 64, 48, 36, 32, 24, 18, 16, 12, 9, 8, 6, 4, 3, 2];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,3 +1,5 @@
+//! A fixed-capacity delay line, read and written a block at a time.
+
 use crate::waveform::Sample;
 
 #[derive(Debug, Clone)]

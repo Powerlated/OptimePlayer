@@ -1,3 +1,5 @@
+//! The synthesis layer, which knows nothing about any console.
+
 mod delay_line;
 mod instrument;
 mod synthesizer;

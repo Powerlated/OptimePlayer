@@ -1,3 +1,5 @@
+//! The DSE backend: locates SMDL and SWDL data in a file or ROM and presents it as sound data.
+
 pub mod envelope;
 pub mod events;
 pub mod lfo;

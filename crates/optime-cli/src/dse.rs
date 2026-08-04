@@ -1,3 +1,5 @@
+//! Dumps DSE sequences and banks, from loose SMDL and SWDL files or from a ROM.
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 

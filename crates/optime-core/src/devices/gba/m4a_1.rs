@@ -1,3 +1,5 @@
+//! The MP2K sound driver's assembly half: the per-frame main loop that steps every track and runs its commands.
+
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use super::m4a::{

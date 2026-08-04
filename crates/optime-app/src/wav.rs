@@ -1,3 +1,5 @@
+//! Encodes stereo frames as a 16-bit PCM WAV file.
+
 pub fn encode_stereo_i16(samples: &[(f32, f32)], sample_rate: u32) -> Vec<u8> {
     let channels: u16 = 2;
     let bits_per_sample: u16 = 16;

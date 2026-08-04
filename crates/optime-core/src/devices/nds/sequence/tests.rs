@@ -1,3 +1,5 @@
+//! Tests for the SSEQ interpreter, driven by hand-assembled bytecode.
+
 use super::{Message, MessageType, Sequence};
 use crate::TRACK_COUNT;
 use std::sync::Arc;

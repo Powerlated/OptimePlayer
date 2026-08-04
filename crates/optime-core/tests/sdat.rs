@@ -1,3 +1,5 @@
+//! Parses the real demo SDAT archives.
+
 use std::path::PathBuf;
 
 use optime_core::{Sdat, load_all};

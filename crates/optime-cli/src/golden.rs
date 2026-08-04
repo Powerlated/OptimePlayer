@@ -1,3 +1,5 @@
+//! Hashes a fixed render of every demo archive, as a guard that a refactor changed no samples.
+
 use clap::Args as ClapArgs;
 use optime_core::{
     InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,

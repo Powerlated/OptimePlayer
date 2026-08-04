@@ -1,3 +1,5 @@
+//! The messages an SSEQ track emits to the player.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageType {
     PlayNote {

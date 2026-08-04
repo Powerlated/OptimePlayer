@@ -1,3 +1,5 @@
+//! Draws the piano roll: note lanes, bar grid, chord ribbon, and the viewport that pans and zooms.
+
 use egui::{Align2, Color32, ColorImage, FontId, Pos2, Rect, Sense, Stroke};
 
 use optime_core::{FsVisController, SongOverview};

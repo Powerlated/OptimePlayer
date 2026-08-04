@@ -1,3 +1,5 @@
+//! Sounds the annotated chord over the song on an embedded piano waveform, so a label is judged by ear rather than read.
+
 use std::sync::Arc;
 
 use optime_core::biquad_filter::BiquadFilter;

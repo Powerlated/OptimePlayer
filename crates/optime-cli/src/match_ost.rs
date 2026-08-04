@@ -1,3 +1,5 @@
+//! Pairs numbered songs with an official soundtrack's track listing by comparing chroma features of the audio.
+
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};

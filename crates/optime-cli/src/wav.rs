@@ -1,3 +1,5 @@
+//! Encodes mono samples as a 16-bit PCM WAV file.
+
 pub fn encode_mono_i16(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let data_len = samples.len() * 2;
     let mut out = Vec::with_capacity(44 + data_len);

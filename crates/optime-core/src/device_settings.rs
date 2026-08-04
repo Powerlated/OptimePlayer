@@ -1,3 +1,5 @@
+//! The per-console settings: what the app stores, and how each stored choice resolves to a concrete engine value.
+
 use crate::TRACK_COUNT;
 use crate::dsp::slewer::Direction;
 use crate::synth_controller::{DelaySmoothing, HighBandCompressor, HighShelf, PopSmoothing};

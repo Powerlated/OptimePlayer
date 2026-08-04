@@ -1,3 +1,5 @@
+//! A pool of voices for one track, mixed to stereo with pan, widening, and a bass crossover.
+
 use std::sync::Arc;
 
 use super::delay_line::DelayLine;

@@ -1,3 +1,5 @@
+//! Pins block rendering to per-sample rendering: how the output is chunked must not change it.
+
 use std::path::PathBuf;
 
 use optime_core::{

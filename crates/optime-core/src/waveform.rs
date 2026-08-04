@@ -1,3 +1,5 @@
+//! A decoded waveform with its playback metadata, the sample aliases, and the PCM decoders that produce one.
+
 use crate::devices::nds::tables::{ADPCM_INDEX_TABLE, ADPCM_STEP_TABLE};
 use crate::util::{read_u8, read_u16, read_u32};
 

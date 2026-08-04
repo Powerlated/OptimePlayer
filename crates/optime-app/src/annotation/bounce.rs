@@ -1,3 +1,5 @@
+//! Renders a whole song into memory a chunk at a time, so the annotation view can seek, loop bars, and replay without a sequencer that only runs forwards.
+
 use optime_core::{LoopAndTransitionOptions, PerDeviceSettings, SoundData, SynthController};
 
 use crate::audio::ENGINE_SAMPLE_RATE_HZ;

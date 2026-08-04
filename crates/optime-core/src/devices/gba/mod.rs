@@ -1,3 +1,5 @@
+//! The GBA backend: drives the MP2K player once per frame and turns its channel state into synth events.
+
 mod extract;
 pub mod m4a;
 mod m4a_1;

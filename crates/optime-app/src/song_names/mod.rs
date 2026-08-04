@@ -1,3 +1,5 @@
+//! Curated song titles and album ordering for ROMs that carry no names, looked up by source filename or GBA game code.
+
 use serde::Deserialize;
 
 #[derive(Deserialize)]

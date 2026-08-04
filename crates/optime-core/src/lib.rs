@@ -1,3 +1,5 @@
+//! Crate root for the engine: the module list, the shared clock constants, and the public re-exports.
+
 #![feature(portable_simd)]
 
 pub mod device_settings;

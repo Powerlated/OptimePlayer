@@ -1,3 +1,5 @@
+//! The DS channel LFO tick, transcribed from the sound driver.
+
 use super::tables::snd_sin_idx;
 
 pub(super) mod lfo_type {

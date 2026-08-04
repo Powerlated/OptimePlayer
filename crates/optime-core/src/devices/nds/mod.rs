@@ -1,3 +1,5 @@
+//! The Nintendo DS backend: presents a parsed SDAT archive as sound data.
+
 pub mod bank;
 mod lfo;
 mod player;

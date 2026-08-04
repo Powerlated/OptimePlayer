@@ -1,3 +1,5 @@
+//! One voice: turns a waveform and a pitch into samples, resampling as it goes and smoothing its own gain.
+
 use std::sync::Arc;
 
 use crate::devices::VoicePitch;

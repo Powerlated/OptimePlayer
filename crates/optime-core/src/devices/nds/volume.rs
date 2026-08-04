@@ -1,3 +1,5 @@
+//! The DS channel volume calculation, in the decibel domain the driver works in.
+
 use super::tables::{DECIBEL_SQUARE_TABLE, GET_VOL_TABLE};
 
 #[inline]

@@ -1,3 +1,5 @@
+//! The synth controller: drives the device player on the master clock and renders its events through the signal chain.
+
 mod config;
 pub mod messages;
 mod reverb;

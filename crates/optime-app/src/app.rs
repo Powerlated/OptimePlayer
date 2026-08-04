@@ -1,3 +1,5 @@
+//! The eframe application: song list, transport, settings, visualizers, and the export actions.
+
 use std::sync::{Arc, Mutex};
 
 use optime_core::devices::gba::GbaRom;

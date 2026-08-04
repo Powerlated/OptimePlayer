@@ -1,3 +1,5 @@
+//! Chord-annotation mode: the annotation files on disk and the UI state holding the current selection, meter, and key.
+
 mod bounce;
 pub mod chord_voice;
 pub mod model;

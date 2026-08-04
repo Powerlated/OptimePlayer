@@ -1,3 +1,5 @@
+//! The message set every device speaks to the synth, and the feedback returned to it each tick.
+
 use std::sync::Arc;
 
 use crate::waveform::Waveform;

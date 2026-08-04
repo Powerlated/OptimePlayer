@@ -1,3 +1,5 @@
+//! The block-processing conventions: the maximum block length, and the helpers every block stage shares.
+
 use crate::waveform::Sample;
 
 pub const MAX_BLOCK: usize = 256;

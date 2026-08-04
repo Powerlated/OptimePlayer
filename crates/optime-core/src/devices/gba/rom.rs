@@ -1,3 +1,5 @@
+//! Parses a GBA ROM: locates the song table and reads song headers out of it.
+
 use std::sync::Arc;
 
 use crate::util::{read_u8, read_u16, read_u32};

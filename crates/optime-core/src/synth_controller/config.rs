@@ -1,3 +1,5 @@
+//! The option types the signal chain reads: pop smoothing, delay smoothing, shelf, and compressor settings.
+
 use crate::dsp::high_band_compressor::HighBandCompressorParams;
 use crate::dsp::slewer::Direction;
 

@@ -1,3 +1,5 @@
+//! Builds an audio-only GBA ROM image by walking everything the song table can reach and zeroing the rest.
+
 use std::collections::HashSet;
 
 use super::m4a::{ToneData, WaveData};

@@ -1,3 +1,5 @@
+//! Moves a value toward a target by a bounded step per sample, landing exactly on it.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
     UpOnly,
