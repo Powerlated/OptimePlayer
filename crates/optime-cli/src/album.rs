@@ -1,28 +1,3 @@
-//! Renders an archive's songs, in the order given by a curated song-name JSON, into a single
-//! stereo FLAC, loudness-normalized album-wide to -16 LUFS (EBU R128 / ITU-R BS.1770).
-//!
-//! Each track is rendered with the engine's high-quality preset for its console
-//! ([`PerDeviceSettings::enhanced_gba`] / [`PerDeviceSettings::high_quality_nintendo_ds`]),
-//! playing one loop then a 3-second fade — the same policy as the app's WAV export. Leading and
-//! trailing near-silence is trimmed from every track and a fixed `--max-silence` gap is inserted
-//! between songs, so the dead air between tracks is capped at that length.
-//!
-//! Rendering is parallelized across CPUs into per-track temp PCM files (with one live progress bar
-//! per worker); two cheap sequential passes then (1) measure the whole album's integrated loudness
-//! and (2) apply the single gain that lands it at -16 LUFS while encoding the FLAC, so memory stays
-//! bounded regardless of album length.
-//!
-//! The input archive must already be decompressed (gunzip any `*.gbaaudio.gz` first). The JSON is
-//! the curated `[{ "songId", "title" }]` table (its array order is the album order).
-//!
-//! `--benchmark [PCT]` turns the tool into a render-performance benchmark instead of a FLAC export:
-//! it renders a deterministic, evenly-spread `PCT` (default `100%`) of the album with the same
-//! high-quality preset and reports wall time, realtime factor, and throughput (no FLAC, no temp
-//! files, on a fixed 4-thread pool through the same `parallel_render` path as the export). It also
-//! prints the engine's `Sample` width
-//! ([`optime_core::SAMPLE_SIZE_BYTES`]), so an `f32`-vs-`f64` build comparison is self-identifying.
-//! Example: `export-album mother-3.gbaaudio mother_3.json /dev/null --benchmark 10%`.
-
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,9 +16,8 @@ use optime_core::{
 use rayon::prelude::*;
 use serde_json::Value;
 
-pub const SR: u32 = 32_768; // matches the app's EXPORT_SAMPLE_RATE
+pub const SR: u32 = 32_768;
 const TARGET_LUFS: f64 = -16.0;
-/// A frame counts as silence when both channels are within this magnitude (~-66 dBFS).
 const SILENCE_I16: i16 = 16;
 
 #[derive(ClapArgs)]
@@ -51,31 +25,20 @@ const SILENCE_I16: i16 = 16;
     about = "Render an archive's songs into one -16 LUFS stereo FLAC, in song-name JSON order."
 )]
 pub struct Args {
-    /// Decompressed sound archive (DS SDAT, DSE, or GBA `.gbaaudio`).
     archive: PathBuf,
-    /// Curated `[{ "songId", "title" }]` JSON; its array order is the album order.
     names_json: PathBuf,
-    /// Output FLAC path.
     out: PathBuf,
-    /// Trim each track's leading/trailing silence and insert at most this many seconds of silence
-    /// between songs.
     #[arg(long, default_value_t = 0.8)]
     max_silence: f32,
-    /// Only export the first N songs (for quick tests).
     #[arg(long)]
     limit: Option<usize>,
-    /// Benchmark render performance instead of exporting a FLAC. Renders a deterministic,
-    /// evenly-spread percentage of the album (e.g. `--benchmark 10%`; the flag alone means 100%)
-    /// and reports wall time, realtime factor, and throughput. Accepts `10%`, `10`, or `0.1`.
     #[arg(long, num_args = 0..=1, default_missing_value = "100%", value_name = "PCT")]
     benchmark: Option<String>,
 }
 
-/// Parses a percentage string (`"10%"`, `"10"`, or `"0.1"`) into a fraction in `(0, 1]`.
 fn parse_percent(s: &str) -> Result<f64, String> {
     let t = s.trim().trim_end_matches('%').trim();
     let raw: f64 = t.parse().map_err(|_| format!("invalid percentage '{s}'"))?;
-    // A bare value ≤ 1 is read as a fraction (0.1 → 10%); otherwise as a percent (10 → 10%).
     let frac = if s.contains('%') || raw > 1.0 {
         raw / 100.0
     } else {
@@ -88,9 +51,6 @@ fn parse_percent(s: &str) -> Result<f64, String> {
     }
 }
 
-/// Deterministically picks `frac` of `total` items, evenly spread across the whole range (so a 10%
-/// benchmark samples the album start-to-end rather than just its first tracks). Returns the chosen
-/// indices in ascending order.
 fn spread_indices(total: usize, frac: f64) -> Vec<usize> {
     let count = ((total as f64 * frac).round() as usize).clamp(1, total.max(1));
     (0..count)
@@ -98,8 +58,6 @@ fn spread_indices(total: usize, frac: f64) -> Vec<usize> {
         .collect()
 }
 
-/// Renders `subset` of `album` serially, `passes` times, and reports render performance. No FLAC or
-/// temp files — a clean single-threaded throughput/realtime measurement for the current engine build.
 fn run_benchmark(
     data: &dyn SoundData,
     album: &[(u32, String)],
@@ -120,14 +78,8 @@ fn run_benchmark(
         if is_gba { "GBA" } else { "DS/other" },
     );
 
-    // THE benchmark renders on a fixed 4-thread pool (canonical config in CLAUDE.md), so the
-    // throughput number is reproducible across machines with ≥4 cores rather than scaling with
-    // `available_parallelism`. It goes through the exact same `parallel_render` path as the FLAC
-    // export, just counting frames instead of writing PCM.
     const BENCH_THREADS: usize = 4;
 
-    // Warm up caches/JIT-free codegen paths with one untimed pass, then time three passes and
-    // report the median (rendering is deterministic, so variance is pure scheduling noise).
     let render_pass = || -> (u64, std::time::Duration) {
         let frames = AtomicU64::new(0);
         let t0 = Instant::now();
@@ -137,7 +89,7 @@ fn run_benchmark(
         (frames.load(Ordering::Relaxed), t0.elapsed())
     };
 
-    let _ = render_pass(); // warmup
+    let _ = render_pass();
     const PASSES: usize = 3;
     let mut runs: Vec<(u64, f64)> = Vec::with_capacity(PASSES);
     for p in 0..PASSES {
@@ -164,8 +116,6 @@ fn run_benchmark(
     ExitCode::SUCCESS
 }
 
-/// The engine's high-quality preset for whichever console `data` came from, together with whether
-/// that console is the GBA (callers label their output with it).
 pub fn high_quality_preset(data: &dyn SoundData) -> (PerDeviceSettings, bool) {
     let is_gba = data.as_any().downcast_ref::<GbaRom>().is_some();
     let config = if is_gba {
@@ -176,9 +126,6 @@ pub fn high_quality_preset(data: &dyn SoundData) -> (PerDeviceSettings, bool) {
     (config, is_gba)
 }
 
-/// The album order for an archive: the curated `[{ "songId", "title" }]` JSON's array order,
-/// restricted to song ids the archive can actually play, truncated to the first `limit` entries.
-/// The `Err` string is a finished, printable message.
 pub fn album_order(
     data: &dyn SoundData,
     names_json: &Path,
@@ -211,8 +158,6 @@ pub fn album_order(
     Ok(album)
 }
 
-/// Renders one song to stereo frames using the shared controller fade policy (one loop then a
-/// 3-second fade, capped at 480s), applying the same 0.5 headroom gain as the app's WAV export.
 pub fn render_song(
     data: &dyn SoundData,
     song_id: u32,
@@ -234,12 +179,10 @@ pub fn render_song(
         let chunk = &mut buf[..2 * n];
         controller.fill(chunk, config);
 
-        // The controller has already applied the fade gain; just add the export headroom.
         for frame in chunk.chunks_exact(2) {
             out.push((frame[0] * 0.5, frame[1] * 0.5));
             sample += 1;
         }
-        // The fade reached silence at the end of this chunk: the song is done.
         if controller
             .take_messages()
             .any(|m| m == PlaybackEvent::Finished)
@@ -250,10 +193,6 @@ pub fn render_song(
     out
 }
 
-/// Renders the given album positions in parallel on a fixed `threads`-wide rayon pool — the one
-/// render code path shared by the FLAC export and `--benchmark`. `on_track` runs on the worker
-/// with each rendered track's `(index, (songId, title), frames, worker)`, where `worker`
-/// (`0..threads`, from [`rayon::current_thread_index`]) indexes a per-worker progress bar.
 fn parallel_render<F>(
     data: &dyn SoundData,
     album: &[(u32, String)],
@@ -277,19 +216,16 @@ fn parallel_render<F>(
     });
 }
 
-/// `dir/trk_{i:05}.pcm` — the per-track interleaved-i16 scratch file for album position `i`.
 fn track_path(dir: &Path, i: usize) -> PathBuf {
     dir.join(format!("trk_{i:05}.pcm"))
 }
 
-/// Reinterprets a little-endian byte buffer as interleaved i16 samples.
 fn bytes_to_i16(raw: &[u8]) -> Vec<i16> {
     raw.chunks_exact(2)
         .map(|b| i16::from_le_bytes([b[0], b[1]]))
         .collect()
 }
 
-/// The interleaved-i16 sub-slice of one track with leading and trailing near-silent frames removed.
 fn trim_silence(samples: &[i16]) -> &[i16] {
     let frames = samples.len() / 2;
     let silent =
@@ -316,7 +252,6 @@ pub fn run(args: Args) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    // High-quality preset for the archive's console.
     let (config, is_gba) = high_quality_preset(&*data);
 
     let album = match album_order(&*data, &args.names_json, args.limit) {
@@ -327,7 +262,6 @@ pub fn run(args: Args) -> ExitCode {
         }
     };
 
-    // Benchmark mode: render a deterministic slice of the album and report performance; no FLAC.
     if let Some(pct) = &args.benchmark {
         let frac = match parse_percent(pct) {
             Ok(f) => f,
@@ -353,8 +287,6 @@ pub fn run(args: Args) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // --- Parallel render: each album position -> its own interleaved-i16 PCM file, through the
-    // shared `parallel_render` path (also used by `--benchmark`). ---
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -405,9 +337,6 @@ pub fn run(args: Args) -> ExitCode {
 
     let gap_frames = (args.max_silence.max(0.0) * SR as f32) as usize;
 
-    // --- Pass 1: measure each track's loudness in parallel (one EbuR128 state per track), then
-    // combine. Integrated loudness gates out the inter-song silence, so per-track measurement of the
-    // trimmed cores matches measuring the whole concatenated album. ---
     let measure = mp.add(ProgressBar::new(album.len() as u64));
     measure.set_style(
         ProgressStyle::with_template("  measure [{bar:32.yellow/blue}] {pos}/{len}")
@@ -439,10 +368,7 @@ pub fn run(args: Args) -> ExitCode {
     let gain_db = TARGET_LUFS - loudness;
     let gain = (10f64).powf(gain_db / 20.0) as f32;
 
-    // --- Pass 2: apply the gain and encode the FLAC. The FLAC bitstream is serial, but flac-codec's
-    // `rayon` feature compresses the channels in parallel internally, so the per-track feed loop
-    // stays sequential while the heavy compression is multithreaded. ---
-    let _ = fs::remove_file(&args.out); // FlacSampleWriter::create refuses to overwrite
+    let _ = fs::remove_file(&args.out);
     let mut writer = match FlacSampleWriter::create(&args.out, Options::default(), SR, 16, 2, None)
     {
         Ok(w) => w,

@@ -1,13 +1,9 @@
-//! Minimal 16-bit PCM stereo WAV (RIFF) encoder, used for the in-app "export to WAV" feature.
-//! No external dependency — mirrors the legacy `WavEncoder`.
-
-/// Encodes interleaved stereo `f32` samples (range roughly -1..1) into a 16-bit PCM WAV file.
 pub fn encode_stereo_i16(samples: &[(f32, f32)], sample_rate: u32) -> Vec<u8> {
     let channels: u16 = 2;
     let bits_per_sample: u16 = 16;
     let byte_rate = sample_rate * u32::from(channels) * u32::from(bits_per_sample) / 8;
     let block_align = channels * bits_per_sample / 8;
-    let data_len = (samples.len() * 2 * 2) as u32; // frames * channels * 2 bytes
+    let data_len = (samples.len() * 2 * 2) as u32;
 
     let mut out = Vec::with_capacity(44 + data_len as usize);
     out.extend_from_slice(b"RIFF");
@@ -15,8 +11,8 @@ pub fn encode_stereo_i16(samples: &[(f32, f32)], sample_rate: u32) -> Vec<u8> {
     out.extend_from_slice(b"WAVE");
 
     out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
     out.extend_from_slice(&channels.to_le_bytes());
     out.extend_from_slice(&sample_rate.to_le_bytes());
     out.extend_from_slice(&byte_rate.to_le_bytes());

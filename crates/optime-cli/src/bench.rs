@@ -1,15 +1,3 @@
-//! Offline timing harness for the sinc resampler hot path.
-//!
-//! Renders a fixed wall of audio for a given SSEQ at a chosen sinc tap count and reports the
-//! real-time factor (rendered seconds / wall seconds). A factor well above 1× means the synth
-//! has real-time headroom; below 1× means it cannot keep up and the audio callback will underrun.
-//!
-//! Defaults to SSEQ 1025 from `demos/pokemon-platinum.sdat` at 64 taps (per side). Run it
-//! `--release` or the numbers are meaningless.
-//!
-//! The impulse gather is portable SIMD, built with `target-cpu=native` (see `.cargo/config.toml`)
-//! so it lowers to the host's widest vector instructions.
-
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -22,10 +10,8 @@ use optime_core::{
 #[derive(ClapArgs)]
 #[command(about = "Time the sinc resampler hot path and report the real-time factor.")]
 pub struct Args {
-    /// The SSEQ to render.
     #[arg(default_value_t = 1025)]
     sseq_id: u32,
-    /// Sinc taps per side.
     #[arg(default_value_t = 64)]
     half_taps: usize,
 }
@@ -39,7 +25,6 @@ pub fn run(args: Args) -> ExitCode {
     );
     let bytes = std::fs::read(path).expect("read pokemon-platinum.sdat");
     let archives = load_all(&bytes);
-    // Pick the first archive that actually contains the requested SSEQ.
     let data = archives
         .iter()
         .find(|s| SynthController::new(48_000.0, &***s, sseq_id).is_some())
@@ -49,7 +34,6 @@ pub fn run(args: Args) -> ExitCode {
     let render_secs = 20.0;
     let total = (sr * render_secs) as u64;
 
-    // `half_taps` maps to the settings-level `sinc_taps` (total taps = 2 × half-taps).
     let sinc_taps = half_taps * 2;
     for (name, instrument_resample) in [
         (
@@ -87,12 +71,9 @@ pub fn run(args: Args) -> ExitCode {
             eprintln!("SSEQ {sseq_id} not found");
             return ExitCode::FAILURE;
         };
-        // Render through `fill` (the block path the app's audio callback uses), in chunks the
-        // size of a typical device buffer.
         let mut buf = vec![0.0f32; 2 * 1024];
         let chunks = |samples: u64| samples.div_ceil(1024);
 
-        // Warm up the tables / steady-state polyphony before timing.
         for _ in 0..chunks(sr as u64) {
             controller.fill(&mut buf, &config);
         }

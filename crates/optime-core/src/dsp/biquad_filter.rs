@@ -1,23 +1,15 @@
-//! Cascaded biquad filter, ported from the original `dsp.js` (itself based on NAudio).
-
 use core::f64::consts::PI;
 
 use crate::waveform::Sample;
 
-/// A cascade of identical second-order (biquad) filter sections.
-///
-/// `order` must be even; the cascade contains `order / 2` sections.
 #[derive(Debug, Clone)]
 pub struct BiquadFilter {
-    // Normalized coefficients (computed in `f64`, stored in the sample width so the per-sample
-    // `transform` runs entirely in `f32` with no widening).
     a0: f32,
     a1: f32,
     a2: f32,
     a3: f32,
     a4: f32,
 
-    // Per-section state.
     x1: Vec<f32>,
     x2: Vec<f32>,
     y1: Vec<f32>,
@@ -25,10 +17,6 @@ pub struct BiquadFilter {
 }
 
 impl BiquadFilter {
-    /// Creates a filter of the given (even) `order` with raw, un-normalized coefficients.
-    ///
-    /// # Panics
-    /// Panics if `order` is odd.
     pub fn new(order: usize, aa0: f64, aa1: f64, aa2: f64, b0: f64, b1: f64, b2: f64) -> Self {
         assert!(order.is_multiple_of(2), "order not divisible by 2");
         let num_cascade = order / 2;
@@ -47,13 +35,11 @@ impl BiquadFilter {
         filter
     }
 
-    /// Number of cascaded sections.
     #[inline]
     pub fn num_cascade(&self) -> usize {
         self.x1.len()
     }
 
-    /// Clears all filter state.
     pub fn reset_state(&mut self) {
         for v in self
             .x1
@@ -66,15 +52,6 @@ impl BiquadFilter {
         }
     }
 
-    /// Filters a block of consecutive samples in place through the whole cascade, entirely in the
-    /// [`Sample`] width — the coefficients and per-section state are stored as `f32`, so no value is
-    /// widened to `f64`.
-    ///
-    /// The cascade is walked section by section, each running over the whole block before the next
-    /// begins. Every section is an independent recurrence that reads only the previous section's
-    /// output, so this produces exactly the same numbers as pushing each sample through all the
-    /// sections in turn, but the four state values stay in registers for the length of the block
-    /// instead of being loaded from and stored to their `Vec`s once per sample.
     pub fn transform_block(&mut self, block: &mut [Sample]) {
         let (a0, a1, a2, a3, a4) = (self.a0, self.a1, self.a2, self.a3, self.a4);
         for i in 0..self.num_cascade() {
@@ -93,7 +70,6 @@ impl BiquadFilter {
         }
     }
 
-    /// Processes one sample through the whole cascade. A one-sample [`Self::transform_block`].
     #[inline]
     pub fn transform(&mut self, in_sample: Sample) -> Sample {
         let mut block = [in_sample];
@@ -101,9 +77,6 @@ impl BiquadFilter {
         block[0]
     }
 
-    /// Sets and normalizes the filter coefficients. The normalization divides are done in `f64`
-    /// (the setters below build the raw coefficients from trig/pow in `f64`) and the results are
-    /// narrowed once into the `f32` coefficient store the per-sample `transform` reads.
     pub fn set_coefficients(&mut self, aa0: f64, aa1: f64, aa2: f64, b0: f64, b1: f64, b2: f64) {
         self.a0 = (b0 / aa0) as f32;
         self.a1 = (b1 / aa0) as f32;
@@ -112,7 +85,6 @@ impl BiquadFilter {
         self.a4 = (aa2 / aa0) as f32;
     }
 
-    /// Configures this filter as a low-pass with the given cutoff and Q.
     pub fn set_low_pass(&mut self, sample_rate: f64, cutoff: f64, q: f64) {
         let w0 = 2.0 * PI * cutoff / sample_rate;
         let cos_w0 = w0.cos();
@@ -123,7 +95,6 @@ impl BiquadFilter {
         self.set_coefficients(1.0 + alpha, -2.0 * cos_w0, 1.0 - alpha, b0, b1, b2);
     }
 
-    /// Configures this filter as a high-pass with the given cutoff and Q.
     pub fn set_high_pass(&mut self, sample_rate: f64, cutoff: f64, q: f64) {
         let w0 = 2.0 * PI * cutoff / sample_rate;
         let cos_w0 = w0.cos();
@@ -134,7 +105,6 @@ impl BiquadFilter {
         self.set_coefficients(1.0 + alpha, -2.0 * cos_w0, 1.0 - alpha, b0, b1, b2);
     }
 
-    /// Configures this filter as a peaking EQ with the given centre frequency, Q and gain (dB).
     pub fn set_peaking_eq(&mut self, sample_rate: f64, centre: f64, q: f64, db_gain: f64) {
         let w0 = 2.0 * PI * centre / sample_rate;
         let cos_w0 = w0.cos();
@@ -150,11 +120,6 @@ impl BiquadFilter {
         );
     }
 
-    /// Configures this filter as a high-shelf with the given corner frequency, Q and gain (dB).
-    ///
-    /// The cascade's `num_cascade` sections each take `db_gain / num_cascade`, so the total shelf
-    /// gain is `db_gain` regardless of order — a higher order only steepens the transition.
-    /// (RBJ cookbook high-shelf, Q form.)
     pub fn set_high_shelf(&mut self, sample_rate: f64, corner: f64, q: f64, db_gain: f64) {
         let per_section_db = db_gain / self.num_cascade().max(1) as f64;
         let a = 10f64.powf(per_section_db / 40.0);
@@ -171,50 +136,36 @@ impl BiquadFilter {
         self.set_coefficients(aa0, aa1, aa2, b0, b1, b2);
     }
 
-    /// Convenience constructor for a high-shelf filter.
     pub fn high_shelf(order: usize, sample_rate: f64, corner: f64, q: f64, db_gain: f64) -> Self {
         let mut f = Self::new(order, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         f.set_high_shelf(sample_rate, corner, q, db_gain);
         f
     }
 
-    /// Convenience constructor for a low-pass filter.
     pub fn low_pass(order: usize, sample_rate: f64, cutoff: f64, q: f64) -> Self {
         let mut f = Self::new(order, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         f.set_low_pass(sample_rate, cutoff, q);
         f
     }
 
-    /// Convenience constructor for a high-pass filter.
     pub fn high_pass(order: usize, sample_rate: f64, cutoff: f64, q: f64) -> Self {
         let mut f = Self::new(order, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         f.set_high_pass(sample_rate, cutoff, q);
         f
     }
 
-    /// Convenience constructor for a peaking EQ filter.
     pub fn peaking_eq(order: usize, sample_rate: f64, centre: f64, q: f64, db_gain: f64) -> Self {
         let mut f = Self::new(order, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         f.set_peaking_eq(sample_rate, centre, q, db_gain);
         f
     }
 
-    // ─── Analysis ────────────────────────────────────────────────────────────────────────────
-
-    /// Evaluates the frequency response of the full cascade at digital frequency
-    /// `w_norm ∈ [0, π]` (0 = DC, π = Nyquist).
-    ///
-    /// Returns `(magnitude, phase_radians)`.  The cascade raises the single-section response
-    /// to the power `num_cascade`.
     pub fn frequency_response(&self, w_norm: f64) -> (f64, f64) {
         let cos_w = w_norm.cos();
         let sin_w = w_norm.sin();
         let cos_2w = (2.0 * w_norm).cos();
         let sin_2w = (2.0 * w_norm).sin();
 
-        // One biquad section: H(z) = (a0 + a1·z⁻¹ + a2·z⁻²) / (1 + a3·z⁻¹ + a4·z⁻²).
-        // Evaluate numerator and denominator at z = e^{jw}. The coefficients are stored as `f32`;
-        // widen them here for the (analysis-only) `f64` response computation.
         let (a0, a1, a2) = (f64::from(self.a0), f64::from(self.a1), f64::from(self.a2));
         let (a3, a4) = (f64::from(self.a3), f64::from(self.a4));
         let n_re = a0 + a1 * cos_w + a2 * cos_2w;
@@ -227,29 +178,20 @@ impl BiquadFilter {
             return (f64::INFINITY, 0.0);
         }
 
-        // H_section = N / D (complex division).
         let h_re = (n_re * d_re + n_im * d_im) / d_sq;
         let h_im = (n_im * d_re - n_re * d_im) / d_sq;
 
         let h_mag = (h_re * h_re + h_im * h_im).sqrt();
         let h_phase = h_im.atan2(h_re);
 
-        // Cascade: |H^n| = |H|^n, arg(H^n) = n·arg(H).
         let nc = self.num_cascade() as f64;
         (h_mag.powf(nc), h_phase * nc)
     }
 
-    /// Returns the two poles of one biquad section as `(re, im)` pairs.
-    ///
-    /// For a cascaded filter each pole has multiplicity `num_cascade`.  Roots of
-    /// `z² + a3·z + a4 = 0`.
     pub fn poles(&self) -> [(f64, f64); 2] {
         quadratic_roots(1.0, f64::from(self.a3), f64::from(self.a4))
     }
 
-    /// Returns the two zeros of one biquad section as `(re, im)` pairs.
-    ///
-    /// Roots of `a0·z² + a1·z + a2 = 0`.
     pub fn zeros(&self) -> [(f64, f64); 2] {
         if self.a0.abs() < 1e-15 {
             return [(0.0, 0.0); 2];
@@ -258,7 +200,6 @@ impl BiquadFilter {
     }
 }
 
-/// Computes the two roots of `a·z² + b·z + c = 0` as `(re, im)` pairs.
 fn quadratic_roots(a: f64, b: f64, c: f64) -> [(f64, f64); 2] {
     let p = b / a;
     let q = c / a;
@@ -276,15 +217,10 @@ fn quadratic_roots(a: f64, b: f64, c: f64) -> [(f64, f64); 2] {
 mod tests {
     use super::*;
 
-    /// A block of any length must give bit-identical results to feeding the same samples through
-    /// one at a time. This is what lets the cascade run section-major (each section over the whole
-    /// block, keeping its state in registers) instead of sample-major.
     #[test]
     fn transform_block_matches_per_sample() {
         use crate::dsp::block::{TEST_BLOCK_LENGTHS, test_signal};
 
-        // Every cascade depth the engine actually builds: master shelf 2, crossover and high-band
-        // split 4, PSG crunch compensation 6.
         for order in [2, 4, 6] {
             for n in TEST_BLOCK_LENGTHS {
                 let signal = test_signal(4 * n);
@@ -318,7 +254,6 @@ mod tests {
 
     #[test]
     fn low_pass_passes_dc() {
-        // A low-pass filter should converge to unity gain on a DC (constant) input.
         let mut f = BiquadFilter::low_pass(2, 48000.0, 1000.0, 0.707);
         let mut out = 0.0;
         for _ in 0..2000 {
@@ -329,7 +264,6 @@ mod tests {
 
     #[test]
     fn high_pass_blocks_dc() {
-        // A high-pass filter should reject DC, settling toward zero.
         let mut f = BiquadFilter::high_pass(2, 48000.0, 1000.0, 0.707);
         let mut out = 0.0;
         for _ in 0..2000 {
@@ -345,7 +279,6 @@ mod tests {
             f.transform(1.0);
         }
         f.reset_state();
-        // First sample after reset matches a fresh filter's first sample.
         let mut fresh = BiquadFilter::low_pass(2, 48000.0, 1000.0, 0.707);
         assert_eq!(f.transform(1.0), fresh.transform(1.0));
     }
@@ -354,8 +287,6 @@ mod tests {
     fn low_pass_dc_frequency_response_is_unity() {
         let f = BiquadFilter::low_pass(4, 48000.0, 1000.0, 0.707);
         let (mag, _) = f.frequency_response(0.0);
-        // The coefficients are stored as `f32`; the ~1e-7 rounding on each, squared by the order-4
-        // cascade, moves DC gain off exact unity by up to ~1e-6, so allow a hair more slack.
         assert!((mag - 1.0).abs() < 1e-5, "DC magnitude = {mag}");
     }
 
@@ -370,7 +301,6 @@ mod tests {
 
     #[test]
     fn high_shelf_boosts_highs_leaves_dc() {
-        // A +12 dB high-shelf: ~unity at DC, ~+12 dB (×3.98) at Nyquist, regardless of order.
         for order in [2usize, 4, 8] {
             let f = BiquadFilter::high_shelf(order, 48000.0, 4000.0, 0.707, 12.0);
             let (dc, _) = f.frequency_response(0.0);
@@ -386,7 +316,6 @@ mod tests {
 
     #[test]
     fn high_shelf_cut_attenuates_highs() {
-        // A −12 dB high-shelf attenuates Nyquist and leaves DC alone.
         let f = BiquadFilter::high_shelf(4, 48000.0, 4000.0, 0.707, -12.0);
         let (dc, _) = f.frequency_response(0.0);
         let (nyq, _) = f.frequency_response(std::f64::consts::PI);
@@ -400,22 +329,14 @@ mod tests {
 
     #[test]
     fn high_pass_nyquist_response_is_unity() {
-        // A high-pass well below Nyquist should pass Nyquist unchanged.
         let f = BiquadFilter::high_pass(2, 48000.0, 100.0, 0.707);
         let (mag, _) = f.frequency_response(std::f64::consts::PI);
         assert!((mag - 1.0).abs() < 1e-4, "Nyquist magnitude = {mag}");
     }
 
-    /// The `f32`-state cascade must stay numerically well-behaved at the worst-case cutoffs the
-    /// engine actually uses: the bass-mono crossover (~120 Hz — very close to DC at 48 kHz, the
-    /// regime where an IIR's `f32` state is most fragile) and the PSG-crunch compensation cascade.
-    /// A pure sinusoid through the filter must stay finite, bounded, and free of runaway growth,
-    /// and its settled gain must track the `f64` analytic response closely.
     #[test]
     fn f32_state_is_stable_at_low_cutoff_crossover() {
         let sr = 48_000.0;
-        // Crossover low-pass at 120 Hz (Butterworth Q), and a 14.5 kHz high-shelf-ish low-pass
-        // standing in for the PSG-comp cascade — both 4th order.
         for (mut f, cutoff) in [
             (
                 BiquadFilter::low_pass(4, sr, 120.0, core::f64::consts::FRAC_1_SQRT_2),
@@ -423,7 +344,6 @@ mod tests {
             ),
             (BiquadFilter::low_pass(4, sr, 14_534.8, 0.707), 14_534.8),
         ] {
-            // Drive a below-cutoff tone (passband) for a good while and check the output stays sane.
             let tone_hz = cutoff * 0.5;
             let mut peak = 0.0f32;
             let mut last = 0.0f32;
@@ -436,7 +356,6 @@ mod tests {
                 );
                 peak = peak.max(last.abs());
             }
-            // Passband tone: gain near unity, and certainly not blowing up.
             assert!(
                 peak < 1.5,
                 "cutoff {cutoff}: output peak {peak} suggests instability"
@@ -447,8 +366,6 @@ mod tests {
             );
             let _ = last;
 
-            // DC settling: a low-pass must converge to unity gain, and the poles stay inside the
-            // unit circle even with the coefficients rounded to `f32`.
             f.reset_state();
             let mut dc = 0.0f32;
             for _ in 0..8_000 {

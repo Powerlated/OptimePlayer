@@ -1,30 +1,6 @@
-//! The Game Boy Advance sound device: GBA ROMs running the MP2K ("Sappy" / `m4a`) engine,
-//! emulated from the `pret/pokeemerald` decompilation.
-//!
-//! Data flow within this folder:
-//!
-//! ```text
-//! .gba bytes        ─► rom::GbaRom (song table + headers)          — the archive
-//! GbaRom + song id  ─► GbaPlayer (this file — the synth glue)
-//! GbaPlayer::tick   ─► m4a_1::MPlayMain / m4a_1::SoundMain          — the faithful engine,
-//!                      driving m4a.rs's MusicPlayerInfo / SoundInfo / SoundChannel / CgbChannel
-//!                   ─► read the resolved channel state → SynthEvent stream → SynthController
-//! ```
-//!
-//! The engine ([`m4a`] = the `m4a.c` port, [`m4a_1`] = the `m4a_1.s` port, [`m4a_tables`] = the
-//! `m4a_tables.c` port) is a faithful transliteration that only mutates hardware state. Everything
-//! in *this* file is the minimal synth glue with no reference-source origin: driving the engine per
-//! VBlank, turning the resulting `SoundChannel`/`CgbChannel` state into `SynthEvent`s, decoding
-//! DirectSound PCM, and generating the PSG (square / noise / programmable-wave) sample data the
-//! hardware would produce in silicon.
-
 mod extract;
-/// Faithful transliteration of `pret/pokeemerald`'s `src/m4a.c` (structs + the C sound routines).
 pub mod m4a;
-/// Faithful transliteration of `src/m4a_1.s` (the hand-written ARM engine: `MPlayMain`, `ply_*`,
-/// `ChnVolSetAsm`, `SoundMain`/`SoundMainRAM`, `ply_lfos`, `TrackStop`), driving [`m4a`]'s structs.
 mod m4a_1;
-/// Faithful transliteration of `src/m4a_tables.c` (the `MidiKeyTo*` LUTs + helpers).
 pub mod m4a_tables;
 pub mod rom;
 
@@ -45,29 +21,20 @@ use m4a::{
 };
 use rom::ptr_to_offset;
 
-/// GBA CPU clock, in Hz.
 pub const GBA_CLOCK_RATE: u64 = 16_777_216;
 
-/// CPU cycles per LCD refresh — the MP2K engine runs once per VBlank (≈59.7275 Hz).
 pub const CYCLES_PER_FRAME: u64 = 280_896;
 
-/// The software mixer rate (`SOUND_MODE_FREQ_13379`) — the playback rate of fixed-frequency
-/// (`TONEDATA_TYPE_FIX`) voices and the rate every DirectSound voice is mixed at on hardware.
 pub const ENGINE_RATE: f64 = 13379.0;
 
-/// We run the full hardware channel-struct count rather than the game-configured `maxChans`
-/// (usually 5–8) so dense songs don't drop notes.
 const MAX_DS_CHANNELS: usize = m4a::MAX_DIRECTSOUND_CHANNELS;
 
-/// `SOUND_MODE_MASVOL` value every Pokémon game passes to `m4aSoundMode`.
 const MASTER_VOLUME: u8 = 12;
 
 const DS_MIXER_FULL_SCALE: f64 = 256.0;
 
 const CGB_FULL_SCALE_GAIN: f64 = 0.5;
 
-/// The synth-side identity of a hardware channel slot: which voice it drives and what we last told
-/// the [`SynthController`](crate::SynthController) about it.
 #[derive(Debug, Clone, Copy)]
 struct SlotVoice {
     voice: VoiceId,
@@ -78,40 +45,28 @@ struct SlotVoice {
     released: bool,
 }
 
-/// The GBA device player: the minimal glue driving the faithful engine and emitting `SynthEvent`s.
 pub struct GbaPlayer {
     rom: Arc<[u8]>,
     mp: MusicPlayerInfo,
     si: SoundInfo,
-    /// Per-hardware-slot voice bookkeeping (DirectSound then the four CGB channels).
     ds_slots: [Option<SlotVoice>; MAX_DS_CHANNELS],
     cgb_slots: [Option<SlotVoice>; 4],
     next_voice: VoiceId,
-    /// Last `(volMR, volML)` emitted as `TrackPan`, per track, so pan changes emit exactly once.
     last_pan: Vec<Option<(u8, u8)>>,
-    /// DirectSound sample cache: (wave address, DC-removed?) → decoded waveform (`None` = failure).
     waveform_cache: HashMap<(u32, bool), Option<Arc<Waveform>>>,
-    /// CGB programmable-wave cache.
     wave_cache: HashMap<u32, Arc<Waveform>>,
     square_waveforms: [Arc<Waveform>; 4],
     noise_waveforms: [Arc<Waveform>; 2],
-    /// Whether to subtract each DirectSound sample's DC offset (refreshed from config each tick).
     remove_dc: bool,
-    /// Last MP2K reverb amount emitted as `ReverbAmount`, so it is sent once (and again if it ever
-    /// changes). `None` until the first tick emits the song's amount.
     last_reverb: Option<u8>,
     finish_reported: bool,
 }
 
 impl GbaPlayer {
-    /// Binds song `song_id` from `rom` (mirrors `MPlayStart`). Returns `None` for empty/invalid
-    /// songs.
     pub fn new(rom: &GbaRom, song_id: u32) -> Option<GbaPlayer> {
         let header = rom.song_header(song_id)?;
         let data = rom.data.clone();
 
-        // Build the m4a `SongHeader` the engine wants, translating ROM-space pointers to offsets
-        // (Optime reads a byte slice, so `cmdPtr` and the voicegroup are offsets, not addresses).
         let mut song = SongHeader {
             trackCount: header.track_count,
             priority: header.priority,
@@ -137,8 +92,6 @@ impl GbaPlayer {
             masterVolume: MASTER_VOLUME,
             ..SoundInfo::default()
         };
-        // `MPlayStart` runs `m4aSoundMode(songHeader->reverb)` when the SET bit is present; its only
-        // Optime-visible effect is storing the reverb amount, applied here since `si` is built after.
         if let Some(reverb) = m4a::reverb_from_song_header(header.reverb) {
             si.reverb = reverb;
         }
@@ -173,8 +126,6 @@ impl GbaPlayer {
     ) {
         self.remove_dc = config.remove_sample_dc_offset;
 
-        // Announce the song's MP2K reverb amount once (and again only if it ever changes). The
-        // controller applies it as a mono feedback delay on the sampled bus.
         if self.last_reverb != Some(self.si.reverb) {
             self.last_reverb = Some(self.si.reverb);
             events.push(SynthEvent::ReverbAmount {
@@ -182,8 +133,6 @@ impl GbaPlayer {
             });
         }
 
-        // Reap voices the synthesizer stopped on its own (one-shot samples that ran out): detach the
-        // hardware channel so the engine stops driving it.
         for &(track, voice) in &feedback.ended_voices {
             for i in 0..MAX_DS_CHANNELS {
                 if self.ds_slots[i].is_some_and(|s| s.voice == voice && s.track == track) {
@@ -202,8 +151,6 @@ impl GbaPlayer {
         }
         feedback.ended_voices.clear();
 
-        // One VBlank: advance the tracks, then start any freshly-allocated notes (while their
-        // `SF_START` flag is still set), then step the envelopes, then emit the per-voice updates.
         let result = m4a_1::MPlayMain(&mut self.mp, &mut self.si, &self.rom);
         self.emit_track_pans(events);
         self.start_new_notes(events);
@@ -219,8 +166,6 @@ impl GbaPlayer {
         }
     }
 
-    /// Emits `TrackPan` for any track whose mixer volumes changed this frame (the normalized
-    /// left/right split; the per-voice volume carries the absolute level separately).
     fn emit_track_pans(&mut self, events: &mut Vec<SynthEvent>) {
         for t in 0..self.mp.tracks.len() {
             let (mr, ml) = (self.mp.tracks[t].volMR, self.mp.tracks[t].volML);
@@ -242,9 +187,6 @@ impl GbaPlayer {
         }
     }
 
-    /// Starts a voice for every channel `ply_note` just allocated (`SOUND_CHANNEL_SF_START` still
-    /// set, before `SoundMain` clears it). Decodes/generates the waveform; a channel whose sample
-    /// can't be produced (compressed/invalid) is silenced.
     fn start_new_notes(&mut self, events: &mut Vec<SynthEvent>) {
         for i in 0..MAX_DS_CHANNELS {
             if self.si.chans[i].statusFlags & m4a::SOUND_CHANNEL_SF_START == 0 {
@@ -325,8 +267,6 @@ impl GbaPlayer {
         }
     }
 
-    /// After `SoundMain`: emit per-voice volume/pitch changes, note releases, and stops for
-    /// channels the envelope shut off.
     fn emit_updates(&mut self, events: &mut Vec<SynthEvent>) {
         for i in 0..MAX_DS_CHANNELS {
             let Some(mut slot) = self.ds_slots[i] else {
@@ -370,7 +310,6 @@ impl GbaPlayer {
         }
     }
 
-    /// Decodes (and caches) the DirectSound wave at `wav_addr`.
     fn direct_sound_waveform(&mut self, wav_addr: u32) -> Option<Arc<Waveform>> {
         let key = (wav_addr, self.remove_dc);
         if let Some(cached) = self.waveform_cache.get(&key) {
@@ -380,8 +319,6 @@ impl GbaPlayer {
         let waveform = m4a::WaveData::read(&self.rom, wav_addr).map(|wav| {
             let raw = &self.rom[wav.data..wav.data + wav.size as usize];
             let mut data = decode_pcm8(raw);
-            // Real DirectSound output is AC-coupled; opt-in DC removal stops the voice thumping by
-            // its offset when the envelope opens/closes.
             if remove_dc {
                 dc_center(&mut data);
             }
@@ -399,12 +336,9 @@ impl GbaPlayer {
         waveform
     }
 
-    /// Fetches/generates the waveform for a CGB voice (from its `type_` + `wavePointer`).
     fn cgb_waveform(&mut self, c: &CgbChannel) -> Option<Arc<Waveform>> {
         match c.type_ & TONEDATA_TYPE_CGB {
-            // Square 1 / 2: duty select in the low bits of the tone's wave field.
             1 | 2 => Some(self.square_waveforms[(c.wavePointer & 3) as usize].clone()),
-            // Programmable wave: 32 packed 4-bit samples in ROM.
             3 => {
                 if let Some(cached) = self.wave_cache.get(&c.wavePointer) {
                     return Some(cached.clone());
@@ -424,14 +358,11 @@ impl GbaPlayer {
                 self.wave_cache.insert(c.wavePointer, waveform.clone());
                 Some(waveform)
             }
-            // Noise: short (7-bit) sequence selected by the low bit.
             _ => Some(self.noise_waveforms[usize::from(c.wavePointer & 1 != 0)].clone()),
         }
     }
 }
 
-/// Emits `VoiceVolume`/`VoicePitch` when they changed and `NoteReleased` when the channel entered
-/// its release (`SF_STOP`), updating `slot` bookkeeping.
 fn update_voice(
     events: &mut Vec<SynthEvent>,
     slot: &mut SlotVoice,
@@ -455,7 +386,6 @@ fn update_voice(
             pitch: VoicePitch::DataRateHz(rate),
         });
     }
-    // The gate expired / track ended: the note is no longer held (release tail keeps sounding).
     if released && !slot.released {
         slot.released = true;
         events.push(SynthEvent::NoteReleased {
@@ -465,8 +395,6 @@ fn update_voice(
     }
 }
 
-/// The DirectSound playback rate (data-samples/second): fixed-rate voices play at the mixer rate,
-/// the rest at the `MidiKeyToFreq` result the engine stored.
 fn ds_rate(type_: u8, frequency: u32) -> f64 {
     if type_ & TONEDATA_TYPE_FIX != 0 {
         ENGINE_RATE
@@ -475,14 +403,10 @@ fn ds_rate(type_: u8, frequency: u32) -> f64 {
     }
 }
 
-/// The data rate (sample values per second) of a CGB voice given its frequency-register value.
 fn cgb_data_rate(ch: u8, reg: u32) -> f64 {
     match ch {
-        // Tone frequency 131072/(2048−x) Hz × 8 samples per duty period.
         1 | 2 => 8.0 * 131072.0 / (2048.0 - reg.min(2047) as f64),
-        // 32-sample wave at 2097152/(2048−x) samples per second.
         3 => 2097152.0 / (2048.0 - reg.min(2047) as f64),
-        // NR43: clock = 524288 / r / 2^(s+1), where r=0 means r=0.5.
         _ => {
             let r = (reg & 7) as f64;
             let s = (reg >> 4) & 0xF;
@@ -492,7 +416,6 @@ fn cgb_data_rate(ch: u8, reg: u32) -> f64 {
     }
 }
 
-/// Removes a waveform's DC offset (real GB/GBA audio is AC-coupled).
 fn dc_center(data: &mut [f32]) {
     if data.is_empty() {
         return;
@@ -503,13 +426,12 @@ fn dc_center(data: &mut [f32]) {
     }
 }
 
-/// The four GB square duty cycles as 8-sample loops.
 fn build_square_waveforms() -> [Arc<Waveform>; 4] {
     const DUTIES: [[f32; 8]; 4] = [
-        [-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5], // 12.5%
-        [0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5],  // 25%
-        [0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5],    // 50%
-        [-0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, -0.5],      // 75%
+        [-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5],
+        [0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5],
+        [0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5, 0.5],
+        [-0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, -0.5],
     ];
     DUTIES.map(|duty| {
         let mut data = duty.to_vec();
@@ -520,7 +442,6 @@ fn build_square_waveforms() -> [Arc<Waveform>; 4] {
     })
 }
 
-/// The 15-bit and 7-bit LFSR noise sequences as looping ±0.5 sample data.
 fn build_noise_waveforms() -> [Arc<Waveform>; 2] {
     let generate = |seven_bit: bool| {
         let len = if seven_bit { 127 } else { 32767 };

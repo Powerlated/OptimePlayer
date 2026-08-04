@@ -1,27 +1,3 @@
-//! Chord annotation: the maintainer dev-tool that turns the piano roll into a labelling platform.
-//!
-//! Hand-labelled measure-level chords are the only trustworthy signal on real music. The heuristic
-//! reference (`ml/src/estimate.rs`) is not ground truth — it is a chroma-template matcher, and
-//! scoring against it is structurally biased toward the chroma-input backbone — while synthetic
-//! validation has saturated (m02: 99.7%) and no longer discriminates. Labels authored here are the
-//! eval set that replaces both, and later a real-data fine-tune stage.
-//!
-//! Labels are authored **blank-slate**, never pre-filled from a model's predictions: this set judges
-//! the model, so it must not be anchored to the model's own guesses.
-//!
-//! ## Shape
-//!
-//! * [`Bounce`] / [`BounceJob`] — the whole song rendered to memory. Annotation needs random access
-//!   (hear this bar, loop those two, scrub back); the engine has no seek, so the song is rendered
-//!   once and every seek becomes an index. Rendered incrementally, never on a thread — web has none.
-//! * [`model`] — the data model and its JSON, the contract with `optime-ml`.
-//! * [`AnnotationState`] — session state: what's loaded, what's selected, what's unsaved.
-//!
-//! **Runs on web as well as native.** Labelling needs nothing but the engine; only where the JSON
-//! lands differs — the source tree (`ml/annotations/`, the training data of record) on native, a
-//! browser download plus an eframe-storage working copy on web. The schema is identical either way,
-//! which is the point of the format being the contract rather than the code path.
-
 mod bounce;
 pub mod chord_voice;
 pub mod model;
@@ -35,20 +11,11 @@ use std::sync::Arc;
 use crate::piano_roll::Grid;
 use model::{GameAnnotations, SongAnnotation, Span};
 
-/// Where hand-authored labels live: `ml/annotations/` next to the code that trains on them.
-///
-/// They are **training data, not app metadata** — which is why they sit under `ml/` rather than
-/// beside [`crate::song_names`]'s cosmetic tables — and they are **git-tracked**: `ml/.gitignore`
-/// excludes `/data` and `/models` because those regenerate from a seed or a run. These don't. They
-/// are hours of listening and cannot be reproduced by any command.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn source_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ml/annotations")
 }
 
-/// The annotation filename for a source archive: its stem, `.json`. Mirrors
-/// [`crate::song_names`]'s derivation so the two dev-tools name a game the same way. Also names the
-/// browser download on web.
 pub fn filename_for(source: &str) -> String {
     let stem = source.rsplit_once('.').map_or(source, |(s, _)| s);
     let mut out = String::with_capacity(stem.len());
@@ -65,10 +32,6 @@ pub fn filename_for(source: &str) -> String {
     format!("{}.json", out.trim_matches('_'))
 }
 
-/// Reads a game's annotations. `Ok(None)` when the file doesn't exist yet (a game nobody has
-/// annotated is not an error); `Err` only for a file that exists but can't be read or parsed —
-/// which must never be silently swallowed, or a parse slip would look like "no labels" and the next
-/// save would overwrite hours of work.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_file(path: &std::path::Path) -> Result<Option<GameAnnotations>, String> {
     if !path.exists() {
@@ -81,8 +44,6 @@ pub fn load_file(path: &std::path::Path) -> Result<Option<GameAnnotations>, Stri
         .map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
-/// Writes a game's annotations, creating the directory if needed. Pretty-printed: these are
-/// committed, and a one-line blob would make every diff unreadable.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_file(path: &std::path::Path, file: &GameAnnotations) -> Result<(), String> {
     if let Some(dir) = path.parent() {
@@ -92,56 +53,22 @@ pub fn save_file(path: &std::path::Path, file: &GameAnnotations) -> Result<(), S
     std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-/// Session state for annotation mode.
 pub struct AnnotationState {
-    /// Whether the mode is on. Session-only, never persisted — it's a maintainer tool, and leaving
-    /// it armed across restarts would be a trap.
     pub enabled: bool,
-    /// The current song rendered to memory, shared with the audio thread.
     pub bounce: Option<Arc<Bounce>>,
-    /// The song the current [`Self::bounce`] is for, so a song change invalidates it.
     pub bounce_for: Option<u32>,
-    /// The render in flight, stepped a slice per frame (see [`BounceJob`]).
     pub job: Option<BounceJob>,
-    /// Loaded labels for the current game, keyed by song id.
     pub songs: HashMap<u32, SongAnnotation>,
-    /// Source archive the loaded labels belong to; a different one means reload.
     pub loaded_for: Option<String>,
-    /// The selected `[start, end)` step range.
-    ///
-    /// This is the *only* notion of selection: a range can be chosen before any span exists there,
-    /// because blank-slate authoring writes nothing until a chord is actually given. "What is
-    /// selected" and "what is stored" are different questions, and only the first has an answer
-    /// until you pick a chord.
     pub pending_range: Option<(u32, u32)>,
-    /// Whether there are edits not yet written to disk.
     pub dirty: bool,
-    /// Beat snap instead of the default bar snap.
     pub beat_snap: bool,
-    /// Where the chord picker is open, in screen coordinates. `Some` right after a drag or a
-    /// right-click: the picker is the primary way to label, so it comes to the region rather than
-    /// making the eye travel to a toolbar and back for every bar.
     pub picker_at: Option<(f32, f32)>,
-    /// Set on the frame the picker opens, so the very click that opened it can't also dismiss it.
-    /// A right-click's press arrives in the same frame the popup first appears, and once the popup
-    /// is constrained away from a screen edge it no longer sits under the cursor — so "was the
-    /// press inside?" is the wrong question on frame one.
     pub picker_just_opened: bool,
-    /// Whether the picker's "quality uncertain" box is ticked; sticks across picks because
-    /// ambiguity usually comes in runs (a whole sparse section, not one bar).
     pub picker_uncertain: bool,
-    /// The chord under the cursor on the previous frame of the picker, so a hover only re-strikes
-    /// when the mouse moves to a *different* chord button — gliding within one cell stays silent.
-    /// Compared on `(root, quality)`, ignoring `quality_uncertain` (toggling the box isn't musical).
     pub picker_hovered: Option<model::Chord>,
-    /// Audition gain, user-controlled so a quiet reference can be lifted or a loud one tamed without
-    /// relabelling. Defaults to [`chord_voice::DEFAULT_GAIN`]; lives here so the slider keeps its
-    /// value across songs, and is pushed to the voicer each change.
     pub chord_gain: f32,
-    /// Which inversion auditioned chords voice in. 0 = root. Clamped to the chord's tone count by
-    /// the voicer, so a value set on a triad still does something reasonable on a seventh.
     pub chord_inversion: u8,
-    /// Last save/load message for the toolbar.
     pub status: String,
 }
 
@@ -169,8 +96,6 @@ impl Default for AnnotationState {
 }
 
 impl AnnotationState {
-    /// The roll's grid for a song: the device supplies steps-per-beat, the annotation supplies the
-    /// meter and pickup offset (defaults until it does).
     pub fn grid_for(&self, song_id: u32, steps_per_beat: f64) -> Grid {
         match self.songs.get(&song_id) {
             Some(a) => Grid {
@@ -185,7 +110,6 @@ impl AnnotationState {
         }
     }
 
-    /// The current song's annotation, created on first edit.
     pub fn song_mut(&mut self, song_id: u32) -> &mut SongAnnotation {
         self.songs
             .entry(song_id)
@@ -196,13 +120,10 @@ impl AnnotationState {
         self.songs.get(&song_id)
     }
 
-    /// Inserts a span, keeping `spans` sorted by start and evicting anything it fully covers.
-    /// Overlap is resolved in favour of the new span: the annotator's latest word wins.
     pub fn insert_span(&mut self, song_id: u32, span: Span) {
         let song = self.song_mut(song_id);
         song.spans
             .retain(|s| !(s.start_step >= span.start_step && s.end_step <= span.end_step));
-        // Trim neighbours that only partially overlap, so spans stay non-overlapping.
         for s in song.spans.iter_mut() {
             if s.start_step < span.start_step && s.end_step > span.start_step {
                 s.end_step = span.start_step;
@@ -217,7 +138,6 @@ impl AnnotationState {
         self.dirty = true;
     }
 
-    /// How many bars of a song carry a label, for the progress readout.
     pub fn labeled_bars(&self, song_id: u32, grid: Grid, total_steps: u32) -> (usize, usize) {
         let Some(bar_steps) = grid.bar_steps() else {
             return (0, 0);
@@ -240,8 +160,6 @@ impl AnnotationState {
         (done, total)
     }
 
-    /// Builds the file for the current game from the in-memory songs (sorted for a stable diff —
-    /// these are committed, and a re-ordering diff would bury the real edit).
     pub fn to_file(
         &self,
         source: String,
@@ -285,7 +203,6 @@ mod tests {
         let mut st = AnnotationState::default();
         st.insert_span(1, span(0, 96, 0));
         st.insert_span(1, span(192, 288, 7));
-        // Straddles the first span's tail and the gap: the older neighbour is trimmed, not dropped.
         st.insert_span(1, span(48, 192, 5));
         let spans = &st.song(1).unwrap().spans;
         assert_eq!(spans.len(), 3);
@@ -309,7 +226,6 @@ mod tests {
     #[test]
     fn progress_counts_bars_with_a_label() {
         let mut st = AnnotationState::default();
-        // 4 bars of 96 steps each.
         assert_eq!(st.labeled_bars(1, grid(), 384), (0, 4));
         st.insert_span(1, span(0, 96, 0));
         st.insert_span(1, span(192, 288, 7));
@@ -319,8 +235,8 @@ mod tests {
     #[test]
     fn grid_follows_the_annotation_then_falls_back() {
         let mut st = AnnotationState::default();
-        assert_eq!(st.grid_for(1, 48.0).beats_per_bar, 4); // default meter
-        assert_eq!(st.grid_for(1, 48.0).steps_per_beat, 48.0); // device's, always
+        assert_eq!(st.grid_for(1, 48.0).beats_per_bar, 4);
+        assert_eq!(st.grid_for(1, 48.0).steps_per_beat, 48.0);
         let s = st.song_mut(1);
         s.beats_per_bar = 3;
         s.grid_offset_steps = 24;

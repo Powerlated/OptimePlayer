@@ -1,5 +1,3 @@
-//! Integration tests that parse the real demo SDAT archives shipped in `demos/`.
-
 use std::path::PathBuf;
 
 use optime_core::{Sdat, load_all};
@@ -21,11 +19,9 @@ fn parses_super_mario_64_ds() {
     assert!(!sdats.is_empty(), "should find at least one SDAT");
     let sdat = &sdats[0];
 
-    // The sequence list and name dictionaries should be populated and consistent.
     assert!(!sdat.sseq_list.is_empty());
     assert_eq!(sdat.sseq_name_to_id.len(), sdat.sseq_id_to_name.len());
 
-    // The fixture's song must be present and round-trip name<->id.
     let id = sdat
         .sseq_name_to_id
         .get("NCS_BGM_PERFECT")
@@ -36,7 +32,6 @@ fn parses_super_mario_64_ds() {
         Some("NCS_BGM_PERFECT")
     );
 
-    // Its INFO record and the bank it references should resolve.
     let info = sdat.sseq_infos[id as usize].as_ref().unwrap();
     assert!(
         sdat.file(info.file_id).is_some(),
@@ -62,7 +57,6 @@ fn parses_multiple_demos() {
         assert!(!sdats.is_empty(), "{name}: expected an SDAT");
         let sdat = &sdats[0];
         assert!(!sdat.sseq_list.is_empty(), "{name}: expected sequences");
-        // Every listed sequence must have an INFO record.
         for &id in &sdat.sseq_list {
             assert!(sdat.sseq_infos[id as usize].is_some(), "{name}: id {id}");
         }
@@ -77,8 +71,6 @@ fn computes_song_lengths() {
     let ids = data.song_ids();
     assert!(!ids.is_empty());
 
-    // Each playable song should resolve to a finite, positive length under the 15-minute cap
-    // (the demo's songs all loop or end well before then).
     for &id in ids.iter().take(8) {
         let len = data
             .song_length_seconds(id)
@@ -92,8 +84,6 @@ fn computes_song_lengths() {
 
 #[test]
 fn lookahead_overview_collects_notes() {
-    // The look-ahead now runs the real device player and reads its `SynthEvent` stream; the
-    // whole-song `overview` should yield a non-empty note timeline with sane durations.
     let bytes = std::fs::read(demo_path("super-mario-64-ds.sdat")).unwrap();
     let archives = load_all(&bytes);
     let data = &*archives[0];
@@ -104,7 +94,6 @@ fn lookahead_overview_collects_notes() {
     assert!(!overview.notes.is_empty(), "the song should contain notes");
     assert!(overview.total_steps > 0);
     assert!(!overview.tempos.is_empty(), "at least the starting tempo");
-    // Every resolved note bar must fit inside the timeline.
     for n in &overview.notes {
         assert!(
             n.timestamp + n.duration <= overview.total_steps,

@@ -1,17 +1,5 @@
-//! The DSE volume envelope: a faithful transcription of `dc_envelope.c` from `pret/pmd-sky`.
-//!
-//! DSE envelopes are piecewise-linear *slides* in a 23-bit fixed-point volume domain
-//! (`current_volume`); the output level is `current_volume >> 23` (0..=127). A note moves
-//! ATTACK → HOLD → DECAY → SUSTAIN → DONE, and RELEASE → RELEASE_END once the note is released.
-//! Each phase's length comes from a 0..=127 parameter indexed into one of two duration tables and
-//! scaled to driver ticks by the driver's microseconds-per-tick.
-
-/// Microseconds per sound-driver tick: the driver's ~100 Hz alarm
-/// (`Snd_SetupAlarm(0x1474)` in `DseDriver_StartTickTimer`, i.e. `64 * 5236` cycles of the
-/// 33.51 MHz clock ≈ 10 ms). Phase durations are `table_value * 1000 / this`.
 pub const USEC_PER_DRIVER_TICK: i64 = 10_000;
 
-// Envelope states (`dc_envelope.h`); state 1 (CONST, a forced constant volume) is unused here.
 const OFF: u8 = 0;
 const DONE: u8 = 2;
 const ATTACK: u8 = 3;
@@ -21,7 +9,6 @@ const SUSTAIN: u8 = 6;
 const RELEASE: u8 = 7;
 const RELEASE_END: u8 = 8;
 
-/// `MUSIC_DURATION_LOOKUP_TABLE_1` (`u16[128]`), used when `slide_time_multiplier != 0`.
 #[rustfmt::skip]
 const DURATION_TABLE_1: [u16; 128] = [
     0, 1, 2, 3, 4, 5, 6, 7,
@@ -42,7 +29,6 @@ const DURATION_TABLE_1: [u16; 128] = [
     7710, 7970, 8240, 8520, 8800, 9090, 10000, 32767,
 ];
 
-/// `MUSIC_DURATION_LOOKUP_TABLE_2` (`u32[128]`), used when `slide_time_multiplier == 0`.
 #[rustfmt::skip]
 const DURATION_TABLE_2: [u32; 128] = [
     0, 4, 7, 10, 15, 21, 28, 36,
@@ -63,9 +49,6 @@ const DURATION_TABLE_2: [u32; 128] = [
     257242, 263093, 269029, 275050, 281157, 287351, 293632, 2147483647,
 ];
 
-/// The seven envelope parameters that matter, unpacked from a split's 16-byte
-/// `sound_envelope_parameters` block (`use_envelope`@0, `slide_time_multiplier`@1, then the
-/// time/level bytes at @0x8..0xF).
 #[derive(Debug, Clone, Copy)]
 pub struct EnvelopeParams {
     pub use_envelope: bool,
@@ -80,7 +63,6 @@ pub struct EnvelopeParams {
 }
 
 impl EnvelopeParams {
-    /// Reads the params from a split's raw 16-byte envelope block.
     pub fn from_block(b: &[u8; 16]) -> EnvelopeParams {
         EnvelopeParams {
             use_envelope: b[0] != 0,
@@ -96,9 +78,6 @@ impl EnvelopeParams {
     }
 }
 
-/// One note's running envelope. Build with [`SoundEnvelope::start`], advance once per driver tick
-/// with [`SoundEnvelope::tick`] (which returns the 0..=127 level), and begin the tail with
-/// [`SoundEnvelope::release`].
 #[derive(Debug, Clone)]
 pub struct SoundEnvelope {
     params: EnvelopeParams,
@@ -110,7 +89,6 @@ pub struct SoundEnvelope {
 }
 
 impl SoundEnvelope {
-    /// Starts the envelope for a new note (`UpdateTrackVolumeEnvelopes`).
     pub fn start(params: EnvelopeParams) -> SoundEnvelope {
         let mut e = SoundEnvelope {
             params,
@@ -139,24 +117,20 @@ impl SoundEnvelope {
                 }
             }
         } else {
-            // No envelope: hold full volume until released.
             e.state = OFF;
             e.current_volume = 0x3f80_0000;
         }
         e
     }
 
-    /// Whether this envelope uses the slide model (vs. a constant full-volume note).
     pub fn uses_envelope(&self) -> bool {
         self.params.use_envelope
     }
 
-    /// Whether the note has fully finished its release tail and the voice can be freed.
     pub fn is_finished(&self) -> bool {
         self.state == RELEASE_END
     }
 
-    /// Begins the release phase (`SoundEnvelope_Release`). A no-op for a non-envelope note.
     pub fn release(&mut self) {
         if self.state == OFF {
             return;
@@ -165,8 +139,6 @@ impl SoundEnvelope {
         self.state = RELEASE;
     }
 
-    /// `SoundEnvelope_SetSlide`: schedule a linear slide of `current_volume` to
-    /// `target_volume << 23` over the ticks given by `msec_tab_index`.
     fn set_slide(&mut self, target_volume: i32, msec_tab_index: i32) {
         if msec_tab_index == 0x7f {
             self.volume_delta = 0;
@@ -188,7 +160,6 @@ impl SoundEnvelope {
         };
     }
 
-    /// `SoundEnvelope_Tick`: advance one driver tick, returning the 0..=127 output level.
     pub fn tick(&mut self) -> i8 {
         if self.state > DONE {
             if self.ticks_left == 0 {
@@ -203,8 +174,6 @@ impl SoundEnvelope {
         (self.current_volume >> 23) as i8
     }
 
-    /// The state-machine transition when a phase's `ticks_left` hits zero. This mirrors the
-    /// fall-through `switch` in `SoundEnvelope_Tick` exactly.
     fn advance_phase(&mut self) {
         match self.state {
             ATTACK => {
@@ -230,7 +199,6 @@ impl SoundEnvelope {
         }
     }
 
-    /// HOLD-phase fall-through: into DECAY (setting the sustain floor), else SUSTAIN, else DONE.
     fn fall_through_hold(&mut self) {
         if self.params.decay_time != 0 {
             self.set_slide(
@@ -244,7 +212,6 @@ impl SoundEnvelope {
         self.fall_through_decay();
     }
 
-    /// DECAY-phase fall-through: into SUSTAIN, else DONE.
     fn fall_through_decay(&mut self) {
         if self.params.sustain_time != 0 {
             self.set_slide(0, self.params.sustain_time as i32);
@@ -266,8 +233,6 @@ mod tests {
 
     #[test]
     fn from_block_unpacks_fields() {
-        // use=1, mult=1, …, attack_begin=0, attack=0, decay=0x3c, sustain=0x69, hold=0,
-        // decay2=0x46, release=0x4b (program 12's split in bgm0001).
         let p = params([
             0x01, 0x01, 0x01, 0x03, 0x03, 0xff, 0xff, 0xff, 0x00, 0x00, 0x3c, 0x69, 0x00, 0x46,
             0x4b, 0xff,
@@ -282,11 +247,9 @@ mod tests {
 
     #[test]
     fn attack_rises_then_decays_to_sustain() {
-        // attack_time=40, decay_time=40, sustain_level=64, others 0; mult=1.
         let mut env =
             SoundEnvelope::start(params([1, 1, 0, 0, 0, 0, 0, 0, 0, 40, 40, 64, 0, 0, 60, 0]));
         let first = env.tick();
-        // Rises during attack.
         let mut peak = first;
         for _ in 0..2000 {
             peak = peak.max(env.tick());
@@ -295,7 +258,6 @@ mod tests {
             peak >= 120,
             "attack should approach full level, peaked at {peak}"
         );
-        // After enough ticks, decays toward the sustain level (64).
         let mut last = 127;
         for _ in 0..5000 {
             last = env.tick();
@@ -326,7 +288,6 @@ mod tests {
     fn non_envelope_holds_full_volume() {
         let mut env = SoundEnvelope::start(params([0; 16]));
         assert!(!env.uses_envelope());
-        // current_volume = 0x3f800000 -> level 0x7f.
         assert_eq!(env.tick(), 127);
         assert_eq!(env.tick(), 127);
     }

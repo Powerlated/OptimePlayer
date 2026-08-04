@@ -1,15 +1,7 @@
-//! Lookup tables copied from the DS BIOS / `pret/pokediamond` (via the original JS engine).
-//!
-//! These are reproduced verbatim; correctness of the synthesis depends on them being
-//! bit-identical to the hardware tables.
-
-/// Effective-attack remap for attack values >= 109. Indexed by `127 - attack`.
-/// From `pret/pokediamond`.
 pub const ATTACK_COEFF_TABLE: [i32; 20] = [
     0, 1, 5, 14, 26, 38, 51, 63, 73, 84, 92, 100, 109, 116, 123, 127, 132, 137, 143, 0,
 ];
 
-/// Decibel-square table used for velocity/ADSR volume calculation. From `pret/pokediamond`.
 pub const DECIBEL_SQUARE_TABLE: [i32; 128] = [
     -32768, -722, -721, -651, -601, -562, -530, -503, -480, -460, -442, -425, -410, -396, -383,
     -371, -360, -349, -339, -330, -321, -313, -305, -297, -289, -282, -276, -269, -263, -257, -251,
@@ -21,7 +13,6 @@ pub const DECIBEL_SQUARE_TABLE: [i32; 128] = [
     -13, -11, -10, -8, -7, -6, -4, -3, -1, 0,
 ];
 
-/// Volume table located in the DS ARM7 BIOS (copied from desmume).
 pub const GET_VOL_TABLE: [u8; 724] = [
     0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
     0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
@@ -71,16 +62,13 @@ pub const GET_VOL_TABLE: [u8; 724] = [
     0x7C, 0x7D, 0x7E, 0x7F,
 ];
 
-/// Quarter-wave sine table for LFO. From `pret/pokediamond`.
 pub const LFO_SIN_TABLE: [i32; 36] = [
     0, 6, 12, 19, 25, 31, 37, 43, 49, 54, 60, 65, 71, 76, 81, 85, 90, 94, 98, 102, 106, 109, 112,
     115, 117, 120, 122, 123, 125, 126, 126, 127, 127, 0, 0, 0,
 ];
 
-/// IMA-ADPCM index adjustment table.
 pub const ADPCM_INDEX_TABLE: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
 
-/// IMA-ADPCM step-size table.
 pub const ADPCM_STEP_TABLE: [i32; 89] = [
     0x0007, 0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E, 0x0010, 0x0011, 0x0013, 0x0015,
     0x0017, 0x0019, 0x001C, 0x001F, 0x0022, 0x0025, 0x0029, 0x002D, 0x0032, 0x0037, 0x003C, 0x0042,
@@ -92,7 +80,6 @@ pub const ADPCM_STEP_TABLE: [i32; 89] = [
     0x5771, 0x602F, 0x69CE, 0x7462, 0x7FFF,
 ];
 
-/// The eight PSG square-wave duty cycles, as raw waveform samples (8 samples each, looping).
 pub const SQUARE_WAVES: [[f32; 8]; 8] = [
     [-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5],
     [-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, 0.5, 0.5],
@@ -104,15 +91,12 @@ pub const SQUARE_WAVES: [[f32; 8]; 8] = [
     [-0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5],
 ];
 
-/// LFO sine lookup, faithfully reproducing `SND_SinIdx` from `pret/pokediamond` including the
-/// 8-bit sign-extension on the negative quadrants.
 pub fn snd_sin_idx(x: i32) -> i32 {
     if x < 0x20 {
         LFO_SIN_TABLE[x as usize]
     } else if x < 0x40 {
         LFO_SIN_TABLE[(0x40 - x) as usize]
     } else if x < 0x60 {
-        // (-table[x - 0x40]) << 24 >> 24  (sign-extend to 8 bits)
         ((-LFO_SIN_TABLE[(x - 0x40) as usize]) as i8) as i32
     } else {
         ((-LFO_SIN_TABLE[(0x20 - (x - 0x60)) as usize]) as i8) as i32

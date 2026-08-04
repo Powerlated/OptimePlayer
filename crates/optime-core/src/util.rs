@@ -1,22 +1,13 @@
-//! Small shared helpers: byte readers, a fixed-capacity ring buffer, and byte-pattern search.
-
-/// Reads a little-endian `u8` at `offset`, returning 0 if out of bounds.
-///
-/// The original engine read through a `DataView`, which throws on OOB; in practice the
-/// interpreter never reads past a track's `0xFF` terminator. Returning 0 keeps the audio
-/// thread panic-free without changing observable behavior on well-formed data.
 #[inline]
 pub fn read_u8(data: &[u8], offset: usize) -> u8 {
     data.get(offset).copied().unwrap_or(0)
 }
 
-/// Reads a little-endian `u16` at `offset`, returning 0 if out of bounds.
 #[inline]
 pub fn read_u16(data: &[u8], offset: usize) -> u16 {
     u16::from(read_u8(data, offset)) | (u16::from(read_u8(data, offset + 1)) << 8)
 }
 
-/// Reads a little-endian `u32` at `offset`, returning 0 if out of bounds.
 #[inline]
 pub fn read_u32(data: &[u8], offset: usize) -> u32 {
     u32::from(read_u8(data, offset))
@@ -25,13 +16,11 @@ pub fn read_u32(data: &[u8], offset: usize) -> u32 {
         | (u32::from(read_u8(data, offset + 3)) << 24)
 }
 
-/// Tests whether bit `bit` is set in `value`.
 #[inline]
 pub fn bit_test(value: u32, bit: u32) -> bool {
     value & (1 << bit) != 0
 }
 
-/// Finds every offset in `haystack` where `needle` occurs.
 pub fn search_for_sequence(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
     let mut out = Vec::new();
     if needle.is_empty() || haystack.len() < needle.len() {
@@ -45,24 +34,16 @@ pub fn search_for_sequence(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
     out
 }
 
-/// A fixed-capacity FIFO ring buffer mirroring the original engine's `CircularBuffer`.
-///
-/// Unlike [`std::collections::VecDeque`] this has a hard capacity; [`Self::insert`] reports
-/// failure on overflow rather than growing, matching the hardware-style message queues.
 #[derive(Debug, Clone)]
 pub struct CircularBuffer<T> {
     buffer: Vec<Option<T>>,
     read_pos: usize,
     write_pos: usize,
     entries: usize,
-    /// Total successful inserts over the buffer's lifetime. Each item's *serial* is its insert
-    /// index; combined with `entries` it gives a stable handle that survives later evictions
-    /// (see [`Self::peek_mut_serial`]).
     inserted: u64,
 }
 
 impl<T> CircularBuffer<T> {
-    /// Creates a ring buffer holding up to `size` items.
     pub fn new(size: usize) -> Self {
         let mut buffer = Vec::with_capacity(size);
         buffer.resize_with(size, || None);
@@ -75,31 +56,26 @@ impl<T> CircularBuffer<T> {
         }
     }
 
-    /// The maximum number of items this buffer can hold.
     #[inline]
     pub fn capacity(&self) -> usize {
         self.buffer.len()
     }
 
-    /// The number of items currently queued.
     #[inline]
     pub fn entries(&self) -> usize {
         self.entries
     }
 
-    /// Whether the buffer holds no items.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.entries == 0
     }
 
-    /// Whether the buffer is at capacity.
     #[inline]
     pub fn is_full(&self) -> bool {
         self.entries == self.buffer.len()
     }
 
-    /// Pushes `data` to the back. Returns `false` (and drops `data`) if full.
     pub fn insert(&mut self, data: T) -> bool {
         if self.entries < self.buffer.len() {
             self.entries += 1;
@@ -115,19 +91,13 @@ impl<T> CircularBuffer<T> {
         }
     }
 
-    /// The serial of the most recently inserted item, or `None` if nothing has been inserted.
-    ///
-    /// A serial is a monotonically increasing id (the insert index); it stays valid as a handle
-    /// even after the item ahead of it is popped/evicted, until the item itself is evicted.
     #[inline]
     pub fn last_serial(&self) -> Option<u64> {
         self.inserted.checked_sub(1)
     }
 
-    /// Mutable access to the item with the given `serial`, or `None` if it has been evicted (or
-    /// never existed). See [`Self::last_serial`].
     pub fn peek_mut_serial(&mut self, serial: u64) -> Option<&mut T> {
-        let first = self.inserted - self.entries as u64; // serial of the current front
+        let first = self.inserted - self.entries as u64;
         if serial < first || serial >= self.inserted {
             return None;
         }
@@ -136,7 +106,6 @@ impl<T> CircularBuffer<T> {
         self.buffer[(self.read_pos + offset) % len].as_mut()
     }
 
-    /// Pops the front item, or `None` if empty.
     pub fn pop(&mut self) -> Option<T> {
         if self.entries > 0 {
             self.entries -= 1;
@@ -151,7 +120,6 @@ impl<T> CircularBuffer<T> {
         }
     }
 
-    /// Peeks at the item `offset` slots from the front without removing it.
     pub fn peek(&self, offset: usize) -> Option<&T> {
         if offset >= self.entries {
             return None;
@@ -159,7 +127,6 @@ impl<T> CircularBuffer<T> {
         self.buffer[(self.read_pos + offset) % self.buffer.len()].as_ref()
     }
 
-    /// Empties the buffer.
     pub fn reset(&mut self) {
         for slot in &mut self.buffer {
             *slot = None;
@@ -215,7 +182,6 @@ mod tests {
         assert!(cb.insert(2));
         assert!(cb.insert(3));
         assert!(cb.is_full());
-        // Overflow is rejected, not grown.
         assert!(!cb.insert(4));
         assert_eq!(cb.entries(), 3);
 
@@ -224,7 +190,6 @@ mod tests {
         assert_eq!(cb.peek(3), None);
 
         assert_eq!(cb.pop(), Some(1));
-        // Now there's room; wrap the write position.
         assert!(cb.insert(4));
         assert_eq!(cb.pop(), Some(2));
         assert_eq!(cb.pop(), Some(3));
@@ -236,20 +201,18 @@ mod tests {
     fn serial_handles_survive_eviction() {
         let mut cb = CircularBuffer::new(2);
         cb.insert(10);
-        let s_a = cb.last_serial().unwrap(); // serial 0
+        let s_a = cb.last_serial().unwrap();
         cb.insert(20);
-        let s_b = cb.last_serial().unwrap(); // serial 1
+        let s_b = cb.last_serial().unwrap();
         assert_eq!(cb.peek_mut_serial(s_a).copied(), Some(10));
         assert_eq!(cb.peek_mut_serial(s_b).copied(), Some(20));
 
-        // Mutate through the handle.
         *cb.peek_mut_serial(s_a).unwrap() = 11;
         assert_eq!(cb.peek(0).copied(), Some(11));
 
-        // Evict the front; its handle goes stale, the survivor's stays valid.
         cb.pop();
         cb.insert(30);
-        let s_c = cb.last_serial().unwrap(); // serial 2
+        let s_c = cb.last_serial().unwrap();
         assert_eq!(cb.peek_mut_serial(s_a), None, "evicted handle is stale");
         assert_eq!(cb.peek_mut_serial(s_b).copied(), Some(20));
         assert_eq!(cb.peek_mut_serial(s_c).copied(), Some(30));

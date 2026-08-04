@@ -1,6 +1,3 @@
-//! [`NdsPlayer`]: the DS device player. Runs the SSEQ sequencer and the per-note ADSR/LFO
-//! hardware model, and emits standardized [`SynthEvent`]s for the synthesis layer.
-
 use std::sync::Arc;
 
 use super::lfo::{LfoParams, lfo_tick, lfo_type};
@@ -15,7 +12,6 @@ use crate::tuning::midi_note_to_hz;
 use crate::util::{read_u8, read_u16, read_u32};
 use crate::waveform::{Waveform, decode_adpcm, decode_pcm8, decode_pcm16};
 
-/// ADSR envelope stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdsrState {
     Attack,
@@ -24,7 +20,6 @@ enum AdsrState {
     Release,
 }
 
-/// Per-note runtime state (all-`Copy` so the tick loop can work on a local copy).
 #[derive(Debug, Clone, Copy)]
 struct ActiveNote {
     track_num: usize,
@@ -35,23 +30,15 @@ struct ActiveNote {
     adsr_state: AdsrState,
     adsr_timer: i32,
     lfo_counter: i32,
-    /// Shared LFO delay/phase counter (pokediamond's single `SNDLfo::delayCounter`).
     delay_counter: i32,
-    /// Volume-LFO contribution (dB) computed this tick, summed into the channel volume.
     lfo_vol_db: i32,
-    // Resolved instrument coefficients for this note's region.
     attack_coefficient: i32,
     decay_coefficient: i32,
     sustain_level: i32,
     release_coefficient: i32,
 }
 
-/// The DS device player: SSEQ sequencer + decoded sample archives + the pokediamond note model.
-///
-/// One [`tick`](Self::tick) is one DS sequencer-timer period (every `CYCLES_PER_TICK` cycles of
-/// the 33.51 MHz clock, ≈192 Hz); the BPM timer inside gates actual sequencer steps.
 pub struct NdsPlayer {
-    /// The running SSEQ interpreter.
     pub sequence: Sequence,
     instrument_bank: super::InstrumentBank,
     decoded_waveform_archives: Vec<Option<Vec<Arc<Waveform>>>>,
@@ -62,8 +49,6 @@ pub struct NdsPlayer {
 }
 
 impl NdsPlayer {
-    /// Binds sequence `sseq_id` from `sdat`, decoding the linked sample archives up front.
-    /// Returns `None` if the sequence or its bank is missing.
     pub fn new(sdat: &Sdat, sseq_id: u32) -> Option<NdsPlayer> {
         let sseq_info = sdat.sseq_infos.get(sseq_id as usize)?.clone()?;
         let bank_id = sseq_info.bank as usize;
@@ -73,7 +58,6 @@ impl NdsPlayer {
         let sseq_file = sdat.file(sseq_info.file_id)?;
         let sseq_arc: Arc<[u8]> = Arc::from(sseq_file.to_vec());
 
-        // Decode the up-to-four linked sample archives.
         let mut decoded_waveform_archives: Vec<Option<Vec<Arc<Waveform>>>> = vec![None; 4];
         for (i, &swar_id) in bank_info.swar_id.iter().enumerate() {
             let Some(Some(swar_info)) = sdat.swar_infos.get(swar_id as usize) else {
@@ -113,7 +97,6 @@ impl NdsPlayer {
             decoded_waveform_archives[i] = Some(archive);
         }
 
-        // Build the eight PSG square-wave samples.
         let squares = SQUARE_WAVES
             .iter()
             .map(|wave| {
@@ -137,8 +120,6 @@ impl NdsPlayer {
         })
     }
 
-    /// Advances note envelopes/LFOs, then runs any due sequencer steps and converts their
-    /// messages into [`SynthEvent`]s.
     fn tick_impl(
         &mut self,
         feedback: &mut TickFeedback,
@@ -152,8 +133,6 @@ impl NdsPlayer {
         while self.bpm_timer >= 240 {
             self.bpm_timer -= 240;
 
-            // Report which tracks still have sounding/releasing channels, so the sequence can
-            // honor pokediamond's `noteFinishWait` (stall after a zero-duration note).
             let mut track_has_channels = [false; TRACK_COUNT];
             for note in &self.active_notes {
                 if let Some(slot) = track_has_channels.get_mut(note.track_num) {
@@ -168,7 +147,6 @@ impl NdsPlayer {
         }
     }
 
-    /// Applies one sequence message, translating it into standardized events.
     fn handle_message(
         &mut self,
         msg: Message,
@@ -195,11 +173,7 @@ impl NdsPlayer {
                     events.push(SynthEvent::Ended);
                 }
             }
-            MessageType::VolumeChange { .. } => {
-                // No-op: track volume (with expression and master) is summed in the decibel
-                // domain per tick by `track_volume_db`, matching pokediamond, rather than applied
-                // as a separate linear mixer gain.
-            }
+            MessageType::VolumeChange { .. } => {}
             MessageType::PanChange { pan } => {
                 let p = pan as f64 / 128.0;
                 events.push(SynthEvent::TrackPan {
@@ -210,8 +184,6 @@ impl NdsPlayer {
             }
             MessageType::PitchBend => {
                 let track = &self.sequence.tracks[msg.track_num];
-                // `pitch_bend` is already a signed byte (pokediamond `par._s8`, set by `0xC4`);
-                // scale by half the bend range, in 1/64 semitones.
                 let pitch_bend = track.pitch_bend;
                 let semitones = (pitch_bend as f64) * (track.pitch_bend_range as f64 / 2.0) / 64.0;
                 events.push(SynthEvent::TrackDetune {
@@ -223,7 +195,6 @@ impl NdsPlayer {
         }
     }
 
-    /// Starts a note from a [`MessageType::PlayNote`] message.
     fn play_note(
         &mut self,
         t: usize,
@@ -235,7 +206,6 @@ impl NdsPlayer {
     ) {
         let program = self.sequence.tracks[t].program;
 
-        // Resolve the region + sample.
         let Some(instrument) = self.instrument_bank.instruments.get(program) else {
             return;
         };
@@ -247,7 +217,6 @@ impl NdsPlayer {
         let archive_index = region.swar_info_id as usize;
         let sample_id = region.swav_info_id as usize;
 
-        // Pick the waveform and the pitch it represents.
         let (waveform, sample_pitch_hz) = if is_psg_pulse {
             match self.squares.get(sample_id) {
                 Some(s) => (s.clone(), s.frequency),
@@ -306,8 +275,6 @@ impl NdsPlayer {
         });
     }
 
-    /// Runs one ADSR/LFO update pass over the active notes (mirrors the original engine exactly,
-    /// including that at most one finished note is removed per tick).
     fn process_active_notes(
         &mut self,
         feedback: &TickFeedback,
@@ -322,14 +289,11 @@ impl NdsPlayer {
             let t = entry.track_num;
 
             if feedback.is_ended(t, entry.voice) {
-                // The synthesizer stopped this voice on its own (round-robin steal, or a
-                // one-shot sample that ran out). Drop the bookkeeping.
                 index_to_delete = Some(index);
                 self.active_notes[index] = entry;
                 continue;
             }
 
-            // Begin release once the note's scheduled duration elapses.
             if ticks >= entry.end_time && entry.adsr_state != AdsrState::Release {
                 entry.adsr_state = AdsrState::Release;
                 events.push(SynthEvent::NoteReleased {
@@ -349,15 +313,11 @@ impl NdsPlayer {
         }
     }
 
-    /// The track-level decibel attenuation pokediamond folds into `chn->userDecay`:
-    /// `DecibelSquareTable[volume] + DecibelSquareTable[expression] + DecibelSquareTable[master]`
-    /// (`TrackUpdateChannel`).
     fn track_volume_db(&self, t: usize) -> i32 {
         let tr = &self.sequence.tracks[t];
         decibel_db(tr.volume) + decibel_db(tr.expression) + decibel_db(tr.master_volume)
     }
 
-    /// LFO update for one note, ported faithfully (including the DS fixed-point math).
     fn apply_lfo(
         &mut self,
         entry: &mut ActiveNote,
@@ -373,15 +333,9 @@ impl NdsPlayer {
             range: track.lfo_range,
         };
 
-        // Whether the LFO delay has elapsed (the phase advances this tick). pokediamond gates both
-        // the value and the phase on a single `delayCounter`; see [`lfo_tick`].
         let delay_elapsed = entry.delay_counter >= params.delay;
         let lfo_value = lfo_tick(&params, &mut entry.lfo_counter, &mut entry.delay_counter);
 
-        // pokediamond adds the LFO into whichever target it modulates. Pitch modulation is applied
-        // only on ticks where the phase advances (delay elapsed); the value is in 1/64ths of a
-        // semitone. Volume modulation is summed (in dB) into the channel volume by `apply_adsr`
-        // via `lfo_vol_db`. (Pan LFO is not represented — pan is a per-track stereo stage here.)
         entry.lfo_vol_db = if params.lfo_type == lfo_type::VOLUME {
             lfo_value as i32
         } else {
@@ -396,7 +350,6 @@ impl NdsPlayer {
         }
     }
 
-    /// ADSR envelope advance for one note.
     fn apply_adsr(
         &mut self,
         entry: &mut ActiveNote,
@@ -405,9 +358,6 @@ impl NdsPlayer {
         events: &mut Vec<SynthEvent>,
     ) {
         let t = entry.track_num;
-        // pokediamond sums every contribution in the decibel domain before one conversion
-        // (`SND_ExChannelMain`): velocity + envelope + userDecay (track volume + expression +
-        // master) + volume-LFO. We fold the non-envelope terms into `extra_db` here.
         let extra_db = self.track_volume_db(t) + entry.lfo_vol_db;
         let set_volume = |entry: &ActiveNote, events: &mut Vec<SynthEvent>| {
             events.push(SynthEvent::VoiceVolume {
@@ -435,9 +385,6 @@ impl NdsPlayer {
             }
             AdsrState::Sustain => set_volume(entry, events),
             AdsrState::Release => {
-                // pokediamond cuts a channel only once its release envelope reaches the floor
-                // (`SND_ChannelMain`: `envStatus == RELEASE && vol <= -723`, i.e. attenuation
-                // <= -92544), uniformly for every channel type.
                 if entry.adsr_timer <= -92544 {
                     events.push(SynthEvent::VoiceStopped {
                         track: t,
@@ -466,7 +413,6 @@ impl crate::devices::DevicePlayer for NdsPlayer {
         self.sequence.ticks_elapsed
     }
 
-    /// Current sequencer step rate in Hz: the ≈192 Hz hardware timer scaled by track 0's BPM.
     fn step_rate(&self) -> f64 {
         let base = crate::DS_CLOCK_RATE as f64 / crate::CYCLES_PER_TICK as f64;
         base * f64::from(self.sequence.tracks[0].bpm.max(1)) / 240.0

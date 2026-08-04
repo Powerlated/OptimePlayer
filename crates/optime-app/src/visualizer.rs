@@ -1,24 +1,12 @@
-//! Procedural 16-track × 88-key piano-roll visualizer drawn with [`egui::Painter`].
-//!
-//! Replaces the original PNG-based renderer: white/black key rectangles are lit per the
-//! controller's `notes_on` state, with per-track enable toggles. No image assets required.
-
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
 
 use crate::TRACK_COUNT;
 
-/// A frame's worth of note state copied out of the controller under lock.
 pub struct VisSnapshot {
-    /// Whether a controller is loaded (dims the view when not).
     pub active: bool,
-    /// `notes_on[track][midi]` — sequence-driven notes.
     pub notes_on: [[bool; 128]; TRACK_COUNT],
-    /// Sequencer steps elapsed (drives the piano-roll playhead).
     pub steps: u32,
-    /// Current sequencer step rate in steps/second (tempo-dependent), for the piano roll's
-    /// smoothed scroll clock.
     pub step_rate: f64,
-    /// Current musical tempo in quarter-note BPM (tracks tempo changes), for the tempo marking.
     pub bpm: f64,
 }
 
@@ -34,7 +22,6 @@ impl Default for VisSnapshot {
     }
 }
 
-// Layout constants (in points).
 const SECTION_H: f32 = 24.0;
 const WHITE_W: f32 = 9.0;
 const WHITE_H: f32 = 18.0;
@@ -43,17 +30,13 @@ const BLACK_H: f32 = 11.0;
 const TOGGLE_W: f32 = 18.0;
 const PAD: f32 = 4.0;
 
-// Indexed by `midi % 12` with A as base (j=0 -> MIDI 21 = A0).
 const IS_BLACK: [bool; 12] = [
     false, true, false, false, true, false, true, false, false, true, false, true,
 ];
 const KEY_NUM: [u32; 12] = [0, 0, 1, 2, 2, 3, 3, 4, 4, 5, 6, 6];
 
-/// Draws the visualizer and handles clicks: toggling track enables.
-// The track index drives per-row geometry (`row_y`), so a range loop reads clearer than `enumerate`.
 #[allow(clippy::needless_range_loop)]
 pub fn draw(ui: &mut egui::Ui, snap: &VisSnapshot, track_enables: &mut [bool; TRACK_COUNT]) {
-    // 7 white keys per octave * ~7.5 octaves; computed conservatively wide.
     let keys_w = 53.0 * WHITE_W;
     let total_w = TOGGLE_W + PAD + keys_w + PAD * 2.0;
     let total_h = SECTION_H * TRACK_COUNT as f32 + PAD * 2.0;
@@ -72,7 +55,6 @@ pub fn draw(ui: &mut egui::Ui, snap: &VisSnapshot, track_enables: &mut [bool; TR
     for track in 0..TRACK_COUNT {
         let row_y = origin.y + PAD + track as f32 * SECTION_H;
 
-        // Track-enable toggle.
         let toggle_rect = Rect::from_min_size(
             egui::pos2(origin.x, row_y),
             Vec2::new(TOGGLE_W, SECTION_H - 2.0),
@@ -89,7 +71,6 @@ pub fn draw(ui: &mut egui::Ui, snap: &VisSnapshot, track_enables: &mut [bool; TR
             Stroke::new(1.0_f32, alpha(Color32::BLACK)),
         );
 
-        // White keys (background + lit).
         for j in 0..88usize {
             let midi = j + 21;
             let octave = (j / 12) as u32;
@@ -110,7 +91,6 @@ pub fn draw(ui: &mut egui::Ui, snap: &VisSnapshot, track_enables: &mut [bool; TR
             }
         }
 
-        // Black keys on top.
         for j in 0..88usize {
             let midi = j + 21;
             let octave = (j / 12) as u32;
@@ -131,7 +111,6 @@ pub fn draw(ui: &mut egui::Ui, snap: &VisSnapshot, track_enables: &mut [bool; TR
         }
     }
 
-    // Click handling against the computed layout.
     if let Some(pos) = response.interact_pointer_pos()
         && response.clicked()
     {

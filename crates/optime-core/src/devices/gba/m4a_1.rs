@@ -1,20 +1,3 @@
-//! A Rust transliteration of `pret/pokeemerald`'s `src/m4a_1.s` — the hand-written ARM sound
-//! engine, which has no C to mirror (so it lives here, not in [`super::m4a`], the `m4a.c` port).
-//!
-//! This is the set of routines actually implemented in `m4a_1.s`, translated onto [`super::m4a`]'s
-//! faithful hardware structs (`MusicPlayerInfo`, `MusicPlayerTrack`, `SoundInfo`, `SoundChannel`,
-//! `CgbChannel`) and calling straight into `m4a.rs`'s C helpers (`TrkVolPitSet`, `ClearModM`,
-//! `ply_memacc`, `ply_x*`, `MidiKeyToFreq`, `MidiKeyToCgbFreq`, `CgbSound`) — no logic duplicated:
-//!
-//! * [`MPlayMain`] — the per-VBlank track interpreter (`ply_note` + the `ply_*` command handlers,
-//!   gate countdown, `ply_lfos`, and the end-of-frame volume/pitch refresh).
-//! * [`SoundMain`] — the envelope pass: `SoundMainRAM` (DirectSound) + the `CgbSound` call. The
-//!   PCM-DMA/FIFO *mixing* half of `SoundMain`/`SoundMainRAM` is what Optime's software synth
-//!   replaces, so only the envelope/pitch state computation is reproduced here.
-//!
-//! The engine only mutates hardware state; it emits no audio and no [`crate::SynthEvent`]s. The
-//! glue in [`super`] drives it per frame and reads the resulting channel state out.
-
 #![allow(non_snake_case, non_upper_case_globals)]
 
 use super::m4a::{
@@ -28,44 +11,33 @@ use super::m4a_tables::{CLOCK_TABLE, midi_key_to_cgb_freq, midi_key_to_freq};
 use super::rom::ptr_to_offset;
 use crate::util::{read_u8, read_u32};
 
-/// The tempo accumulator threshold: one sequencer step runs per `tempoC >= 150`.
 const TEMPO_STEP: u16 = 150;
 
-/// `TONEDATA_P_S_PAN` — the bias subtracted from a rhythm voice's `pan_sweep` byte before doubling.
 const TONEDATA_P_S_PAN: u8 = 0xC0;
 
-/// What one [`MPlayMain`] frame reports back to the glue that the hardware would not track itself.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameResult {
-    /// A backward song-loop `GOTO` (or `REPT 0`) fired this frame — the glue emits one `Looped`.
     pub looped: bool,
 }
 
-/// Which channel-pool array a resolved note landed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Slot {
     Ds(usize),
     Cgb(usize),
 }
 
-/// `chan.key + track.keyM`, clamped at zero (`ply_note` / `MPlayMain`). `keyM` is applied as a
-/// signed offset (`i8`).
 fn add_key(key: u8, key_m: u8) -> u8 {
     (i32::from(key) + i32::from(key_m as i8)).max(0) as u8
 }
 
-/// Whether a track slot is live (`MPT_FLG_EXIST`).
 fn exists(track: &MusicPlayerTrack) -> bool {
     track.flags & MPT_FLG_EXIST != 0
 }
 
-/// `WaveData::freq` (offset 4) at the ROM pointer `wav`, for `MidiKeyToFreq`.
 fn wav_freq(rom: &[u8], wav: u32) -> u32 {
     ptr_to_offset(wav, rom.len()).map_or(0, |o| read_u32(rom, o + 4))
 }
 
-/// `ChnVolSetAsm` (`m4a_1.s:1508`): per-channel right/left volumes from velocity, rhythm pan, and
-/// the track's mixer volumes.
 fn chn_vol_set(velocity: u8, rhythm_pan: i8, vol_mr: u8, vol_ml: u8) -> (u8, u8) {
     let pan = i32::from(rhythm_pan);
     let right = ((0x80 + pan) * i32::from(velocity) * i32::from(vol_mr)) >> 14;
@@ -73,16 +45,9 @@ fn chn_vol_set(velocity: u8, rhythm_pan: i8, vol_mr: u8, vol_ml: u8) -> (u8, u8)
     (right.min(0xFF) as u8, left.min(0xFF) as u8)
 }
 
-// ===========================================================================================
-// MPlayMain — the per-VBlank track interpreter (m4a_1.s:1129)
-// ===========================================================================================
-
-/// `MPlayMain`: advances the tempo clock, running `tempoI / 150` sequencer steps this frame, then
-/// applies the end-of-frame volume/pitch refresh. Returns per-frame [`FrameResult`] the glue needs.
 pub fn MPlayMain(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8]) -> FrameResult {
     let mut result = FrameResult::default();
 
-    // status high bit set == paused/stopped: nothing to do.
     if mp.status & 0x8000_0000 != 0 {
         return result;
     }
@@ -100,12 +65,9 @@ pub fn MPlayMain(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8]) -> Fr
     result
 }
 
-/// One sequencer step over every track (the `tempoC >= 150` body of `MPlayMain`).
 fn step(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], result: &mut FrameResult) {
     let mut any_exists = false;
     for t in 0..mp.tracks.len() {
-        // MPT_FLG_START: reset the track to its defaults on the first frame, preserving cmdPtr
-        // (in the C, `Clear64byte` doesn't reach `cmdPtr`/`patternStack`, which sit past 0x40).
         if mp.tracks[t].flags & MPT_FLG_START != 0 {
             let cmd_ptr = mp.tracks[t].cmdPtr;
             let mut tr = MusicPlayerTrack {
@@ -125,7 +87,6 @@ fn step(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], result: &mut F
 
         gate_tick(si, t);
 
-        // Run commands until the track owes a wait; the guard stops malformed data hanging us.
         let mut guard = 0u32;
         while mp.tracks[t].wait == 0 {
             execute_command(mp, si, rom, t, result);
@@ -154,12 +115,10 @@ fn step(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], result: &mut F
     }
 }
 
-/// `MPlayMain`'s per-channel gate countdown for track `t`: expired gates begin the release; a
-/// channel the envelope already shut off (`statusFlags == 0`) is detached.
 fn gate_tick(si: &mut SoundInfo, t: usize) {
     let tick = |c: &mut ChannelHdr| {
         if c.status() & SOUND_CHANNEL_SF_ON == 0 {
-            c.set_track(None); // ClearChain
+            c.set_track(None);
             return;
         }
         if c.gate_time() != 0 {
@@ -182,7 +141,6 @@ fn gate_tick(si: &mut SoundInfo, t: usize) {
     }
 }
 
-/// Fetches and executes one command (the dispatch loop of `MPlayMain`).
 fn execute_command(
     mp: &mut MusicPlayerInfo,
     si: &mut SoundInfo,
@@ -205,21 +163,18 @@ fn execute_command(
     } else if cmd > 0xB0 {
         control_command(mp, si, rom, t, cmd, result);
     } else if cmd >= 0x80 {
-        // W00..W96 rest.
         mp.tracks[t].wait = CLOCK_TABLE[(cmd - 0x80) as usize];
     } else {
         fine(mp, si, t);
     }
 }
 
-/// Reads a one-byte command operand at the PC.
 fn arg(mp: &mut MusicPlayerInfo, rom: &[u8], t: usize) -> u8 {
     let v = read_u8(rom, mp.tracks[t].cmdPtr);
     mp.tracks[t].cmdPtr += 1;
     v
 }
 
-/// The `0xB1..=0xCE` control commands (`gMPlayJumpTable`).
 fn control_command(
     mp: &mut MusicPlayerInfo,
     si: &mut SoundInfo,
@@ -229,9 +184,8 @@ fn control_command(
     result: &mut FrameResult,
 ) {
     match cmd {
-        0xB2 => ply_goto(mp, si, rom, t, true, result), // GOTO: the song's loop point
+        0xB2 => ply_goto(mp, si, rom, t, true, result),
         0xB3 => {
-            // PATT: call a pattern.
             let level = mp.tracks[t].patternLevel as usize;
             if level >= 3 {
                 fine(mp, si, t);
@@ -242,14 +196,12 @@ fn control_command(
             }
         }
         0xB4 => {
-            // PEND: return from a pattern.
             if mp.tracks[t].patternLevel > 0 {
                 mp.tracks[t].patternLevel -= 1;
                 mp.tracks[t].cmdPtr = mp.tracks[t].patternStack[mp.tracks[t].patternLevel as usize];
             }
         }
         0xB5 => {
-            // REPT: repeat a section `count` times (0 = forever = the song looping).
             let count = read_u8(rom, mp.tracks[t].cmdPtr);
             if count == 0 {
                 mp.tracks[t].cmdPtr += 1;
@@ -267,7 +219,6 @@ fn control_command(
             }
         }
         0xB9 => {
-            // MEMACC: dispatched to m4a's byte machine, then the tail-call goto on a true branch.
             let mut track = std::mem::take(&mut mp.tracks[t]);
             let r = m4a::ply_memacc(&mut mp.memAccArea, &mut track, rom);
             mp.tracks[t] = track;
@@ -277,7 +228,6 @@ fn control_command(
         }
         0xBA => mp.tracks[t].priority = arg(mp, rom, t),
         0xBB => {
-            // TEMPO: value is half the step rate (tempoI = tempoD, tempoU = 0x100).
             let v = u16::from(arg(mp, rom, t));
             mp.tempoI = v * 2;
         }
@@ -286,7 +236,6 @@ fn control_command(
             mp.tracks[t].flags |= MPT_FLG_PITCHG;
         }
         0xBD => {
-            // VOICE: copy the program's ToneData from the voicegroup.
             let program = arg(mp, rom, t) as usize;
             let voicegroup = mp.tone as usize;
             mp.tracks[t].tone = ToneData::read(rom, voicegroup + program * 12);
@@ -332,18 +281,14 @@ fn control_command(
             mp.tracks[t].flags |= MPT_FLG_PITCHG;
         }
         0xCC => {
-            // PORT: writes a raw GB sound register — consume the 2 operands, no effect.
             mp.tracks[t].cmdPtr += 2;
         }
         0xCD => xcmd(mp, si, rom, t),
         0xCE => end_tie(mp, si, rom, t),
-        // FINE and every unassigned jump-table slot stop the track.
         _ => fine(mp, si, t),
     }
 }
 
-/// `ply_xcmd` (`m4a.c:1523`): extended commands, dispatched via `gXcmdTable` into the `m4a`
-/// `ply_x*` handlers.
 fn xcmd(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize) {
     let n = arg(mp, rom, t);
     match n {
@@ -359,16 +304,11 @@ fn xcmd(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize) {
         11 => m4a::ply_xswee(&mut mp.tracks[t], rom),
         12 => m4a::ply_xwait(&mut mp.tracks[t], rom),
         13 => m4a::ply_xcmd_0D(&mut mp.tracks[t], rom),
-        // gXcmdTable[0] and [3] are `ply_xxx`, which tail-calls gMPlayJumpTable[0] = `ply_fine`.
         0 | 3 => fine(mp, si, t),
-        // Out-of-table indices (≥ 14) read past `gXcmdTable` in the C (UB); Optime safely stops
-        // the track by clearing its EXIST flag.
         _ => mp.tracks[t].flags &= !MPT_FLG_EXIST,
     }
 }
 
-/// `ply_goto` (`m4a_1.s:831`): read the 4-byte target and jump. A backward jump that is the song
-/// loop point (`GOTO` / `REPT 0`) reports one loop.
 fn ply_goto(
     mp: &mut MusicPlayerInfo,
     si: &mut SoundInfo,
@@ -389,13 +329,12 @@ fn ply_goto(
     }
 }
 
-/// `ply_fine` (`m4a_1.s:750`): release the track's channels and stop executing it.
 fn fine(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, t: usize) {
     let orphan = |c: &mut ChannelHdr| {
         if c.status() & SOUND_CHANNEL_SF_ON != 0 {
             c.set_status(c.status() | SOUND_CHANNEL_SF_STOP);
         }
-        c.set_track(None); // RealClearChain detaches the channel from the track
+        c.set_track(None);
     };
     for i in 0..si.maxChans as usize {
         if si.chans[i].track == Some(t) {
@@ -410,7 +349,6 @@ fn fine(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, t: usize) {
     mp.tracks[t].flags = 0;
 }
 
-/// `ply_endtie` (`m4a_1.s:1818`): release the track's first still-sounding channel playing `key`.
 fn end_tie(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize) {
     let byte = read_u8(rom, mp.tracks[t].cmdPtr);
     let key = if byte < 0x80 {
@@ -420,7 +358,6 @@ fn end_tie(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize) {
     } else {
         mp.tracks[t].key
     };
-    // SF_START|SF_ENV set and SF_STOP clear == a sounding, unreleased channel.
     let mask = SOUND_CHANNEL_SF_START | SOUND_CHANNEL_SF_ENV;
     let matching =
         |st: u8, midi: u8| st & mask != 0 && st & SOUND_CHANNEL_SF_STOP == 0 && midi == key;
@@ -440,7 +377,6 @@ fn end_tie(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize) {
     }
 }
 
-/// `ply_lfos` (`m4a_1.s:1887`): the per-step LFO ("mod") tick, folded into the `MPlayMain` step.
 fn lfo_step(tr: &mut MusicPlayerTrack) {
     if tr.lfoSpeed == 0 || tr.mod_ == 0 {
         return;
@@ -466,12 +402,6 @@ fn lfo_step(tr: &mut MusicPlayerTrack) {
     }
 }
 
-// ===========================================================================================
-// ply_note — instrument resolution + channel allocation (m4a_1.s:1538)
-// ===========================================================================================
-
-/// `ply_note`: gate/key/velocity parsing, key-split / rhythm resolution, then DirectSound / CGB
-/// channel allocation into `SoundInfo` and note setup.
 fn ply_note(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize, n: u8) {
     mp.tracks[t].gateTime = CLOCK_TABLE[n as usize];
 
@@ -491,7 +421,6 @@ fn ply_note(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize, 
         }
     }
 
-    // --- resolve the tone (key-split / rhythm sub-voicegroups) ---
     let played_key = mp.tracks[t].key;
     let mut tone = mp.tracks[t].tone;
     let mut resolved_key = played_key;
@@ -526,7 +455,6 @@ fn ply_note(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize, 
     let priority = mp.tracks[t].priority.saturating_add(mp.priority);
     let cgb = tone.kind & TONEDATA_TYPE_CGB;
 
-    // --- allocation ---
     let slot = if cgb != 0 {
         let idx = (cgb - 1) as usize;
         let ex = &si.cgbChans[idx];
@@ -547,7 +475,6 @@ fn ply_note(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize, 
         }
     };
 
-    // --- note setup (shared) ---
     let lfo_delay = mp.tracks[t].lfoDelay;
     mp.tracks[t].lfoDelayC = lfo_delay;
     if lfo_delay != 0 {
@@ -622,8 +549,6 @@ fn ply_note(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8], t: usize, 
     mp.tracks[t].flags &= 0xF0;
 }
 
-/// The CGB `sweep` byte a note-on stores (`ply_note`): the tone's `pan_sweep` unless bit 7 is set
-/// or bits 4–6 are clear, in which case a fixed `8`.
 fn cgb_sweep(tone: &ToneData) -> u8 {
     if tone.pan_sweep & 0x80 == 0 && tone.pan_sweep & 0x70 != 0 {
         tone.pan_sweep
@@ -632,9 +557,6 @@ fn cgb_sweep(tone: &ToneData) -> u8 {
     }
 }
 
-/// The DirectSound channel allocator from `ply_note` (`m4a_1.s:1677`): the first free channel wins;
-/// otherwise steal the lowest-priority channel, preferring releasing ones, ties to the latest
-/// track. A new note that loses every comparison is dropped.
 fn alloc_direct_sound(si: &SoundInfo, priority: u8, track: usize) -> Option<usize> {
     let mut best: Option<usize> = None;
     let mut best_priority = priority;
@@ -644,10 +566,9 @@ fn alloc_direct_sound(si: &SoundInfo, priority: u8, track: usize) -> Option<usiz
     for i in 0..si.maxChans as usize {
         let c = &si.chans[i];
         if c.statusFlags & SOUND_CHANNEL_SF_ON == 0 {
-            return Some(i); // free channel
+            return Some(i);
         }
         if c.statusFlags & SOUND_CHANNEL_SF_STOP != 0 {
-            // releasing
             if !found_releasing {
                 found_releasing = true;
                 best_priority = c.priority;
@@ -656,7 +577,7 @@ fn alloc_direct_sound(si: &SoundInfo, priority: u8, track: usize) -> Option<usiz
                 continue;
             }
         } else if found_releasing {
-            continue; // held channels ignored once a releasing one is found
+            continue;
         }
         let c_track = c.track.unwrap_or(track);
         if c.priority < best_priority {
@@ -671,8 +592,6 @@ fn alloc_direct_sound(si: &SoundInfo, priority: u8, track: usize) -> Option<usiz
     best
 }
 
-/// The end-of-frame `MPT_FLG_VOLCHG`/`PITCHG` pass (`MPlayMain` `_081DD9C4`): recompute track
-/// mixers ([`m4a::TrkVolPitSet`]) and refresh every channel's volume scaling and pitch.
 fn refresh_changed_tracks(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u8]) {
     for t in 0..mp.tracks.len() {
         if !exists(&mp.tracks[t]) {
@@ -733,19 +652,11 @@ fn refresh_changed_tracks(mp: &mut MusicPlayerInfo, si: &mut SoundInfo, rom: &[u
     }
 }
 
-// ===========================================================================================
-// SoundMain — the envelope pass (m4a_1.s:88 SoundMainRAM + the CgbSound call)
-// ===========================================================================================
-
-/// `SoundMain`: step the DirectSound envelopes (`SoundMainRAM`) and the CGB envelopes
-/// ([`m4a::CgbSound`]). The PCM/FIFO mixing half of the reference is Optime's synth's job.
 pub fn SoundMain(si: &mut SoundInfo) {
     sound_main_ram(si);
     m4a::CgbSound(si);
 }
 
-/// `SoundMainRAM`'s per-DirectSound-channel envelope step (`m4a_1.s:172`). The mixing loop that
-/// follows in the reference is a backend seam (Optime's synth renders the PCM).
 fn sound_main_ram(si: &mut SoundInfo) {
     let master = si.masterVolume as u32;
     for i in 0..si.maxChans as usize {
@@ -757,14 +668,12 @@ fn sound_main_ram(si: &mut SoundInfo) {
             c.statusFlags = 0;
             continue;
         }
-        // _081DD006: master-volume scaling then per-side velocity/pan volumes.
         let uvol = ((master + 1) * c.envelopeVolume as u32) >> 4;
         c.envelopeVolumeRight = ((c.rightVolume as u32 * uvol) >> 8) as u8;
         c.envelopeVolumeLeft = ((c.leftVolume as u32 * uvol) >> 8) as u8;
     }
 }
 
-/// One DirectSound envelope frame. Returns `true` if the channel shut off (`statusFlags` cleared).
 fn direct_sound_env(c: &mut SoundChannel) -> bool {
     if c.statusFlags & SOUND_CHANNEL_SF_START != 0 {
         if c.statusFlags & SOUND_CHANNEL_SF_STOP != 0 {
@@ -772,7 +681,6 @@ fn direct_sound_env(c: &mut SoundChannel) -> bool {
         }
         c.statusFlags = SOUND_CHANNEL_SF_ENV_ATTACK;
         c.envelopeVolume = 0;
-        // fall into the attack step.
         let mut env = c.attack as u32;
         if env >= 0xFF {
             env = 0xFF;
@@ -810,7 +718,7 @@ fn direct_sound_env(c: &mut SoundChannel) -> bool {
                 c.statusFlags |= SOUND_CHANNEL_SF_IEC;
             } else {
                 env = sustain;
-                c.statusFlags -= 1; // decay -> sustain
+                c.statusFlags -= 1;
             }
         }
     } else if c.statusFlags & SOUND_CHANNEL_SF_ENV == SOUND_CHANNEL_SF_ENV_ATTACK {
@@ -823,10 +731,6 @@ fn direct_sound_env(c: &mut SoundChannel) -> bool {
     c.envelopeVolume = env as u8;
     false
 }
-
-// ===========================================================================================
-// A tiny read/write shim over the two channel structs so the per-track loops stay generic.
-// ===========================================================================================
 
 enum ChannelHdr<'a> {
     Ds(&'a mut SoundChannel),
@@ -870,7 +774,6 @@ impl ChannelHdr<'_> {
 mod tests {
     use super::*;
 
-    // `SOUND_CHANNEL_SF_*` raw statuses used by the oracles (from `m4a_internal.h`).
     const SF_START: u8 = 0x80;
     const SF_STOP: u8 = 0x40;
     const SF_IEC: u8 = 0x04;
@@ -878,7 +781,6 @@ mod tests {
     const SF_ENV_DECAY: u8 = 0x02;
     const SF_ENV_ATTACK: u8 = 0x03;
 
-    /// Direct transcription of `ChnVolSetAsm` (`m4a_1.s:1508`).
     fn c_chn_vol_set(velocity: u8, rhythm_pan: i8, vol_mr: u8, vol_ml: u8) -> (u8, u8) {
         let mut right =
             ((0x80 + i32::from(rhythm_pan)) * i32::from(velocity) * i32::from(vol_mr)) >> 14;
@@ -910,7 +812,6 @@ mod tests {
         }
     }
 
-    /// The oracle DirectSound channel: raw `statusFlags` state (`SoundMainRAM`, `m4a_1.s:172`).
     struct COracle {
         status: u8,
         env: u8,
@@ -919,7 +820,6 @@ mod tests {
         echo_length: u8,
     }
 
-    /// Direct transcription of the `SoundMainRAM` envelope section. Returns `false` once off.
     fn c_sound_main_ram_env(c: &mut COracle) -> bool {
         let [attack, decay, sustain, release] = c.adsr;
         if c.status & SF_START != 0 {
@@ -1040,7 +940,6 @@ mod tests {
         }
     }
 
-    /// The oracle LFO state (`ply_lfos`, `m4a_1.s:1887`).
     #[derive(Default)]
     struct CLfo {
         speed_c: u8,

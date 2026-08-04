@@ -1,18 +1,8 @@
-//! Generates optional, **local-only** "extras" from a gitignored `local_extras.txt` manifest:
-//! curated song-name tables keyed by source filename, and extra demo entries. This lets a personal
-//! checkout carry ROM-hack metadata (titles + a demo) that is never committed. With no manifest the
-//! generated tables are empty and the app builds byte-for-byte like a clean clone.
-//!
-//! Manifest lines (`#` comments and blanks ignored), `|`-separated:
-//!   table|<source-filename-key>|<json-file-under-src/song_names>
-//!   demo|<label>|<demo-stem-under-demos>
-
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
-/// Runs `git <args>` and returns trimmed stdout, or `None` if git is missing / the command fails.
 fn git(args: &[&str]) -> Option<String> {
     let out = Command::new("git").args(args).output().ok()?;
     if !out.status.success() {
@@ -22,8 +12,6 @@ fn git(args: &[&str]) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// `(year, month, day)` for a count of days since the Unix epoch (Howard Hinnant's civil-date
-/// algorithm — dependency-free UTC date, no `chrono`).
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -37,7 +25,6 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (y + i64::from(m <= 2), m, d)
 }
 
-/// The current UTC time as `YYYY-MM-DD HH:MM:SS UTC` (the build timestamp).
 fn build_time_utc() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -53,13 +40,10 @@ fn build_time_utc() -> String {
     )
 }
 
-/// Emits build-info env vars (`OPTIME_GIT_HASH`/`OPTIME_COMMIT_DATE`/`OPTIME_BUILD_TIME`) that the
-/// app's settings panel shows via `env!`. Falls back to `"unknown"` when git is unavailable.
 fn emit_build_info() {
     let hash = git(&["rev-parse", "--short=9", "HEAD"]).unwrap_or_else(|| "unknown".into());
     let commit_date = git(&["log", "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M"])
         .unwrap_or_else(|| "unknown".into());
-    // Rebuild when HEAD moves so the embedded hash/date stay current.
     if let Some(git_dir) = git(&["rev-parse", "--git-dir"]) {
         println!("cargo:rerun-if-changed={git_dir}/HEAD");
         println!("cargo:rerun-if-changed={git_dir}/logs/HEAD");

@@ -1,12 +1,3 @@
-//! DSE (Explorers of Sky) decode spike.
-//!
-//! Proves the SMDL/SWDL decode path end to end against real data: parses a main bank + a song
-//! sequence, decodes the song's samples to `.wav`, and disassembles each track's bytecode using
-//! the decomp-derived event table.
-//!
-//! The `files` mode reads the SWDL/SMDL files directly; the `rom` mode runs the same data through
-//! the public `SoundData`/`DevicePlayer` pipeline the app uses.
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -25,23 +16,15 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Mode {
-    /// Parse a main bank and a song sequence from loose SWDL/SMDL files.
     Files {
-        /// The main bank `bgm.swd`, which holds the sample data.
         main_bank: PathBuf,
-        /// The song `bgm####.smd`.
         song: PathBuf,
-        /// The per-song `bgm####.swd`, parsed for program info.
         song_bank: Option<PathBuf>,
-        /// Directory the decoded sample WAVs are written to.
         #[arg(default_value = ".")]
         out_dir: String,
     },
-    /// Run a PMD `.nds` ROM through the full `SoundData`/`DevicePlayer` pipeline.
     Rom {
-        /// The PMD `.nds` ROM.
         rom: PathBuf,
-        /// Which song to play.
         #[arg(default_value_t = 0)]
         song_id: u32,
     },
@@ -65,7 +48,6 @@ pub fn run(args: Args) -> ExitCode {
     let smd = std::fs::read(song_path).expect("read song .smd");
     let song_bank = song_bank_path.map(|p| std::fs::read(p).expect("read song .swd"));
 
-    // --- Main bank ---
     let main = Swdl::parse(&main_bank).expect("parse main bank");
     println!("== MAIN BANK  '{}'  (v{:#06x}) ==", main.name, main.version);
     println!(
@@ -82,7 +64,6 @@ pub fn run(args: Args) -> ExitCode {
     println!("   first sample rates (Hz): {rates:?}");
     println!();
 
-    // --- Song bank (optional) ---
     if let Some(bytes) = &song_bank
         && let Some(bank) = Swdl::parse(bytes)
     {
@@ -99,8 +80,6 @@ pub fn run(args: Args) -> ExitCode {
                 prog.splits.len(),
                 prog.volume
             );
-            // The faithful pitch model: a split's key_base (~ -1745 = the classic ctune -7 in
-            // 8.8 fixed point) plus note_delta give the absolute playback rate per key.
             if let Some(split) = prog.splits.first() {
                 let note_key =
                     i32::from(split.key_base) + (i32::from(split.note_delta) << 8) + (60i32 << 8);
@@ -114,7 +93,6 @@ pub fn run(args: Args) -> ExitCode {
         println!();
     }
 
-    // --- Song sequence ---
     let song = Smdl::parse(&smd).expect("parse song .smd");
     println!(
         "== SONG  '{}'  (v{:#06x}, TPQN={}, {} tracks) ==\n",
@@ -124,7 +102,6 @@ pub fn run(args: Args) -> ExitCode {
         song.tracks.len()
     );
 
-    // Disassemble the first music track (track 0 is usually a tiny control track).
     for track in song.tracks.iter().take(3) {
         let events = decode_track(&track.events, 4);
         println!(
@@ -143,13 +120,11 @@ pub fn run(args: Args) -> ExitCode {
         println!();
     }
 
-    // --- Run the sequencer over the song to prove the interpreter ---
     {
         use optime_core::devices::dse::{DseSequencer, SeqOp};
         let mut seq = DseSequencer::new(&song);
         let mut ops = Vec::new();
         let mut all = Vec::new();
-        // ~20s of sequencer ticks at this song's tempo (TPQN * a few hundred beats).
         for _ in 0..8000 {
             ops.clear();
             seq.seq_tick(&mut ops);
@@ -178,7 +153,6 @@ pub fn run(args: Args) -> ExitCode {
         println!("   final bpm {}, ended={}\n", seq.bpm, seq.ended);
     }
 
-    // --- Tick a player to prove the LFO path (vibrato / tremolo / auto-pan) ---
     if let Some(bytes) = &song_bank
         && let Some(bank) = Swdl::parse(bytes)
     {
@@ -215,7 +189,6 @@ pub fn run(args: Args) -> ExitCode {
         );
     }
 
-    // --- Decode a few samples to WAV to prove the sample path ---
     println!("== decoding samples to WAV in '{out_dir}' ==");
     std::fs::create_dir_all(&out_dir).expect("create out_dir");
     let mut written = 0;
@@ -245,8 +218,6 @@ pub fn run(args: Args) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Loads a PMD `.nds` ROM through the public `SoundData` API and ticks `DevicePlayer` for song
-/// `song_id`, reporting the standardized synth events the audio layer would consume.
 fn rom_mode(path: &Path, song_id: u32) {
     let bytes = std::fs::read(path).expect("read ROM");
     let archives = load_all(&bytes);
@@ -279,7 +250,6 @@ fn rom_mode(path: &Path, song_id: u32) {
     let (mut started, mut stopped, mut released) = (0u32, 0u32, 0u32);
     let (mut min_vol, mut max_vol) = (f64::INFINITY, 0.0f64);
     let mut keys: Vec<u8> = Vec::new();
-    // ~10 seconds at the ~100 Hz driver tick.
     for _ in 0..1000 {
         events.clear();
         player.tick(&mut feedback, &config, &mut events);
@@ -315,7 +285,6 @@ fn rom_mode(path: &Path, song_id: u32) {
         player.step_rate() * 60.0 / 48.0
     );
 
-    // The look-ahead visualizer path: render the whole-song overview the piano roll uses.
     if let Some(overview) = FsVisController::overview(&**data, song_id) {
         let dur: u32 = overview.notes.iter().map(|n| n.duration).sum();
         println!("== look-ahead overview ==");
@@ -328,8 +297,6 @@ fn rom_mode(path: &Path, song_id: u32) {
         );
     }
 
-    // Render ~10s of real mixed audio through the SynthController and report the output level,
-    // to check the per-voice volume calibration doesn't drive the mix into hard clipping.
     if let Some(mut ctrl) = SynthController::new(32_768.0, &**data, song_id) {
         let mut buf = vec![0f32; 32_768 * 2 * 10];
         ctrl.fill(&mut buf, &config);
@@ -373,7 +340,6 @@ fn print_event(ev: &DseEvent) {
     }
 }
 
-/// Writes a mono 16-bit PCM WAV from a normalized [`Waveform`].
 fn write_wav(path: &str, waveform: &Waveform) {
     let rate = waveform.sample_rate as u32;
     let n = waveform.data.len();
@@ -384,12 +350,12 @@ fn write_wav(path: &str, waveform: &Waveform) {
     out.extend_from_slice(b"WAVE");
     out.extend_from_slice(b"fmt ");
     out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
     out.extend_from_slice(&rate.to_le_bytes());
-    out.extend_from_slice(&(rate * 2).to_le_bytes()); // byte rate
-    out.extend_from_slice(&2u16.to_le_bytes()); // block align
-    out.extend_from_slice(&16u16.to_le_bytes()); // bits
+    out.extend_from_slice(&(rate * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
     out.extend_from_slice(b"data");
     out.extend_from_slice(&data_bytes.to_le_bytes());
     for &s in &waveform.data {

@@ -1,6 +1,3 @@
-//! Optime Player front-end: an `eframe`/`egui` application that runs natively and on the web,
-//! driving the platform-independent [`optime_core`] DS sound engine.
-
 mod annotation;
 mod app;
 mod audio;
@@ -19,5 +16,4 @@ mod web;
 
 pub use app::OptimeApp;
 
-/// Number of sequence tracks (re-exported from the core engine).
 pub const TRACK_COUNT: usize = optime_core::TRACK_COUNT;

@@ -1,16 +1,3 @@
-//! The Nintendo DS sound device: SDAT archives, the SSEQ sequencer, and the DS note/ADSR/LFO
-//! hardware model (ported from `pret/pokediamond`).
-//!
-//! Data flow within this folder:
-//!
-//! ```text
-//! .nds/.sdat bytes ─► sdat::Sdat (SYMB/INFO/FAT, banks)        — the archive
-//! Sdat + song id   ─► player::NdsPlayer                        — decoded samples + sequencer
-//! NdsPlayer::tick  ─► sequence::Sequence (SSEQ bytecode) ─► Message
-//!                  ─► note lifecycle (ADSR via volume.rs, LFO via lfo.rs)
-//!                  ─► standardized SynthEvent stream            — into the SynthController
-//! ```
-
 pub mod bank;
 mod lfo;
 mod player;

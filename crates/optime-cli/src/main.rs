@@ -1,16 +1,3 @@
-//! Offline command-line tools for the Optime Player engine.
-//!
-//! Every subcommand is an operation on the engine that has no place in the desktop app: bulk
-//! renders, soundtrack exports, ROM surgery, format dumps and performance harnesses. They live in
-//! one binary so `optime-core` itself keeps a single dependency (`serde`) and pays nothing for the
-//! FLAC encoder, loudness meter and audio decoders these tools need.
-//!
-//! Run `cargo run -p optime-cli -- --help` for the list, or `-- <subcommand> --help` for one
-//! tool's arguments. Anything measuring performance wants `--release`.
-//!
-//! The crate's other executable is `profile-emerald` (`src/bin/profile-emerald.rs`), which is
-//! separate only so a sampling profiler can launch it without a subcommand.
-
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};

@@ -1,19 +1,14 @@
-//! A fixed-length delay line used to widen the stereo image (Haas effect).
-
 use crate::waveform::Sample;
 
-/// A fixed-length delay line used to widen the stereo image (Haas effect).
 #[derive(Debug, Clone)]
 pub struct DelayLine {
     buffer: Vec<Sample>,
     pos_out: usize,
     delay: usize,
-    /// Output gain.
     pub gain: Sample,
 }
 
 impl DelayLine {
-    /// Creates a delay line able to hold up to `max_length` samples.
     pub fn new(max_length: usize) -> Self {
         Self {
             buffer: vec![0.0; max_length.max(1)],
@@ -23,19 +18,6 @@ impl DelayLine {
         }
     }
 
-    /// Pushes a block of consecutive samples and replaces each with the delayed (and gain-scaled)
-    /// output for that position.
-    ///
-    /// The whole block is written into the ring first and then read back out, which lets each pass
-    /// run over at most two contiguous runs of the ring instead of taking a remainder per sample.
-    ///
-    /// That is only equivalent to pushing and popping one sample at a time while the block's writes
-    /// stay clear of its reads. The reads cover the `n` slots from the read cursor and the writes
-    /// cover the `n` slots starting `delay` further on, so the two are disjoint exactly when
-    /// `delay + n <= len`; beyond that the write run wraps back onto slots this block has yet to
-    /// read (a short ring with a long delay), and the samples have to go through one at a time.
-    /// The real audio path is always on the fast side of that line: the Haas delay peaks around
-    /// 1400 samples against a 100 ms ring of ~4800 at 48 kHz.
     pub fn process_block(&mut self, block: &mut [Sample]) {
         let len = self.buffer.len();
         let n = block.len();
@@ -45,7 +27,6 @@ impl DelayLine {
             }
             return;
         }
-        // Writes start `delay` slots ahead of the read cursor; both runs wrap at most once.
         let write_start = (self.pos_out + self.delay) % len;
         let first = (len - write_start).min(n);
         self.buffer[write_start..write_start + first].copy_from_slice(&block[..first]);
@@ -62,8 +43,6 @@ impl DelayLine {
         self.pos_out = (read_start + n) % len;
     }
 
-    /// Pushes `val` and returns the delayed (and gain-scaled) output sample. A one-sample
-    /// [`Self::process_block`] (except on a one-slot ring, where it is the shared implementation).
     #[inline]
     pub fn process(&mut self, val: Sample) -> Sample {
         let mut block = [val];
@@ -71,7 +50,6 @@ impl DelayLine {
         block[0]
     }
 
-    /// One push/pop against the ring, used directly when a block would lap it.
     #[inline]
     fn process_one(&mut self, val: Sample) -> Sample {
         let len = self.buffer.len();
@@ -84,21 +62,16 @@ impl DelayLine {
         out_val * self.gain
     }
 
-    /// Sets the delay length in samples (clamped to the buffer capacity).
     pub fn set_delay(&mut self, length: usize) {
         self.delay = length.min(self.buffer.len());
     }
 
-    /// Resizes the buffer to hold up to `max_length` samples, clearing it. The delay length is
-    /// re-clamped to the new capacity; [`Self::gain`] is preserved. Used when the output sample
-    /// rate changes (the 100 ms Haas window is a different number of samples at the new rate).
     pub fn set_capacity(&mut self, max_length: usize) {
         self.buffer = vec![0.0; max_length.max(1)];
         self.pos_out = 0;
         self.delay = self.delay.min(self.buffer.len());
     }
 
-    /// The current delay length in samples.
     pub fn delay(&self) -> usize {
         self.delay
     }
@@ -109,10 +82,6 @@ mod tests {
     use super::*;
     use crate::dsp::block::{TEST_BLOCK_LENGTHS, test_signal};
 
-    /// A block of any length must give bit-identical results to pushing one sample at a time. The
-    /// interesting delays are 0 (write and read hit the same slot), 1 (a slot written in this block
-    /// is read later in the same block), a delay longer than the block, and a delay equal to the
-    /// whole ring; the interesting capacities are ones a block laps and ones it does not.
     #[test]
     fn process_block_matches_per_sample() {
         for capacity in [1, 2, 7, 300, 4800] {

@@ -1,34 +1,5 @@
-//! DSE note-to-frequency conversion — a faithful transcription of the pitch path in
-//! `DseVoice_UpdateParameters` (`lib/DSE/asm/main_02071EB4.s` in `pret/pmd-sky`).
-//!
-//! The DSE driver does not repitch a sample relative to a MIDI root the way the SSEQ engine
-//! does. Instead each voice carries a `note_key` in **8.8 fixed-point semitones** (256 units =
-//! one semitone, 3072 = one octave), built at note-on from the split alone:
-//!
-//! ```text
-//! voice.key_base = split.key_base + (split.note_delta << 8)         (+ random tuning jitter)
-//! voice.note_key = voice.key_base + (played_key << 8)
-//! ```
-//!
-//! and at update time the channel bend and pitch-LFO fold in:
-//! `pitch = channel.bend_final + voice.note_key + voice.key_bend + voice.lfo_pitch`.
-//!
-//! [`note_key_to_hz`] turns that `pitch` into the channel's **absolute PCM playback rate in Hz**
-//! via the driver's two pitch tables, [`PITCH_OCTNOTE_TABLE`] (`_020B1310`) and
-//! [`PITCH_MANTISSA_TABLE`] (`_020B1394`), reproduced bit-for-bit from the ROM. The hardware then
-//! sets the channel timer to `DSE_SOUND_CLOCK / hz`; that division (and the `0x00FFB0FF` constant)
-//! is exactly the NDS sound clock = 33,513,982 / 2, which is why the table result *is* the
-//! playback frequency. Because the rate is absolute, the WAVI `sample_rate` plays no part in the
-//! pitch (it is not even copied to the voice) — feeding [`crate::devices::VoicePitch::DataRateHz`]
-//! the returned Hz reproduces the hardware exactly.
-
-/// The NDS sound clock the DSE driver divides by the computed Hz to get the channel timer
-/// (`0x00FFB0FF` in `DseVoice_UpdateParameters`): 33,513,982 / 2.
 pub const DSE_SOUND_CLOCK: u32 = 0x00FF_B0FF;
 
-/// `_020B1310`: maps an integer semitone (0..=127) to a packed `(octave << 4) | note_in_octave`
-/// byte. The high nibble is the octave (power-of-two shift); the low nibble selects the mantissa
-/// sub-table within [`PITCH_MANTISSA_TABLE`]. Bit-identical to the ROM rodata.
 #[rustfmt::skip]
 pub const PITCH_OCTNOTE_TABLE: [u8; 128] = [
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x10, 0x11, 0x12, 0x13,
@@ -41,9 +12,6 @@ pub const PITCH_OCTNOTE_TABLE: [u8; 128] = [
     0x94, 0x95, 0x96, 0x97, 0x98, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
 ];
 
-/// `_020B1394`: the per-octave frequency mantissa, indexed by `(note_in_octave << 8) | frac`
-/// (12 notes × 256 fractional steps = 3072 entries) in ~Q14 fixed point. Bit-identical to the
-/// ROM rodata.
 #[rustfmt::skip]
 pub const PITCH_MANTISSA_TABLE: [u16; 3072] = [
     0x3FEC, 0x3FF0, 0x3FF3, 0x3FF7, 0x3FFB, 0x3FFE, 0x4002, 0x4006, 0x400A, 0x400D, 0x4011, 0x4015,
@@ -304,12 +272,7 @@ pub const PITCH_MANTISSA_TABLE: [u16; 3072] = [
     0x7F80, 0x7F87, 0x7F8E, 0x7F96, 0x7F9D, 0x7FA4, 0x7FAC, 0x7FB3, 0x7FBA, 0x7FC2, 0x7FC9, 0x7FD1,
 ];
 
-/// Converts a `note_key` pitch (8.8 fixed-point semitones; see the module docs) to the absolute
-/// PCM playback rate in Hz, exactly as `DseVoice_UpdateParameters` does for a PCM voice: split
-/// the (sign-extended 16-bit) pitch into an integer-semitone table-1 lookup and a fractional
-/// table-2 lookup, then shift the mantissa by `4 - octave`.
 pub fn note_key_to_hz(note_key: i32) -> f64 {
-    // The driver treats the summed pitch as a signed 16-bit value.
     let pitch = note_key as i16 as i32;
     let semitone = ((pitch >> 8) & 0x7f) as usize;
     let octnote = PITCH_OCTNOTE_TABLE[semitone] as i32;
@@ -331,21 +294,16 @@ pub fn note_key_to_hz(note_key: i32) -> f64 {
 mod tests {
     use super::*;
 
-    /// The two tables are exactly the ROM sizes/shape.
     #[test]
     fn tables_are_rom_sized() {
         assert_eq!(PITCH_OCTNOTE_TABLE.len(), 128);
         assert_eq!(PITCH_MANTISSA_TABLE.len(), 3072);
-        // `_020B1310` packs octave/note: semitone 12 -> octave 1, note 0 -> 0x10; 24 -> 0x20.
         assert_eq!(PITCH_OCTNOTE_TABLE[0], 0x00);
         assert_eq!(PITCH_OCTNOTE_TABLE[12], 0x10);
         assert_eq!(PITCH_OCTNOTE_TABLE[24], 0x20);
-        // `_020B1394` base near 0x4000 (one-octave mantissa start).
         assert_eq!(PITCH_MANTISSA_TABLE[0], 0x3FEC);
     }
 
-    /// The table result follows the intended `~1024 * 2^(note_key / 3072)` Hz law (the tables are
-    /// a fixed-point `2^x` reconstruction), to within the tables' rounding (a few cents).
     #[test]
     fn matches_exponential_law() {
         for &p in &[10000, 13568, 13603, 15360, 17000, 20000, 8000] {
@@ -359,7 +317,6 @@ mod tests {
         }
     }
 
-    /// One octave up doubles the playback rate (3072 units = one octave).
     #[test]
     fn octave_doubles_rate() {
         let base = note_key_to_hz(13568);

@@ -1,15 +1,3 @@
-//! Matches an archive's songs against a folder of reference recordings, so a game's numbered song
-//! ids can be paired with the track listing of its official soundtrack.
-//!
-//! A GBA/DS song table carries no titles, and a soundtrack release carries no song ids, so the only
-//! thing the two have in common is the audio itself. This renders every song in the archive, decodes
-//! every reference recording, reduces both to the same chroma feature, and reports which songs each
-//! reference track sounds like. The report is for a human to read: short jingles and near-duplicate
-//! cues are exactly where an automatic match goes wrong, so nothing here writes a song-name table.
-//!
-//! Reference tracks are visited in sorted relative-path order, which for a normal soundtrack rip
-//! (`Disc 1/01 - ….mp3`) is album order.
-
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
@@ -24,33 +12,15 @@ use rayon::prelude::*;
 use rustfft::{FftPlanner, num_complex::Complex32};
 use serde_json::{Value, json};
 
-/// Analysis frames per second. Both sides are framed at this rate regardless of their native
-/// sample rates, so no resampling is needed anywhere in the pipeline.
 const FRAME_RATE: f64 = 10.0;
-/// Nominal analysis window length. The real window is the nearest power of two in samples, so it
-/// varies a little with the source rate; chroma is insensitive to that.
 const WINDOW_SECONDS: f64 = 0.2;
-/// Chroma ignores everything outside this band: below it is bass rumble the pitch mapping resolves
-/// badly, above it is mostly percussion and aliasing.
 const MIN_HZ: f32 = 55.0;
 const MAX_HZ: f32 = 5000.0;
-/// The furthest the two recordings may be shifted against each other when scoring, in frames. A
-/// reference rip's lead-in and our render's start rarely differ by more than a couple of seconds.
 const MAX_LAG_FRAMES: usize = 40;
-/// A comparison needs at least this many overlapping frames to mean anything. Kept low because a
-/// game's short cues (a level-up flourish, a jingle for receiving an item) are only a second or two
-/// long, and refusing to score them at all is less useful than scoring them and flagging the result.
 const MIN_OVERLAP_FRAMES: usize = 8;
-/// Overlap (in frames) a comparison needs before its score is trusted at face value. A mean cosine
-/// over a handful of frames is mostly noise and will happily reach 0.9 between unrelated music, so
-/// shorter comparisons are scaled down in proportion. Without this a sub-second fragment elsewhere
-/// in the ROM outranks the real, correctly-sized match.
 const CONFIDENT_OVERLAP_FRAMES: usize = 30;
-/// Frames quieter than this (relative to the loudest frame) are treated as silence and trimmed off
-/// each end before scoring.
 const SILENCE_FLOOR: f32 = 0.02;
 
-/// The rate the archive's songs are rendered at.
 const RENDER_RATE: u32 = 32_768;
 
 #[derive(ClapArgs)]
@@ -58,39 +28,27 @@ const RENDER_RATE: u32 = 32_768;
     about = "Match an archive's song ids against a folder of reference soundtrack recordings."
 )]
 pub struct Args {
-    /// Decompressed sound archive (DS SDAT, DSE, or GBA `.gbaaudio`).
     archive: PathBuf,
-    /// Folder of reference recordings, searched recursively. Sorted relative path = album order.
     reference_dir: PathBuf,
-    /// Curated `[{ "songId", "title" }]` JSON, so each candidate is shown with the title it
-    /// already has. Purely informational.
     #[arg(long)]
     names: Option<PathBuf>,
-    /// Also write the full report here as JSON.
     #[arg(long)]
     out: Option<PathBuf>,
-    /// Seconds of each recording to compare.
     #[arg(long, default_value_t = 30.0)]
     seconds: f64,
-    /// Candidates to list per reference track.
     #[arg(long, default_value_t = 5)]
     top: usize,
-    /// Scores below this are called out as weak matches.
     #[arg(long, default_value_t = 0.5)]
     min_score: f32,
 }
 
-/// A recording reduced to what the matcher compares: one L2-normalised, mean-removed chroma vector
-/// per analysis frame, silence already trimmed from both ends.
 struct Chroma {
     frames: Vec<[f32; 12]>,
 }
 
 impl Chroma {
-    /// Reduces mono `samples` at `rate` Hz to chroma frames.
     fn analyze(samples: &[f32], rate: f64) -> Self {
         let hop = (rate / FRAME_RATE).round().max(1.0) as usize;
-        // The nearest power of two to the nominal window, so the FFT stays cheap.
         let n = {
             let want = (WINDOW_SECONDS * rate).max(64.0);
             1usize << (want.log2().round() as u32)
@@ -99,7 +57,6 @@ impl Chroma {
             return Self { frames: Vec::new() };
         }
 
-        // Hann window, and the pitch class each FFT bin lands in (or none, outside the band).
         let window: Vec<f32> = (0..n)
             .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / n as f32).cos())
             .collect();
@@ -107,7 +64,6 @@ impl Chroma {
             .map(|k| {
                 let hz = k as f32 * rate as f32 / n as f32;
                 (MIN_HZ..=MAX_HZ).contains(&hz).then(|| {
-                    // Semitones above A440, wrapped into a pitch class.
                     let semitone = 12.0 * (hz / 440.0).log2();
                     (semitone.round() as i32).rem_euclid(12) as usize
                 })
@@ -139,7 +95,6 @@ impl Chroma {
             start += hop;
         }
 
-        // Trim the silent head and tail, judged against the loudest frame in the recording.
         let peak = energies.iter().copied().fold(0.0f32, f32::max);
         let threshold = peak * SILENCE_FLOOR;
         let first = energies.iter().position(|&e| e > threshold);
@@ -150,9 +105,6 @@ impl Chroma {
         frames.drain(last + 1..);
         frames.drain(..first);
 
-        // Per frame: normalise away loudness, then remove the mean across the twelve classes. The
-        // mean is the frame's overall tonal density, which is similar for all tonal music; what
-        // discriminates one song from another is how the energy *deviates* from it.
         for f in &mut frames {
             let mean = f.iter().sum::<f32>() / 12.0;
             for v in f.iter_mut() {
@@ -168,16 +120,12 @@ impl Chroma {
         Self { frames }
     }
 
-    /// The best per-frame cosine similarity between the two chroma sequences, over every alignment
-    /// within [`MAX_LAG_FRAMES`], scaled down when the compared span is too short to trust (see
-    /// [`CONFIDENT_OVERLAP_FRAMES`]). `-1.0` when they cannot be compared at all.
     fn similarity(&self, other: &Chroma) -> f32 {
         let (a, b) = (&self.frames, &other.frames);
         if a.len() < MIN_OVERLAP_FRAMES || b.len() < MIN_OVERLAP_FRAMES {
             return -1.0;
         }
         let mut best = -1.0f32;
-        // `lag` shifts `b` right relative to `a`; the negative half shifts it left.
         for lag in -(MAX_LAG_FRAMES as isize)..=(MAX_LAG_FRAMES as isize) {
             let (a_start, b_start) = if lag >= 0 {
                 (lag as usize, 0)
@@ -200,8 +148,6 @@ impl Chroma {
     }
 }
 
-/// Every file under `dir` that looks like audio, in sorted relative-path order — which for a
-/// standard soundtrack rip (`Disc 1/01 - ….mp3`) is the album's own track order.
 fn reference_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "m4a", "aac", "ogg"];
     let mut out = Vec::new();
@@ -225,7 +171,6 @@ fn reference_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Decodes an audio file to mono samples, returning them with the file's sample rate.
 fn decode_reference(path: &Path) -> Result<(Vec<f32>, f64), String> {
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::DecoderOptions;
@@ -264,7 +209,6 @@ fn decode_reference(path: &Path) -> Result<(Vec<f32>, f64), String> {
     loop {
         let packet = match format.next_packet() {
             Ok(p) => p,
-            // Both of these are how symphonia reports a clean end of stream.
             Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(Error::ResetRequired) => break,
             Err(e) => return Err(e.to_string()),
@@ -274,7 +218,6 @@ fn decode_reference(path: &Path) -> Result<(Vec<f32>, f64), String> {
         }
         let decoded = match decoder.decode(&packet) {
             Ok(d) => d,
-            // A damaged packet is worth skipping rather than failing the whole file.
             Err(Error::DecodeError(_)) => continue,
             Err(e) => return Err(e.to_string()),
         };
@@ -294,7 +237,6 @@ fn decode_reference(path: &Path) -> Result<(Vec<f32>, f64), String> {
     Ok((mono, rate))
 }
 
-/// Renders `seconds` of one song from the archive, downmixed to mono.
 fn render_song(
     data: &dyn SoundData,
     song_id: u32,
@@ -317,7 +259,6 @@ fn render_song(
     mono
 }
 
-/// `songId -> curated title`, from a `[{ "songId", "title" }]` table. Missing file = empty map.
 fn curated_titles(path: Option<&PathBuf>) -> HashMap<u32, String> {
     let Some(path) = path else {
         return HashMap::new();
@@ -341,11 +282,8 @@ fn curated_titles(path: Option<&PathBuf>) -> HashMap<u32, String> {
         .collect()
 }
 
-/// One reference track's ranked candidates.
 struct Match {
-    /// Path relative to the reference directory, which is also the album track order key.
     label: String,
-    /// `(song id, score)`, best first.
     candidates: Vec<(u32, f32)>,
 }
 
@@ -380,8 +318,6 @@ pub fn run(args: Args) -> ExitCode {
 
     let titles = curated_titles(args.names.as_ref());
     let song_ids = data.song_ids();
-    // Match on the raw engine output: the enhancement DSP colours the sound in ways the reference
-    // recording never had, and chroma only cares about which pitches are sounding.
     let config = PerDeviceSettings::neutral();
     let render_frames = (args.seconds * f64::from(RENDER_RATE)) as usize;
     eprintln!(
@@ -402,7 +338,6 @@ pub fn run(args: Args) -> ExitCode {
             .unwrap()
             .progress_chars("=>-");
 
-    // --- Analyze both sides. ---
     let rom_bar = ProgressBar::new(song_ids.len() as u64);
     rom_bar.set_style(bar_style.clone());
     rom_bar.set_message("render ");
@@ -428,7 +363,6 @@ pub fn run(args: Args) -> ExitCode {
                 .to_string_lossy()
                 .replace('\\', "/");
             let result = decode_reference(path).map(|(mono, rate)| {
-                // Only the compared span is needed, and decoding stops mattering past it.
                 let take = (args.seconds * rate) as usize;
                 Chroma::analyze(&mono[..take.min(mono.len())], rate)
             });
@@ -444,7 +378,6 @@ pub fn run(args: Args) -> ExitCode {
         .collect();
     ref_bar.finish_and_clear();
 
-    // --- Score every reference track against every song. ---
     let matches: Vec<Match> = ref_chroma
         .par_iter()
         .map(|(label, chroma)| {
@@ -464,8 +397,6 @@ pub fn run(args: Args) -> ExitCode {
         })
         .collect();
 
-    // A song claimed as the best match by more than one reference track means at least one of them
-    // is wrong, so the report flags every track involved.
     let mut claims: HashMap<u32, usize> = HashMap::new();
     for m in &matches {
         if let Some(&(id, _)) = m.candidates.first() {
@@ -473,7 +404,6 @@ pub fn run(args: Args) -> ExitCode {
         }
     }
 
-    // --- Report. ---
     let mut weak = 0usize;
     let mut contested = 0usize;
     for m in &matches {

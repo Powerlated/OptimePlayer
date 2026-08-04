@@ -1,78 +1,64 @@
-//! [`DseSequencer`]: the SMDL multi-track bytecode interpreter.
-//!
-//! Runs all of a song's tracks one **sequencer tick** at a time, exactly as the DSE driver's
-//! `ParseDseEvent`/`UpdateSequencerTracks` do (transcribed from `pret/pmd-sky`'s
-//! `asm/main_0206C9BC.s`): a track with pending wait-ticks just counts down; otherwise it
-//! executes events until a pause/wait sets a new wait. Notes are fire-and-forget (the note's
-//! own duration drives its release), so the per-track timeline is advanced solely by pauses.
-//!
-//! The interpreter is headless: it emits a flat [`SeqOp`] stream that the device player turns
-//! into voices. It owns no audio or envelope state.
-
 use super::events::{PAUSE_TICKS, control_info};
 use super::smdl::Smdl;
 use crate::util::{read_u8, read_u16};
 
-/// Default tempo before any `SetBpm` event (the DSE driver's startup tempo).
 const DEFAULT_BPM: u8 = 120;
-/// Hard cap on events executed per track per tick — guards against a malformed zero-length loop.
 const MAX_EVENTS_PER_TICK: u32 = 100_000;
 
-/// One thing the sequencer did on a tick, for the device player to act on.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SeqOp {
-    /// Start a note on `track` (a DSE channel index, 0..=15).
     NoteOn {
         track: usize,
         key: u8,
         velocity: u8,
-        /// Auto-release after this many sequencer ticks; `None` reuses the previous duration but
-        /// here always resolved to a concrete value, or `0` if never set.
         duration: u32,
     },
-    /// Global tempo change (beats/minute).
-    Tempo { bpm: u8 },
-    /// Track selected a new program/instrument id.
-    Program { track: usize, program: u16 },
-    /// Track volume (0..=127).
-    Volume { track: usize, volume: u8 },
-    /// Track expression / secondary volume (0..=127).
-    Expression { track: usize, value: u8 },
-    /// Track pan (0=left, 64=center, 127=right).
-    Pan { track: usize, pan: u8 },
-    /// A musical control opcode the player models with running state (tuning/bend, fades, LFOs):
-    /// surfaced raw so the player owns the per-track state. `operands` are the opcode's bytes.
+    Tempo {
+        bpm: u8,
+    },
+    Program {
+        track: usize,
+        program: u16,
+    },
+    Volume {
+        track: usize,
+        volume: u8,
+    },
+    Expression {
+        track: usize,
+        value: u8,
+    },
+    Pan {
+        track: usize,
+        pan: u8,
+    },
     Control {
         track: usize,
         opcode: u8,
         operands: Vec<u8>,
     },
-    /// The track jumped back to its main loop point.
     Looped,
-    /// A track reached `EndTrack` with no loop point.
-    TrackEnded { track: usize },
+    TrackEnded {
+        track: usize,
+    },
 }
 
-/// Control opcodes the player handles as musical state via [`SeqOp::Control`] (tuning/bend, the
-/// volume/pan/tuning fades and deltas, and the LFO setup/use family). Everything else is consumed.
 fn is_player_control(op: u8) -> bool {
     matches!(op,
-        0xAF                                   // SongVolumeFade
-        | 0xBE                                 // ForceLfoEnvelopeLevel
-        | 0xD0..=0xD4                          // SetTuning / TuningDelta{Coarse,Fine,Full} / TuningFade
-        | 0xD7                                 // SetKeyBend (pitch wheel)
-        | 0xDB                                 // SetKeyBendRange
-        | 0xDC | 0xDD | 0xDF                   // key-bend LFO setup/envelope/use
-        | 0xE1 | 0xE2                          // VolumeDelta / VolumeFade
-        | 0xE4 | 0xE5 | 0xE7                   // volume LFO setup/envelope/use
-        | 0xE9 | 0xEA                          // PanDelta / PanFade
-        | 0xEC | 0xED | 0xEF                   // pan LFO setup/envelope/use
-        | 0xF0..=0xF3                          // generic LFO setup/envelope/param/use
+        0xAF
+        | 0xBE
+        | 0xD0..=0xD4
+        | 0xD7
+        | 0xDB
+        | 0xDC | 0xDD | 0xDF
+        | 0xE1 | 0xE2
+        | 0xE4 | 0xE5 | 0xE7
+        | 0xE9 | 0xEA
+        | 0xEC | 0xED | 0xEF
+        | 0xF0..=0xF3
     )
 }
 
-/// A sub-loop stack frame (`0x9C`/`0x9D`/`0x9E`). `count` is iterations remaining; `octave` is
-/// restored on each loop-back (the driver saves/restores it).
 #[derive(Debug, Clone, Copy)]
 struct SubLoop {
     start: usize,
@@ -81,23 +67,17 @@ struct SubLoop {
     octave: i32,
 }
 
-/// Per-track runtime state.
 #[derive(Debug, Clone)]
 struct TrackState {
-    /// DSE channel index this track plays on (0..=15) — the synth track for its notes.
     channel: usize,
     events: Vec<u8>,
     pos: usize,
     active: bool,
     octave: i32,
     program: u16,
-    /// Sequencer ticks still to wait before executing more events.
     wait: u32,
-    /// Last pause length, for `RepeatLastPause`/`AddToLastPause`.
     last_pause: u32,
-    /// Previous note duration, reused by a `PlayNote` with no duration bytes.
     prev_duration: u32,
-    /// Main loop point (`MainLoopBegin`), if set.
     loop_start: Option<usize>,
     loop_stack: Vec<SubLoop>,
 }
@@ -120,22 +100,15 @@ impl TrackState {
     }
 }
 
-/// The SMDL interpreter: holds every track's state plus the shared tempo and tick counter.
 pub struct DseSequencer {
     tracks: Vec<TrackState>,
-    /// Ticks per quarter note (from the SMDL `song` chunk).
     pub tpqn: u16,
-    /// Current tempo in beats per minute (sequence-global; any `SetBpm` updates it).
     pub bpm: u8,
-    /// Sequencer ticks executed so far (the visualizer timeline).
     pub ticks_elapsed: u32,
-    /// Set once every track has ended (no main loop point anywhere).
     pub ended: bool,
 }
 
 impl DseSequencer {
-    /// Builds an interpreter for `smdl`. The control track (track 0) and the per-channel music
-    /// tracks all run; notes are emitted on each track's DSE channel index.
     pub fn new(smdl: &Smdl) -> DseSequencer {
         let tracks = smdl
             .tracks
@@ -151,7 +124,6 @@ impl DseSequencer {
         }
     }
 
-    /// Advances exactly one sequencer tick, appending what happened to `ops`.
     pub fn seq_tick(&mut self, ops: &mut Vec<SeqOp>) {
         self.ticks_elapsed += 1;
         let start = ops.len();
@@ -166,12 +138,10 @@ impl DseSequencer {
                 continue;
             }
             self.run_track(i, ops);
-            // The tick that started a pause counts as its first tick.
             if self.tracks[i].wait > 0 {
                 self.tracks[i].wait -= 1;
             }
         }
-        // Tempo is sequence-global: track the latest `SetBpm` this tick produced.
         for op in &ops[start..] {
             if let SeqOp::Tempo { bpm } = op {
                 self.bpm = *bpm;
@@ -182,7 +152,6 @@ impl DseSequencer {
         }
     }
 
-    /// Executes events on track `i` until a pause/wait is set or the track ends.
     fn run_track(&mut self, i: usize, ops: &mut Vec<SeqOp>) {
         let mut iters = 0u32;
         loop {
@@ -208,13 +177,11 @@ impl DseSequencer {
                 tr.wait = ticks;
                 return;
             } else if self.control(i, op, ops) {
-                // `control` returned true => a wait was set (pause-like) => yield this tick.
                 return;
             }
         }
     }
 
-    /// A `PlayNote` (opcode 0x00–0x7F): decode note-data + duration, update octave, emit `NoteOn`.
     fn play_note(&mut self, i: usize, velocity: u8, ops: &mut Vec<SeqOp>) {
         let tr = &mut self.tracks[i];
         let Some(&notedata) = tr.events.get(tr.pos) else {
@@ -249,20 +216,15 @@ impl DseSequencer {
         });
     }
 
-    /// Handles a control opcode (0x90–0xFF). Returns `true` if it set a wait (the track should
-    /// yield this tick), `false` to keep executing. Unhandled opcodes consume their operands.
     fn control(&mut self, i: usize, op: u8, ops: &mut Vec<SeqOp>) -> bool {
         let tr = &mut self.tracks[i];
         let track = tr.channel;
-        // Helper closures can't borrow `tr` mutably and read events; read operands inline.
         match op {
             0x90 => {
-                // WaitSame / RepeatLastPause
                 tr.wait = tr.last_pause;
                 return true;
             }
             0x91 => {
-                // WaitDelta / AddToLastPause (signed)
                 let delta = tr.events.get(tr.pos).copied().unwrap_or(0) as i8;
                 tr.pos += 1;
                 tr.last_pause = (tr.last_pause as i64 + delta as i64).max(0) as u32;
@@ -293,14 +255,12 @@ impl DseSequencer {
                 return true;
             }
             0x95 => {
-                // WaitUntilFadeout: approximate as a fixed wait of its operand.
                 let v = read_u8(&tr.events, tr.pos) as u32;
                 tr.pos += 1;
                 tr.wait = v;
                 return true;
             }
             0x98 => {
-                // EndTrack: loop back if a main loop point exists, else end.
                 if let Some(ls) = tr.loop_start {
                     tr.pos = ls;
                     ops.push(SeqOp::Looped);
@@ -309,9 +269,8 @@ impl DseSequencer {
                     ops.push(SeqOp::TrackEnded { track });
                 }
             }
-            0x99 => tr.loop_start = Some(tr.pos), // MainLoopBegin
+            0x99 => tr.loop_start = Some(tr.pos),
             0x9C => {
-                // SubLoopBegin
                 let count = read_u8(&tr.events, tr.pos);
                 tr.pos += 1;
                 let frame = SubLoop {
@@ -325,7 +284,6 @@ impl DseSequencer {
                 }
             }
             0x9D => {
-                // SubLoopEnd
                 if let Some(top) = tr.loop_stack.last_mut() {
                     top.count = top.count.wrapping_sub(1);
                     if top.count == 0 {
@@ -339,7 +297,6 @@ impl DseSequencer {
                 }
             }
             0x9E => {
-                // SubLoopBreakOnLastIteration
                 if let Some(top) = tr.loop_stack.last().copied()
                     && top.count == 1
                 {
@@ -382,8 +339,6 @@ impl DseSequencer {
                 ops.push(SeqOp::Pan { track, pan });
             }
             _ => {
-                // Read the operand bytes, then either surface the event to the player (musical
-                // control: tuning/fades/LFOs) or just consume it.
                 let n = control_info(op).map(|(_, n)| n as usize).unwrap_or(0);
                 let end = (tr.pos + n).min(tr.events.len());
                 if is_player_control(op) {
@@ -406,9 +361,7 @@ mod tests {
     use super::*;
     use crate::devices::dse::smdl::Smdl;
 
-    /// Wraps raw track-event bytes into a one-track SMDL for testing.
     fn smdl_one_track(events: &[u8]) -> Smdl {
-        // Header (0x40) + song (0x40) + trk + eoc.
         let mut d = vec![0u8; 0x40];
         d[0..4].copy_from_slice(b"smdl");
         let mut song = vec![0u8; 0x40];
@@ -420,7 +373,7 @@ mod tests {
         trk.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
         let payload_len = 4 + events.len();
         trk.extend_from_slice(&(payload_len as u32).to_le_bytes());
-        trk.extend_from_slice(&[1, 0, 0, 0]); // track_id=1, channel_id=0
+        trk.extend_from_slice(&[1, 0, 0, 0]);
         trk.extend_from_slice(events);
         while trk.len() % 4 != 0 {
             trk.push(0x98);
@@ -443,8 +396,6 @@ mod tests {
 
     #[test]
     fn tempo_program_and_note() {
-        // SetBpm 150, SetInstrument 5, SetOctave 6, note (C, dur 1 byte = 48), pause quarter.
-        // notedata 0x40 = nb_params=1, octavemod=0(-2)... use 0x60 => nb_params=1, octave +0.
         let ops = run(
             &[0xA4, 150, 0xAC, 5, 0xA0, 6, 0x7F, 0x60, 48, 0x83, 0x98],
             1,
@@ -467,7 +418,6 @@ mod tests {
 
     #[test]
     fn pause_consumes_ticks() {
-        // A quarter-note pause (0x83 = 48 ticks) then a note. The note must not fire for 48 ticks.
         let events = [0x83, 0x7F, 0x60, 12, 0x98];
         let after_10 = run(&events, 10);
         assert!(
@@ -480,7 +430,6 @@ mod tests {
 
     #[test]
     fn main_loop_repeats() {
-        // MainLoopBegin, note, quarter pause, EndTrack -> should loop forever (never TrackEnded).
         let ops = run(&[0x99, 0x7F, 0x60, 12, 0x83, 0x98], 200);
         let notes = ops
             .iter()
@@ -496,8 +445,6 @@ mod tests {
 
     #[test]
     fn sub_loop_repeats_body_n_times() {
-        // SubLoopBegin(3), note, quarter pause, SubLoopEnd, EndTrack.
-        // Body should play 3 times then end.
         let ops = run(&[0x9C, 3, 0x7F, 0x60, 12, 0x83, 0x9D, 0x98], 500);
         let notes = ops
             .iter()

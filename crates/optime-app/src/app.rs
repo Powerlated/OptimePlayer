@@ -1,5 +1,3 @@
-//! The egui application: song list, transport, settings, visualizer.
-
 use std::sync::{Arc, Mutex};
 
 use optime_core::devices::gba::GbaRom;
@@ -23,7 +21,6 @@ use crate::song_names;
 use crate::visualizer::{self, VisSnapshot};
 use crate::{TRACK_COUNT, audio::AudioEngine, player};
 
-/// The four-option resampling-algorithm combo box, shared by the resampling settings sections.
 fn resample_combo(ui: &mut egui::Ui, id_salt: &str, choice: &mut InstrumentResampleChoice) {
     ui.horizontal(|ui| {
         egui::ComboBox::from_id_salt(id_salt)
@@ -42,7 +39,6 @@ fn resample_combo(ui: &mut egui::Ui, id_salt: &str, choice: &mut InstrumentResam
     });
 }
 
-/// The "Sinc taps" slider, shared by the resampling settings sections (shown for the sinc modes).
 fn sinc_taps_slider(ui: &mut egui::Ui, sinc_taps: &mut usize) {
     ui.add(
         egui::Slider::new(sinc_taps, 4..=128)
@@ -55,13 +51,6 @@ fn sinc_taps_slider(ui: &mut egui::Ui, sinc_taps: &mut usize) {
     );
 }
 
-/// The "Default" listing order for a **sparse** curated table. Each input is `(sparse_index,
-/// native_order)`; songs with a `sparse_index` are *anchored* to that absolute output position and
-/// the rest *fill* the remaining slots in native order. Returns the songs' original indices in their
-/// new order. Implemented as a merge: at each output slot it emits the next anchored song once its
-/// target index is reached (or once no fillers remain), otherwise the next filler — robust to
-/// colliding or out-of-range `sparse_index` values (which simply land at the next free slot / the
-/// end).
 fn sparse_default_order(keys: &[(Option<usize>, usize)]) -> Vec<usize> {
     let n = keys.len();
     let mut anchored: Vec<usize> = (0..n).filter(|&i| keys[i].0.is_some()).collect();
@@ -86,9 +75,6 @@ fn sparse_default_order(keys: &[(Option<usize>, usize)]) -> Vec<usize> {
     order
 }
 
-/// Renders a song's id as a dim, monospaced `#123` tag — shared by the library list and the
-/// song-name editor so the number is styled identically in both. `min_digits` right-pads the number
-/// (monospaced) so a column of tags shares one width and the song names line up; pass 0 for none.
 fn song_id_tag(
     ui: &mut egui::Ui,
     song_id: u32,
@@ -102,33 +88,25 @@ fn song_id_tag(
     )
 }
 
-/// The song-title half of a library row: a static iOS-style row (browse list) or an editable name
-/// field (song-name editor). Selects which widget [`song_id_and_title`] draws after the id tag.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum SongTitle<'a> {
-    /// Read-only row with the length, status badges, and selection highlight; click to play.
     Static {
         name: &'a str,
         length: Option<&'a str>,
         badges: &'a [(&'a str, egui::Color32)],
         selected: bool,
     },
-    /// Editable single-line name field (the editor); the caller wires up rename/reset.
-    Edit { name: &'a mut String },
+    Edit {
+        name: &'a mut String,
+    },
 }
 
-/// The two responses [`song_id_and_title`] hands back: the id tag (for a hover) and the title widget
-/// (click-to-play in browse mode, rename/reset in edit mode).
 struct SongRow {
-    /// Only the native song-name editor reads this (for the curated-state hover).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     id: egui::Response,
     title: egui::Response,
 }
 
-/// Renders one library row's leading `#id` tag and the song title, shared by the browse list and the
-/// song-name editor so both lay out and pad the number identically. The caller supplies the
-/// surrounding layout (transport/menu controls) and wires up the returned responses.
 fn song_id_and_title(
     ui: &mut egui::Ui,
     song_id: u32,
@@ -154,63 +132,35 @@ fn song_id_and_title(
     SongRow { id, title }
 }
 
-/// One entry in the flattened song list.
 struct Song {
     archive_index: usize,
     song_id: u32,
-    /// The bare song name (no `#id` suffix), used as the alphabetical sort key.
     name: String,
-    /// The display label (`name (#id)`).
     label: String,
-    /// The archive's native listing position, used as a stable tie-breaker for the other sorts and
-    /// as the "Default" order for songs with no OST track number.
     order: usize,
-    /// The song's position in the game's curated listing order (OST tracks first in album order,
-    /// then the rest), when the game has a curated table. In "Default" sort these songs are listed
-    /// first, in this order; songs without one follow, in native order.
     ost_order: Option<usize>,
-    /// The song's absolute "Default"-sort position when the curated table is **sparse** (only a few
-    /// of the game's songs are labeled): the labeled song is placed at this list index among the
-    /// unlabeled ones, instead of being grouped at the front by [`Self::ost_order`]. `None` for
-    /// dense/album-ordered tables, which keep the front-grouped behavior.
     sparse_index: Option<usize>,
-    /// Playback length in seconds, once computed (lazily, in the background).
     length: Option<f64>,
-    /// Whether the length has been computed yet (a computed-but-failed length stays `None`).
     length_computed: bool,
-    /// Whether this song belongs in the curated song-names JSON: `true` if it came from the loaded
-    /// table, or it's been renamed/reordered in "Edit song names" mode. Only these songs are written
-    /// back on save, so untouched (e.g. ROM-embedded-name) songs stay out of the file. Only read by
-    /// the native-only editor.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     curated: bool,
 }
 
-/// Where the song-name editor should move a song (see [`OptimeApp::reposition_song`]). Movement is
-/// through the unlabeled slots only; other curated songs stay pinned.
 #[cfg(not(target_arch = "wasm32"))]
 enum CuratedTarget {
-    /// Towards the start by one movable slot.
     Up,
-    /// Towards the end by one movable slot.
     Down,
-    /// To the movable slot implied by a typed 0-based list position.
     Abs(usize),
 }
 
-/// Which visualizer the central panel shows.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum VisTab {
-    /// The streaming FL-Studio-style piano roll.
     PianoRoll,
-    /// The legacy per-track keyboard grid (track enables + live-input selection).
     Tracks,
 }
 
-/// Cross-thread inbox for asynchronously-loaded file bytes: (source key, bytes).
 type FileInbox = Arc<Mutex<Option<(String, Vec<u8>)>>>;
 
-/// The screens reachable from the mobile bottom navigation bar.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum MobileTab {
     NowPlaying,
@@ -219,28 +169,20 @@ enum MobileTab {
     Settings,
 }
 
-/// The adjacent song's pre-rendered piano roll, shown sliding in during a swipe.
 struct SwipePreview {
-    /// +1 = next (dragging left), -1 = previous (dragging right).
     dir: isize,
-    /// A roll pre-filled with the target song's opening notes.
     roll: PianoRoll,
-    /// The look-ahead runner that filled `roll`; handed to the app on commit.
     look: Option<FsVisController>,
 }
 
-/// Which library collection is open in the library browser.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum LibraryView {
-    /// The list of collections (liked / recent / playlists).
     Root,
     Liked,
     Recent,
-    /// A user playlist, by index into `library.playlists`.
     Playlist(usize),
 }
 
-/// Demo files available to load. Native reads from `demos/`; web fetches them at runtime.
 const DEMOS: &[(&str, &str)] = &[
     ("Super Mario 64 DS", "super-mario-64-ds.sdat"),
     ("New Super Mario Bros.", "new-super-mario-bros.sdat"),
@@ -252,19 +194,14 @@ const DEMOS: &[(&str, &str)] = &[
     ("Ace Attorney", "ace-attorney.sdat"),
 ];
 
-// Extra, **local-only** demo entries generated at build time from the optional, gitignored
-// `local_extras.txt` manifest (see `build.rs`); empty in a clean clone. Defines `LOCAL_DEMOS`.
 include!(concat!(env!("OUT_DIR"), "/local_demos.rs"));
 
-/// All demo entries: the committed [`DEMOS`] plus any local-only ones from `local_extras.txt`.
 fn all_demos() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
     DEMOS.iter().chain(LOCAL_DEMOS.iter())
 }
 
-/// The application state.
 pub struct OptimeApp {
     audio: Option<AudioEngine>,
-    /// Set once audio init has been attempted and failed, so we stop retrying.
     audio_failed: bool,
     sample_rate: f64,
 
@@ -275,111 +212,58 @@ pub struct OptimeApp {
     paused: bool,
     status: String,
 
-    /// OS media-transport controls (Bluetooth/keyboard media keys); lazily created once the window
-    /// handle is available, `None` if unsupported (e.g. web, or no handle yet).
     media: Option<media_controls::MediaControls>,
-    /// Whether media-control creation has been attempted (so it's tried only once).
     media_tried: bool,
 
-    // Live piano-roll track mutes, injected into the per-device config each frame (see
-    // [`Self::config`]).
     track_enables: [bool; TRACK_COUNT],
 
-    /// Saved state that persists across sessions
     p: Persisted,
 
-    /// xorshift64 state for shuffle.
     rng: u64,
 
-    /// Cached computed song lengths, keyed by (source key, song id), so re-sorting and
-    /// reloading don't recompute. `None` = the length couldn't be determined.
     length_cache: std::collections::HashMap<(String, u32), Option<f64>>,
-    /// Set when the song list needs (re)sorting (after a load or a sort-mode change).
     needs_sort: bool,
-    /// Which library collection the browser shows.
     library_view: LibraryView,
-    /// Text buffer for the "new playlist" name field.
     new_playlist_name: String,
-    /// Source key (demo stem or user file name) of the currently loaded archives.
     current_source: String,
-    /// The current playlist in *natural* (unshuffled) order — the song list snapshot or a
-    /// collection's tracks. The audio thread owns the live (possibly shuffled) order + position;
-    /// this is what the UI re-materializes from on a shuffle toggle.
     playlist: Vec<TrackRef>,
-    /// Positions in [`Self::playlist`] in the order last sent to the audio thread. It turns that
-    /// thread's index back into a natural-order one. Searching by identity cannot do this job: when
-    /// the same song sits in the list twice, it finds whichever copy comes first.
     playlist_order: Vec<usize>,
-    /// Last `playback.status_gen` the UI reconciled, to detect audio-thread-driven advances.
     last_status_gen: u64,
-    /// A track waiting for its source archive to finish loading (cross-source playlist jump
-    /// or session restore).
     pending_play: Option<TrackRef>,
-    /// Restore-on-launch: start the restored track paused instead of blasting audio.
     resume_paused: bool,
 
-    /// Which mobile screen the bottom navigation has selected.
     mobile_tab: MobileTab,
-    /// Horizontal slide of the Now Playing visualizer, in points: follows the finger during a
-    /// swipe, then animates back to 0 (the new song sliding in after a committed swipe).
     swipe_offset: f32,
-    /// Volume attenuation tied to the swipe: 1.0 centered, → 0.0 as the view leaves the screen.
     swipe_gain: f32,
-    /// The adjacent song's roll shown while dragging (becomes the live roll on commit).
     swipe_preview: Option<SwipePreview>,
-    /// The old song's roll sliding out after a committed swipe: (roll, exit side −1/+1).
     swipe_out: Option<(PianoRoll, f32)>,
 
-    /// Rolling history of the audio-callback DSP load, for the top-bar meter.
     cpu_history: std::collections::VecDeque<f32>,
-    /// Rolling history of the active synthesizer voice count.
     voice_history: std::collections::VecDeque<f32>,
-    /// Smoothed high-band-compressor gain reduction (dB, ≤ 0), sampled from the audio thread in
-    /// [`Self::sync_audio`] for the small GR bar inside the high-band-compressor settings block.
     high_comp_gr_db: f32,
 
-    /// Cross-thread inbox for asynchronously-loaded file bytes: (source key, bytes).
     pending_file: FileInbox,
 
-    /// Which visualizer tab is active.
     vis_tab: VisTab,
-    /// Streaming piano-roll state (note timeline, smoothed scroll clock).
     piano_roll: PianoRoll,
-    /// Parallel look-ahead sequence runner feeding upcoming notes to the piano roll.
     look_ahead: Option<FsVisController>,
-    /// Whole-track note timeline for the overview bar, rendered once when the song loads.
     overview: Option<optime_core::SongOverview>,
-    /// GPU texture of [`Self::overview`], (re)built lazily from the active [`egui::Context`].
     overview_tex: Option<egui::TextureHandle>,
-    /// Whether the "Stats for Nerds" sample-DC-offset window is open.
     stats_open: bool,
-    /// Cached per-sample DC-offset stats for the current song, recomputed when the window opens
-    /// or the song changes. The key is the `(archive_index, song_id)` they were computed for.
     stats_cache: Option<((usize, u32), Vec<optime_core::WaveformDcStat>)>,
 
-    /// Session-only (never persisted) "Edit song names" mode: when on, the library list rows become
-    /// editable (rename + reorder) and a Save button writes the curated titles + order back to the
-    /// source-tree JSON. A maintainer dev-tool, meaningful only when run from the checkout.
     #[cfg(not(target_arch = "wasm32"))]
     song_edit_enabled: bool,
-    /// The adjustable target filename the editor's "Save to JSON" writes to (under
-    /// `song_names::source_json_dir()`). Seeded from the loaded game's table, then user-editable.
     #[cfg(not(target_arch = "wasm32"))]
     song_edit_filename: String,
-    /// The source key [`Self::song_edit_filename`] was seeded for, so it re-seeds when a different
-    /// game is loaded (but keeps the user's edits while the same game stays loaded).
     #[cfg(not(target_arch = "wasm32"))]
     song_edit_filename_for: String,
 
-    /// Session-only chord-annotation dev-tool state (see [`crate::annotation`]).
     annotation: AnnotationState,
-    /// The chord symbol being typed for the selected span.
     annotation_entry: String,
 }
 
 impl OptimeApp {
-    /// Builds the app and loads the first demo. Native starts audio immediately; web defers it
-    /// until the first user gesture (browser autoplay policy — see [`Self::ensure_audio`]).
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::theme::apply(&cc.egui_ctx);
         #[cfg(not(target_arch = "wasm32"))]
@@ -448,8 +332,6 @@ impl OptimeApp {
             annotation_entry: String::new(),
         };
 
-        // Resume where the last session left off (paused), if the last track was from a demo
-        // we can re-fetch; otherwise fall back to the first demo.
         match track {
             Some(t) if all_demos().any(|(_, stem)| *stem == t.source) => {
                 app.resume_paused = true;
@@ -465,7 +347,6 @@ impl OptimeApp {
         app
     }
 
-    /// The persistent reference for the song at list index `i`, if it exists.
     fn track_ref(&self, i: usize) -> Option<TrackRef> {
         self.songs.get(i).map(|s| TrackRef {
             source: self.current_source.clone(),
@@ -474,20 +355,16 @@ impl OptimeApp {
         })
     }
 
-    /// The persistent reference for the currently playing song.
     fn current_track_ref(&self) -> Option<TrackRef> {
         self.current_song.and_then(|i| self.track_ref(i))
     }
 
-    /// Whether the current song plays on the GBA (vs the DS). Defaults to the DS when nothing is
-    /// loaded, so the settings panel has a sensible target before a song is picked.
     fn current_is_gba(&self) -> bool {
         self.current_song
             .and_then(|i| self.songs.get(i))
             .is_some_and(|s| self.archives[s.archive_index].as_any().is::<GbaRom>())
     }
 
-    /// Human-readable name of the current song's console.
     fn current_device_name(&self) -> &'static str {
         if self.current_is_gba() {
             "Game Boy Advance"
@@ -496,7 +373,6 @@ impl OptimeApp {
         }
     }
 
-    /// The persisted synth/audio settings for the current song's console.
     fn device_settings(&self) -> &PerDeviceSettings {
         if self.current_is_gba() {
             &self.p.gba
@@ -505,7 +381,6 @@ impl OptimeApp {
         }
     }
 
-    /// Mutable access to the current console's synth/audio settings (for the settings UI).
     fn device_settings_mut(&mut self) -> &mut PerDeviceSettings {
         if self.current_is_gba() {
             &mut self.p.gba
@@ -514,9 +389,6 @@ impl OptimeApp {
         }
     }
 
-    /// Lazily starts the audio engine. On the web the `AudioContext` may only begin after a user
-    /// gesture, so creation is deferred until the first interaction; once started, any
-    /// already-selected song is (re)loaded into the new engine.
     fn ensure_audio(&mut self, ctx: &egui::Context) {
         if self.audio.is_some() || self.audio_failed {
             return;
@@ -550,10 +422,6 @@ impl OptimeApp {
         let _ = ctx;
     }
 
-    /// Recovers web audio after iOS suspends the `AudioContext` on background. cpal owns the
-    /// context internally and never resumes it, so when the callback has stalled while we should
-    /// be playing we re-`play()` it each frame (cheap) and, on the next user gesture iOS requires,
-    /// rebuild the stream over the same shared state so playback continues from where it left off.
     #[cfg(target_arch = "wasm32")]
     fn keep_audio_alive(&mut self, ctx: &egui::Context) {
         let should_play = self.current_song.is_some() && !self.paused;
@@ -579,12 +447,9 @@ impl OptimeApp {
                 audio.rebuild();
             }
         }
-        // Keep polling (outside of any pointer animation) until the stream recovers.
         ctx.request_repaint();
     }
 
-    /// Loads a demo. Native reads from `demos/`; web fetches it (copied into the deploy by
-    /// Trunk) into [`Self::pending_file`].
     fn request_demo(&mut self, stem: &str, label: &str) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -609,20 +474,13 @@ impl OptimeApp {
         }
     }
 
-    /// The active synth config: the current device's persisted settings (which the synthesis layer
-    /// consumes directly via its resolver methods) with the live piano-roll track mutes injected.
     fn config(&self) -> PerDeviceSettings {
         let mut c = self.device_settings().clone();
         c.track_enables = self.track_enables;
         c
     }
 
-    /// Parses sound archives from `bytes` (DS `.nds`/`.sdat`, or a GBA ROM) and rebuilds the
-    /// song list. Gzip-compressed input (e.g. a `*.sdat.gz` / `*.gbaaudio.gz` demo, or a `.gz` the
-    /// user opens) is transparently decompressed first. `key` is the persistent source identity
-    /// (demo stem or user file name); `source` is the display name for status text.
     fn load_bytes(&mut self, bytes: &[u8], key: &str, source: &str) {
-        // Decompress if the payload is gzip (magic `1f 8b`); otherwise use the bytes as-is.
         let decompressed;
         let bytes: &[u8] = if bytes.starts_with(&[0x1f, 0x8b]) {
             use std::io::Read;
@@ -644,14 +502,12 @@ impl OptimeApp {
         self.archives = archives.into_iter().map(Arc::from).collect();
         self.songs.clear();
         for (i, data) in self.archives.iter().enumerate() {
-            // GBA ROMs carry no song names; supply curated titles + OST order by game code.
             let game_code = data
                 .as_any()
                 .downcast_ref::<GbaRom>()
                 .and_then(GbaRom::game_code);
             for id in data.song_ids() {
                 let meta = song_names::lookup(Some(key), game_code.as_deref(), id);
-                // A curated title (the editor's output) wins over the ROM's embedded name.
                 let name = meta
                     .as_ref()
                     .map(|m| m.title.clone())
@@ -660,7 +516,6 @@ impl OptimeApp {
                 let ost_order = meta.as_ref().map(|m| m.order);
                 let sparse_index = meta.as_ref().and_then(|m| m.sparse_index);
                 let label = format!("{name} (#{id})");
-                // Reuse any previously computed length for this exact song.
                 let (length, length_computed) = match self.length_cache.get(&(key.to_owned(), id)) {
                     Some(v) => (*v, true),
                     None => (None, false),
@@ -684,10 +539,8 @@ impl OptimeApp {
         self.needs_sort = true;
         self.status = format!("Loaded {source}: {} songs.", self.songs.len());
 
-        // A track was waiting for this source (playlist jump / session restore).
         if let Some(t) = self.pending_play.take() {
             if t.source == self.current_source {
-                // Session restore with no playlist context yet: default to the full song list.
                 if self.playlist.is_empty() {
                     self.playlist = (0..self.songs.len())
                         .filter_map(|i| self.track_ref(i))
@@ -703,11 +556,7 @@ impl OptimeApp {
         }
     }
 
-    /// Keeps the song list ordered and the length column filled: lazily computes a few song
-    /// lengths per frame (cached), and (re)applies the sort once it's safe to. Length sort waits
-    /// until every length is known so the list doesn't reshuffle as values trickle in.
     fn update_library_order(&mut self, ctx: &egui::Context) {
-        // Compute a bounded number of still-unknown lengths this frame.
         const LENGTH_BUDGET: usize = 6;
         let mut did_work = 0;
         for idx in 0..self.songs.len() {
@@ -734,42 +583,31 @@ impl OptimeApp {
         }
         let all_known = self.songs.iter().all(|s| s.length_computed);
 
-        // While editing song names, the list is in manual order — don't let a sort reshuffle it.
-        if self.needs_sort && !self.song_edit_active() {
-            // Length sort needs every length first; the others can sort right away.
-            if self.p.sort_mode != SortMode::Length || all_known {
-                self.apply_sort();
-                self.needs_sort = false;
-            }
+        if self.needs_sort
+            && !self.song_edit_active()
+            && (self.p.sort_mode != SortMode::Length || all_known)
+        {
+            self.apply_sort();
+            self.needs_sort = false;
         }
-        // Keep stepping until all lengths are known (so the column fills and a pending length
-        // sort eventually lands), and while a sort is still outstanding.
         if !all_known || self.needs_sort {
             ctx.request_repaint();
         }
     }
 
-    /// Reorders [`Self::songs`] per [`Self::sort_mode`] and [`Self::sort_descending`],
-    /// preserving which song is current.
     fn apply_sort(&mut self) {
         use std::cmp::Ordering;
         let current = self
             .current_song
             .and_then(|i| self.songs.get(i))
             .map(|s| (s.archive_index, s.song_id));
-        // Copy out so the sort closure doesn't borrow `self` alongside `&mut self.songs`.
         let mode = self.p.sort_mode;
         let desc = self.p.sort_descending;
         if mode == SortMode::Default && self.songs.iter().any(|s| s.sparse_index.is_some()) {
-            // Sparse curated table: place each labeled song at its absolute index, with the unlabeled
-            // songs filling the gaps in native order (the comparator below would instead clump the
-            // labeled songs at the front).
             self.apply_sparse_default(desc);
         } else {
-            // The ascending key comparison for the active mode (Default keeps native order).
             let key_cmp = |a: &Song, b: &Song| -> Ordering {
                 match mode {
-                    // OST tracks first, in album order; everything else after, in native order.
                     SortMode::Default => match (a.ost_order, b.ost_order) {
                         (Some(x), Some(y)) => x.cmp(&y),
                         (Some(_), None) => Ordering::Less,
@@ -787,8 +625,6 @@ impl OptimeApp {
             self.songs.sort_by(|a, b| {
                 let primary = key_cmp(a, b);
                 let primary = if desc { primary.reverse() } else { primary };
-                // Native order breaks ties (and, for Default, is the whole ordering); it follows the
-                // ascending/descending direction too so a descending sort fully reverses the list.
                 let tie = a.order.cmp(&b.order);
                 primary.then(if desc { tie.reverse() } else { tie })
             });
@@ -801,9 +637,6 @@ impl OptimeApp {
         }
     }
 
-    /// Reorders [`Self::songs`] for a **sparse** curated table: each song with a `sparse_index` is
-    /// placed at that absolute list position, and the remaining (unlabeled) songs fill the gaps in
-    /// native order (see [`sparse_default_order`]). `desc` reverses the whole list.
     fn apply_sparse_default(&mut self, desc: bool) {
         let keys: Vec<(Option<usize>, usize)> = self
             .songs
@@ -815,7 +648,6 @@ impl OptimeApp {
             order.reverse();
         }
 
-        // Apply the permutation (Song isn't Clone, so move each out of an `Option` slot).
         let mut slots: Vec<Option<Song>> = self.songs.drain(..).map(Some).collect();
         self.songs = order
             .into_iter()
@@ -823,7 +655,6 @@ impl OptimeApp {
             .collect();
     }
 
-    /// Plays the song at flattened-list index `index`, making the whole song list the playlist.
     fn play_from_list(&mut self, index: usize) {
         let Some(start) = self.track_ref(index) else {
             return;
@@ -834,8 +665,6 @@ impl OptimeApp {
         self.start_playlist(Some(start));
     }
 
-    /// Plays `tracks` as the playlist, starting at the track at `pos`. Starting by position means
-    /// that when the same song appears several times, playback begins at the copy the user clicked.
     fn play_collection_at(&mut self, tracks: Vec<TrackRef>, pos: usize) {
         if tracks.is_empty() {
             return;
@@ -845,7 +674,6 @@ impl OptimeApp {
         self.start_playlist_at(Some(pos));
     }
 
-    /// Plays `tracks` from the top (a random entry first when shuffle is on).
     fn play_all_collection(&mut self, tracks: Vec<TrackRef>) {
         if tracks.is_empty() {
             return;
@@ -854,18 +682,11 @@ impl OptimeApp {
         self.start_playlist(None);
     }
 
-    /// (Re)materializes `self.playlist` (applying shuffle once, here — the whole order is fixed at
-    /// this point) and sends it to the audio thread, starting at `start` (or the first entry after
-    /// shuffling when `None`). If the chosen start entry's source isn't loaded, defers: fetches the
-    /// source and resumes from [`Self::load_bytes`] when it arrives.
     fn start_playlist(&mut self, start: Option<TrackRef>) {
         let start = start.and_then(|s| self.playlist.iter().position(|t| t.same_song(&s)));
         self.start_playlist_at(start);
     }
 
-    /// The same as [`Self::start_playlist`], but starting at a position in [`Self::playlist`]. A
-    /// caller that knows which row was clicked should use this: a position names one copy of a
-    /// song, where a [`TrackRef`] matches every copy of it.
     fn start_playlist_at(&mut self, start: Option<usize>) {
         self.paused = false;
         if self.playlist.is_empty() {
@@ -886,7 +707,6 @@ impl OptimeApp {
         self.playlist_order = order;
         let start_track = ordered[index].clone();
         if start_track.source != self.current_source {
-            // The chosen source isn't loaded — fetch it (demo) and resume on arrival.
             self.pending_play = Some(start_track.clone());
             if let Some((label, stem)) = all_demos().find(|(_, stem)| *stem == start_track.source) {
                 let (label, stem) = (*label, *stem);
@@ -903,18 +723,10 @@ impl OptimeApp {
             let entries = self.build_entries(&ordered);
             self.send_command(PlaybackCommand::SetPlaylist { entries, index });
         } else {
-            // No audio engine yet (web defers it until the first user gesture). A `SetPlaylist`
-            // command would be dropped here, so reflect the start track in the UI directly — the
-            // highlight + piano roll appear immediately, and `ensure_audio` starts playback from
-            // `current_song` once the user interacts and the engine comes up.
             self.on_now_playing(start_track);
         }
     }
 
-    /// A fresh shuffle (Fisher–Yates, xorshift64) of the playlist positions `0..len`, with `keep` —
-    /// the position that should start playing — lifted out first and put at the front so it plays
-    /// immediately and the rest follow shuffled. Shuffling positions rather than tracks keeps two
-    /// copies of the same song distinct, so the one the user picked is the one that plays.
     fn shuffled_order(&mut self, len: usize, keep: Option<usize>) -> Vec<usize> {
         let mut out: Vec<usize> = (0..len).filter(|i| Some(*i) != keep).collect();
         for i in (1..out.len()).rev() {
@@ -930,9 +742,6 @@ impl OptimeApp {
         out
     }
 
-    /// Where the song the audio thread is playing sits in [`Self::playlist`], mapped back through
-    /// the order last sent so that the right copy is found when a song appears more than once.
-    /// Falls back to matching by identity before the audio engine exists.
     fn current_playlist_position(&self) -> Option<usize> {
         if let Some(audio) = &self.audio
             && let Ok(st) = audio.shared.lock()
@@ -944,8 +753,6 @@ impl OptimeApp {
         self.playlist.iter().position(|t| t.same_song(&cur))
     }
 
-    /// Maps playlist tracks to [`PlaylistEntry`]s, attaching the loaded source archive (or `None`
-    /// for a track whose source isn't loaded — the audio thread then asks the UI to fetch it).
     fn build_entries(&self, tracks: &[TrackRef]) -> Vec<PlaylistEntry> {
         tracks
             .iter()
@@ -956,7 +763,6 @@ impl OptimeApp {
             .collect()
     }
 
-    /// The loaded source archive for `t`, or `None` if `t` belongs to a source that isn't loaded.
     fn resolve_archive(&self, t: &TrackRef) -> Option<Arc<dyn SoundData>> {
         if t.source != self.current_source {
             return None;
@@ -967,7 +773,6 @@ impl OptimeApp {
             .map(|s| self.archives[s.archive_index].clone())
     }
 
-    /// Pushes a command plus the latest level state (config / paused / repeat) to the audio thread.
     fn send_command(&mut self, cmd: PlaybackCommand) {
         let config = self.config();
         if let Some(audio) = &self.audio
@@ -980,7 +785,6 @@ impl OptimeApp {
         }
     }
 
-    /// Skips to the next (`delta >= 0`) or previous entry.
     fn send_transport(&mut self, delta: isize) {
         self.paused = false;
         self.send_command(if delta >= 0 {
@@ -990,19 +794,14 @@ impl OptimeApp {
         });
     }
 
-    /// Restarts the currently-playing entry from the top.
     fn restart(&mut self) {
         self.paused = false;
-        // Annotation mode parks the playlist entirely, so a `PlayAt` would just sit in the queue
-        // unread: restarting there means rewinding the bounce, which is an index.
         if self.annotation.enabled {
             self.annotation_seek(0.0);
             if let Some(audio) = &self.audio
                 && let Ok(mut st) = audio.shared.lock()
             {
                 st.paused = false;
-                // The chord under the top of the song must strike again even if the playhead was
-                // already inside that same section.
                 if let Some(c) = &mut st.bounce.chords {
                     c.reset();
                 }
@@ -1021,8 +820,6 @@ impl OptimeApp {
         }
     }
 
-    /// Re-materializes the playlist order for the new shuffle state, keeping the current song
-    /// playing (no restart). Call *after* flipping `self.p.shuffle`.
     fn toggle_shuffle(&mut self) {
         if self.playlist.is_empty() {
             return;
@@ -1043,7 +840,6 @@ impl OptimeApp {
         self.send_command(PlaybackCommand::Reorder { entries, index });
     }
 
-    /// Pushes the (already-updated) repeat mode to the audio thread.
     fn push_repeat(&mut self) {
         if let Some(audio) = &self.audio
             && let Ok(mut st) = audio.shared.lock()
@@ -1052,9 +848,6 @@ impl OptimeApp {
         }
     }
 
-    /// Drives the OS media-transport controls: lazily creates them once the window handle is
-    /// available, applies any transport commands the user triggered (media keys / AirPods taps),
-    /// then pushes the current track + playback state to the system "now playing" display.
     fn handle_media_controls(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if !self.media_tried {
             self.media_tried = true;
@@ -1082,12 +875,7 @@ impl OptimeApp {
         }
     }
 
-    /// Builds the swipe preview for the entry a step in `delta` direction would land on (read from
-    /// the audio-owned playlist, shuffle already applied): a piano roll pre-filled with that song's
-    /// opening notes via its own look-ahead runner.
     fn build_swipe_preview(&mut self, delta: isize) -> Option<SwipePreview> {
-        // Resolve the adjacent entry to an archive + song within the loaded source (a track from
-        // another source previews as an empty roll).
         let resolved = {
             let shared = self.audio.as_ref().map(|a| a.shared.clone())?;
             let st = shared.lock().ok()?;
@@ -1110,7 +898,6 @@ impl OptimeApp {
         let mut roll = PianoRoll::default();
         let look = resolved.and_then(|(archive_index, song_id)| {
             let mut look = FsVisController::new(&*self.archives[archive_index], song_id)?;
-            // Pre-buffer the opening notes (bounded like the live look-ahead drive).
             let mut guard = 0u32;
             while look.steps_elapsed() < crate::piano_roll::RUN_AHEAD_TICKS && guard < 200_000 {
                 look.tick();
@@ -1127,10 +914,6 @@ impl OptimeApp {
         })
     }
 
-    /// Reflects advances the audio thread performed on its own (so auto-advance / fade-out keep
-    /// working while the UI's repaint loop is frozen — e.g. a hidden tab): when the audio thread's
-    /// `status_gen` changes, update the highlight, look-ahead, status, recents and media session to
-    /// match its authoritative `playback.index`. Does not touch the audio controller.
     fn reconcile_playback(&mut self) {
         let Some(shared) = self.audio.as_ref().map(|a| a.shared.clone()) else {
             return;
@@ -1153,9 +936,6 @@ impl OptimeApp {
             (needs_ui, stopped, track)
         };
         if needs_ui {
-            // The audio thread couldn't decode this entry. If its source isn't loaded, fetch it
-            // and resume; if the source *is* loaded the song is simply missing — stop, rather than
-            // re-sending it and looping (each retry would re-trigger `needs_ui`).
             if let Some(t) = track {
                 if t.source == self.current_source {
                     self.paused = true;
@@ -1167,7 +947,6 @@ impl OptimeApp {
             return;
         }
         if stopped {
-            // End of queue under RepeatMode::Off.
             self.paused = true;
             self.status = "End of queue.".to_owned();
             return;
@@ -1177,9 +956,6 @@ impl OptimeApp {
         }
     }
 
-    /// Pre-inferred chord-lane spans for a song: `(start_step, end_step, label)`, the label already
-    /// baked as `"<roman> (<name>)"` (or `"N.C."`) offline. Empty when the game has no chord table
-    /// (only Pokémon Emerald ships one), so the roll hides the lane.
     fn chord_spans(&self, archive_index: usize, song_id: u32) -> Vec<crate::piano_roll::LaneSpan> {
         let game_code = self.archives[archive_index]
             .as_any()
@@ -1197,14 +973,11 @@ impl OptimeApp {
                 start: s.start_step,
                 end: s.end_step,
                 label: s.label.clone(),
-                // Pre-inferred: text only. Only hand-authored spans get a block.
                 fill: None,
             })
             .collect()
     }
 
-    /// Updates the UI visuals for a newly-playing track. The audio thread already installed the
-    /// controller; this only refreshes the highlight, look-ahead, overview, status and history.
     fn on_now_playing(&mut self, t: TrackRef) {
         self.p.library.push_recent(&t);
         self.piano_roll.clear();
@@ -1227,8 +1000,6 @@ impl OptimeApp {
             self.overview = FsVisController::overview(&*self.archives[archive_index], song_id);
             self.piano_roll
                 .set_chords(self.chord_spans(archive_index, song_id));
-            // The bar grid comes from the device's steps-per-beat; the meter/pickup are the
-            // annotator's (defaults until a song's annotation supplies them).
             if let Some(ov) = &self.overview {
                 let grid = self.annotation.grid_for(song_id, ov.steps_per_beat);
                 self.piano_roll.set_grid(grid);
@@ -1240,11 +1011,8 @@ impl OptimeApp {
         }
     }
 
-    /// The per-frame annotation sync: collect a finished bounce, follow the transport's playhead,
-    /// and push the hand-authored spans into the roll's chord lane.
     fn sync_annotation(&mut self, ctx: &egui::Context) {
         self.poll_bounce(ctx);
-        // The song can change under annotation mode (the library list still works).
         if let Some(i) = self.current_song {
             let song_id = self.songs[i].song_id;
             if self.annotation.bounce_for != Some(song_id) {
@@ -1258,8 +1026,6 @@ impl OptimeApp {
         if let Some(ov) = &self.overview {
             self.piano_roll.ingest_overview(ov);
         }
-        // The app's own transport owns play/pause here too — annotation adds no second button, so
-        // there is exactly one source of truth for "is it rolling".
         let rolling = !self.paused && self.annotation.bounce.is_some();
         let pos = self
             .audio
@@ -1278,9 +1044,6 @@ impl OptimeApp {
         if rolling {
             ctx.request_repaint();
         }
-        // Follow the playhead with the chord voice. Driven from the UI frame rather than the audio
-        // callback, which has no idea what a span is: chords change at most once a bar (~2 s), so
-        // 16 ms of granularity is far below anything audible.
         if let Some(song_id) = self.current_song.map(|i| self.songs[i].song_id) {
             let step = self.piano_roll.display_tick();
             let chord = self.chord_at(song_id, step);
@@ -1291,15 +1054,11 @@ impl OptimeApp {
                 if rolling {
                     c.set_chord(chord);
                 } else {
-                    // Stopped: let go of the section chord (it is held until the section changes,
-                    // and a stopped playhead never will) and forget it, so resuming re-sounds it.
                     c.stop_following();
                 }
             }
         }
 
-        // The lane shows what has been *annotated*, not what a model guessed — this set is the
-        // eval data, so a prediction must never appear alongside it and get mistaken for a label.
         let spans: Vec<crate::piano_roll::LaneSpan> = self
             .current_song
             .map(|i| self.songs[i].song_id)
@@ -1311,12 +1070,7 @@ impl OptimeApp {
                         let (label, fill) = match s.chord {
                             Some(c) => (
                                 c.symbol(),
-                                crate::piano_roll::chord_color(
-                                    Some(c.root),
-                                    // Uncertain quality reads dimmer: the ribbon should show which
-                                    // labels are only half-trusted without opening anything.
-                                    c.quality_uncertain,
-                                ),
+                                crate::piano_roll::chord_color(Some(c.root), c.quality_uncertain),
                             ),
                             None => (
                                 "N.C.".to_string(),
@@ -1337,7 +1091,6 @@ impl OptimeApp {
         self.stash_annotations();
     }
 
-    /// Snaps a step to the grid: bars by default, beats when the annotator asks.
     fn snap_step(&self, step: f64) -> f64 {
         let g = self.piano_roll.grid();
         let unit = self.snap_unit();
@@ -1348,7 +1101,6 @@ impl OptimeApp {
         (g.offset_steps + (rel / unit).round() * unit).max(0.0)
     }
 
-    /// The snap unit in steps: a bar, or a beat when beat-snap is on.
     fn snap_unit(&self) -> f64 {
         let g = self.piano_roll.grid();
         if self.annotation.beat_snap {
@@ -1358,11 +1110,6 @@ impl OptimeApp {
         }
     }
 
-    /// The start of the snap unit *containing* `step` — floor, not round.
-    ///
-    /// Distinct from [`Self::snap_step`] on purpose: dragging an edge wants the *nearest* boundary,
-    /// but clicking a spot means "this bar", and rounding would grab the next bar over from
-    /// anywhere past its midpoint.
     fn snap_floor(&self, step: f64) -> f64 {
         let g = self.piano_roll.grid();
         let unit = self.snap_unit();
@@ -1373,42 +1120,27 @@ impl OptimeApp {
         (g.offset_steps + (rel / unit).floor() * unit).max(0.0)
     }
 
-    /// Interprets the roll's pointer input as annotation edits.
-    ///
-    /// Dragging in the chord lane defines a snapped range; releasing selects it (creating the span
-    /// on first label). Clicking elsewhere moves the playhead. The roll reports geometry only — the
-    /// model lives here.
     fn annotation_roll_input(&mut self, input: crate::piano_roll::RollInput) {
         let Some(song_id) = self.current_song.map(|i| self.songs[i].song_id) else {
             return;
         };
-        // A drag paints a range; show it live, then open the picker on release. `drag_step` (not
-        // `hover_step`) tracks the pointer, so a drag that wanders off the roll still resolves.
         if let (Some(a), Some(b)) = (input.drag_start_step, input.drag_step)
             && (input.dragging || input.drag_stopped)
         {
             let (s, e) = (self.snap_step(a), self.snap_step(b));
             let (s, e) = (s.min(e), s.max(e));
-            // A drag with no movement still selects one whole snap unit.
             let e = if e > s { e } else { self.snap_next(s) };
             self.piano_roll.set_selection(Some((s, e)));
             if input.drag_stopped {
                 self.select_or_create_span(song_id, s, e);
-                // The picker comes to the region just dragged, rather than making the eye travel to
-                // a toolbar and back for every bar.
                 self.annotation.picker_at = input.pointer_pos;
                 self.annotation.picker_just_opened = true;
             }
             return;
         }
-        // A plain right-click (no drag) opens the picker without needing a drag at all — the common
-        // case is one bar, and dragging a single bar to label it is busywork.
         if input.secondary_clicked
             && let Some(step) = input.hover_step
         {
-            // On an existing span, take that span's whole range: right-clicking a block means "this
-            // chord", and re-labelling or clearing it should act on what you clicked, not on
-            // whichever grid unit happens to sit under the cursor.
             let existing = self.annotation.song(song_id).and_then(|a| {
                 a.spans
                     .iter()
@@ -1423,26 +1155,20 @@ impl OptimeApp {
             self.piano_roll.set_selection(Some((s as f64, e as f64)));
             self.annotation.picker_at = input.pointer_pos;
             self.annotation.picker_just_opened = true;
-            // Right-clicking a labelled bar plays its chord: the fastest possible check of whether
-            // what you wrote is what you meant.
             if let Some(section) = self.chord_at(song_id, step) {
                 self.strike_chord(section);
             }
             return;
         }
-        // Left button is purely the transport: click or drag anywhere to scrub.
         if let Some(step) = input.scrub_step {
             self.annotation_seek(step);
         }
     }
 
-    /// The next snap boundary after `step`.
     fn snap_next(&self, step: f64) -> f64 {
         step + self.snap_unit().max(1.0)
     }
 
-    /// Selects the span covering `[start, end)`, or remembers the range so the next typed chord
-    /// creates one. Blank-slate authoring: nothing is written until a label is given.
     fn select_or_create_span(&mut self, song_id: u32, start: f64, end: f64) {
         let (s, e) = (start as u32, end as u32);
         let existing = self.annotation.song(song_id).and_then(|a| {
@@ -1451,7 +1177,6 @@ impl OptimeApp {
                 .position(|sp| sp.start_step < e && sp.end_step > s)
         });
         self.annotation.pending_range = Some((s, e));
-        // Seed the entry box with whatever is already there, so retyping a chord is an edit.
         self.annotation_entry = existing
             .and_then(|i| self.annotation.song(song_id).map(|a| a.spans[i]))
             .map(|sp| match sp.chord {
@@ -1461,13 +1186,11 @@ impl OptimeApp {
             .unwrap_or_default();
     }
 
-    /// Applies the typed chord symbol to the selected range.
     fn apply_typed_chord(&mut self, song_id: u32) {
         let Some((s, e)) = self.annotation.pending_range else {
             self.annotation.status = "select a range first".into();
             return;
         };
-        // A typo must not overwrite a good label with a wrong one.
         let Some(chord) = crate::annotation::model::parse_chord(&self.annotation_entry) else {
             self.annotation.status = format!("unrecognised chord {:?}", self.annotation_entry);
             return;
@@ -1481,7 +1204,6 @@ impl OptimeApp {
             },
         );
         self.annotation.status.clear();
-        // Step on to the next range so labelling a run of bars is type-enter-type-enter.
         let next_s = e;
         let next_e = self.snap_next(next_s as f64) as u32;
         self.annotation.pending_range = Some((next_s, next_e));
@@ -1489,7 +1211,6 @@ impl OptimeApp {
             .set_selection(Some((next_s as f64, next_e as f64)));
     }
 
-    /// The annotation toolbar: transport, meter, grid offset, snap, chord entry, save.
     fn annotation_toolbar_ui(&mut self, ui: &mut egui::Ui) {
         let Some(song_id) = self.current_song.map(|i| self.songs[i].song_id) else {
             ui.label("no song loaded");
@@ -1498,9 +1219,6 @@ impl OptimeApp {
         let ready = self.annotation.bounce.is_some();
 
         ui.horizontal_wrapped(|ui| {
-            // --- Transport -------------------------------------------------------------------
-            // No play/pause here: the app's own transport button drives the bounce (see
-            // `sync_annotation`). A second one would be a second source of truth for the same state.
             let mut looping = self
                 .audio
                 .as_ref()
@@ -1520,7 +1238,6 @@ impl OptimeApp {
             }
             ui.separator();
 
-            // --- Grid ------------------------------------------------------------------------
             let mut bpb = self.annotation.grid_for(song_id, 0.0).beats_per_bar;
             if ui
                 .add(
@@ -1545,7 +1262,6 @@ impl OptimeApp {
             {
                 let t = self.piano_roll.display_tick().max(0.0);
                 let g = self.piano_roll.grid();
-                // Keep the offset inside one bar; the grid repeats, so a whole-bar shift is a no-op.
                 let bar = g.bar_steps().unwrap_or(1.0);
                 self.annotation.song_mut(song_id).grid_offset_steps = (t % bar).round() as i64;
                 self.annotation.dirty = true;
@@ -1576,8 +1292,6 @@ impl OptimeApp {
             {
                 st.bounce.chords_on = chords_on;
             }
-            // Chord audition level — a quiet reference instrument can be lifted, a loud one tamed,
-            // without relabelling. Read on every output frame, so it needs no re-strike.
             let prev_gain = self.annotation.chord_gain;
             ui.add(
                 egui::Slider::new(&mut self.annotation.chord_gain, 0.0..=1.0)
@@ -1592,8 +1306,6 @@ impl OptimeApp {
             {
                 c.set_gain(self.annotation.chord_gain);
             }
-            // Which inversion chords voice in. Re-voices the sounding chord at once, so flipping
-            // through root / 1st / 2nd / 3rd is itself an ear check.
             let mut inv = self.annotation.chord_inversion;
             egui::ComboBox::from_label("inversion")
                 .selected_text(match inv {
@@ -1647,12 +1359,6 @@ impl OptimeApp {
         });
     }
 
-    /// The chord picker: pops up at the region you just dragged, listing every chord you can use.
-    ///
-    /// A 12×10 grid of every root × every quality — one click per label, no typing, no menu diving.
-    /// It shows the *whole* vocabulary on purpose: the set is exactly what the ml label space can
-    /// represent, so anything absent here is a chord the model could never be scored on, and the
-    /// annotator should never have to wonder which those are.
     fn chord_picker_ui(&mut self, ctx: &egui::Context, song_id: u32) {
         use crate::annotation::model::Quality;
         let Some((px, py)) = self.annotation.picker_at else {
@@ -1661,13 +1367,10 @@ impl OptimeApp {
         let mut close = false;
         let mut pick: Option<Option<crate::annotation::model::Chord>> = None;
         let mut uncertain = self.annotation.picker_uncertain;
-        // The chord whose button is under the cursor this frame, if any — auditioned below once it
-        // changes (so a glide within one cell doesn't re-strike, but moving to a neighbour does).
         let mut hovered: Option<crate::annotation::model::Chord> = None;
 
         let area = egui::Area::new(egui::Id::new("chord_picker"))
             .order(egui::Order::Foreground)
-            // Keep the whole grid on screen when the drag ends near an edge.
             .constrain(true)
             .fixed_pos(egui::pos2(px, py))
             .show(ctx, |ui| {
@@ -1687,9 +1390,6 @@ impl OptimeApp {
                                 .color(crate::theme::TEXT_DIM),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            // `❌`, not `✕`: the loaded fonts (Inter / SF Pro + egui's emoji font)
-                            // have no U+2715, so it renders as tofu. This is the glyph the Stats
-                            // window's close button already uses.
                             if ui.small_button("❌").clicked() {
                                 close = true;
                             }
@@ -1701,7 +1401,6 @@ impl OptimeApp {
                     egui::Grid::new("chord_grid")
                         .spacing([2.0, 2.0])
                         .show(ui, |ui| {
-                            // Header: the quality of each column.
                             ui.label("");
                             for q in Quality::ALL {
                                 let name = if q.suffix().is_empty() {
@@ -1723,7 +1422,6 @@ impl OptimeApp {
                                     quality: q,
                                     quality_uncertain: uncertain,
                                 };
-                                // Row header doubles as the colour key used in the ribbon.
                                 let swatch = crate::piano_roll::chord_color(Some(root), false);
                                 ui.label(
                                     egui::RichText::new(chord(Quality::Major).symbol())
@@ -1741,8 +1439,6 @@ impl OptimeApp {
                                     if resp.clicked() {
                                         pick = Some(Some(c));
                                     }
-                                    // Hovering a cell auditions its chord, so the picker is an
-                                    // ear-led scan of the vocabulary rather than guess-and-click.
                                     if resp.hovered() {
                                         hovered = Some(c);
                                     }
@@ -1768,7 +1464,6 @@ impl OptimeApp {
                             self.delete_selected_span(song_id);
                             close = true;
                         }
-                        // Typing stays available: it beats the grid once you know the vocabulary.
                         let entry = ui.add(
                             egui::TextEdit::singleline(&mut self.annotation_entry)
                                 .desired_width(70.0)
@@ -1783,9 +1478,6 @@ impl OptimeApp {
             });
 
         self.annotation.picker_uncertain = uncertain;
-        // Audition the chord whose cell the cursor entered — only when it differs from last frame's
-        // cell, so dwelling on one button rings once and a glide across the grid plays each in turn.
-        // Compared on `(root, quality)`: `quality_uncertain` flipping isn't a musical change.
         if let Some(c) = hovered {
             let key = (c.root % 12, c.quality);
             let same = self
@@ -1803,13 +1495,6 @@ impl OptimeApp {
             self.set_selected_chord(song_id, chord);
             close = true;
         }
-        // Escape, or a press anywhere outside the popup, dismisses it. (A *press*, not a release:
-        // the drag-release that opened the picker lands on the same frame, and testing releases
-        // would close it instantly.)
-        //
-        // Never on the opening frame: a right-click's *press* arrives in the same frame the popup
-        // first appears, and a popup constrained away from a screen edge doesn't sit under the
-        // cursor — so it would dismiss itself the instant it opened.
         let rect = area.response.rect;
         let just_opened = std::mem::take(&mut self.annotation.picker_just_opened);
         let pressed_outside = !just_opened
@@ -1826,8 +1511,6 @@ impl OptimeApp {
         }
     }
 
-    /// Writes `chord` over the selected range and advances the selection to the next one, so a run
-    /// of bars is drag-once-then-click-click-click.
     fn set_selected_chord(&mut self, song_id: u32, chord: Option<crate::annotation::model::Chord>) {
         let Some((s, e)) = self.annotation.pending_range else {
             return;
@@ -1848,21 +1531,17 @@ impl OptimeApp {
             .set_selection(Some((next_s as f64, next_e as f64)));
     }
 
-    /// Sounds `section`'s chord now through the audition voice. Passing the span, not just the
-    /// chord, lets the voice recognise the playhead arriving at the same section and hold it rather
-    /// than restrike it.
     fn strike_chord(&mut self, section: (u32, crate::annotation::model::Chord)) {
         if let Some(audio) = &self.audio
             && let Ok(mut st) = audio.shared.lock()
         {
-            st.bounce.chords_on = true; // an explicit audition overrides the toggle
+            st.bounce.chords_on = true;
             if let Some(c) = &mut st.bounce.chords {
                 c.strike(section);
             }
         }
     }
 
-    /// Re-installs the grid after the meter/offset changed.
     fn refresh_grid(&mut self, song_id: u32) {
         let spb = self
             .overview
@@ -1873,8 +1552,6 @@ impl OptimeApp {
         self.piano_roll.set_grid(grid);
     }
 
-    /// Arms or clears the loop over the current selection. Arming also starts the transport — the
-    /// only reason to loop a range is to hear it.
     fn set_annotation_loop(&mut self, on: bool) {
         let range = self.annotation.pending_range.filter(|_| on);
         let (Some(b), Some(audio)) = (&self.annotation.bounce, &self.audio) else {
@@ -1888,12 +1565,10 @@ impl OptimeApp {
             }
         }
         if frames.is_some() {
-            // `playing` is derived from `paused` each frame, so unpause rather than force the flag.
             self.paused = false;
         }
     }
 
-    /// Deletes the selected span.
     fn delete_selected_span(&mut self, song_id: u32) {
         let Some((s, e)) = self.annotation.pending_range else {
             return;
@@ -1909,11 +1584,6 @@ impl OptimeApp {
         self.annotation_entry.clear();
     }
 
-    /// Turns annotation mode on/off.
-    ///
-    /// On: the live playlist is parked (installing a bounce makes the callback ignore it entirely)
-    /// and the current song is re-rendered to memory. Off: the bounce is dropped and live playback
-    /// picks up exactly where it was.
     fn set_annotation_mode(&mut self, on: bool) {
         self.annotation.enabled = on;
         self.piano_roll.set_edit(on);
@@ -1921,8 +1591,6 @@ impl OptimeApp {
         if on {
             self.load_annotations();
             self.capture_chord_instrument();
-            // Hand the output to the annotation mixer up front, not when the bounce lands: chord
-            // playback has to work while the render is still going.
             if let Some(audio) = &self.audio
                 && let Ok(mut st) = audio.shared.lock()
             {
@@ -1940,8 +1608,6 @@ impl OptimeApp {
             self.annotation.bounce = None;
             self.annotation.bounce_for = None;
             self.annotation.job = None;
-            // `audio` is `None` when no output device exists — the app still runs, so annotation
-            // must not assume a stream.
             if let Some(audio) = &self.audio
                 && let Ok(mut st) = audio.shared.lock()
             {
@@ -1950,7 +1616,6 @@ impl OptimeApp {
                 st.bounce.playing = false;
                 st.bounce.loop_range = None;
             }
-            // Restore the pre-inferred lane the roll shows outside annotation.
             if let Some(i) = self.current_song {
                 let (a, s) = (self.songs[i].archive_index, self.songs[i].song_id);
                 self.piano_roll.set_chords(self.chord_spans(a, s));
@@ -1958,32 +1623,18 @@ impl OptimeApp {
         }
     }
 
-    /// Lifts the chord-audition voice out of the ROM.
-    ///
-    /// Prefers Emerald's song 435 ("Trainers' School"), which opens on a clean piano; falls back to
-    /// the song being annotated so chord playback still works on a ROM without that id.
-    /// Arms the chord-audition voicer with the embedded piano reference instrument, inheriting the
-    /// user's current gain/inversion. The instrument ships with the app (`include_bytes!`'d from
-    /// `chord_data/piano_c4.wav`), so this no longer surveys the loaded ROM — the audition always
-    /// has a known-good piano regardless of the track, instead of grabbing a bass thump on a sparse
-    /// one.
     fn capture_chord_instrument(&mut self) {
         let instrument = crate::annotation::chord_voice::embedded_piano();
         if let Some(audio) = &self.audio
             && let Ok(mut st) = audio.shared.lock()
         {
             let mut v = crate::annotation::ChordVoicer::new(instrument);
-            // A freshly armed voicer must inherit the user's current audition settings, not the
-            // defaults — otherwise switching songs snaps the volume back and loses the inversion.
             v.set_gain(self.annotation.chord_gain);
             v.set_inversion(self.annotation.chord_inversion);
             st.bounce.chords = Some(v);
         }
     }
 
-    /// The annotated chord covering `step`, if any, with the start step of the span it came from —
-    /// the voice keys its retrigger on the span, so two neighbouring bars labelled the same chord
-    /// each get struck.
     fn chord_at(&self, song_id: u32, step: f64) -> Option<(u32, crate::annotation::model::Chord)> {
         self.annotation.song(song_id)?.spans.iter().find_map(|sp| {
             ((sp.start_step as f64) <= step && (sp.end_step as f64) > step)
@@ -1993,9 +1644,6 @@ impl OptimeApp {
         })
     }
 
-    /// Starts rendering the current song to memory. The work is sliced across frames by
-    /// [`Self::poll_bounce`] rather than threaded — annotation runs on the web too, where there is
-    /// no thread to spawn and a multi-second block would freeze the tab.
     fn request_bounce(&mut self) {
         let Some(i) = self.current_song else { return };
         let Some(ov) = &self.overview else { return };
@@ -2010,7 +1658,6 @@ impl OptimeApp {
         self.annotation.bounce_for = Some(song_id);
         self.annotation.job = BounceJob::new(&*archive, song_id, total_steps, config);
         self.annotation.status = "rendering…".into();
-        // The old buffer must go now: it belongs to a different song.
         if let Some(audio) = &self.audio
             && let Ok(mut st) = audio.shared.lock()
         {
@@ -2020,10 +1667,7 @@ impl OptimeApp {
         }
     }
 
-    /// Advances an in-flight bounce by one frame's worth of work, installing it when done.
     fn poll_bounce(&mut self, ctx: &egui::Context) {
-        /// Frames of audio rendered per UI frame. ~0.4 s of audio per tick keeps a 60 Hz UI
-        /// responsive while still bouncing a 3-minute song in a few seconds.
         const BUDGET: usize = 12_000;
 
         let Some(job) = &mut self.annotation.job else {
@@ -2032,7 +1676,7 @@ impl OptimeApp {
         job.step(BUDGET);
         if !job.is_done() {
             self.annotation.status = format!("rendering… {:.0}%", job.progress() * 100.0);
-            ctx.request_repaint(); // keep the slices coming
+            ctx.request_repaint();
             return;
         }
         let bounce = Arc::new(self.annotation.job.take().unwrap().finish());
@@ -2049,7 +1693,6 @@ impl OptimeApp {
         }
     }
 
-    /// Moves the annotation playhead to `step` (a scrub). Instant: the bounce makes this an index.
     fn annotation_seek(&mut self, step: f64) {
         let Some(b) = &self.annotation.bounce else {
             return;
@@ -2060,17 +1703,14 @@ impl OptimeApp {
         {
             st.bounce.pos = frame;
         }
-        // The roll follows the cursor even with no audio device — the app runs without one.
         self.piano_roll.set_display_tick(step.max(0.0));
     }
 
-    /// The annotation JSON path for the loaded source.
     #[cfg(not(target_arch = "wasm32"))]
     fn annotation_path(&self) -> std::path::PathBuf {
         crate::annotation::source_dir().join(crate::annotation::filename_for(&self.current_source))
     }
 
-    /// Loads the current game's labels, once per source.
     #[cfg(not(target_arch = "wasm32"))]
     fn load_annotations(&mut self) {
         if self.annotation.loaded_for.as_deref() == Some(self.current_source.as_str()) {
@@ -2083,10 +1723,6 @@ impl OptimeApp {
                 self.annotation.status = format!("loaded {}", path.display());
             }
             Ok(None) => {
-                // No committed JSON for this source — recover the last session's unsaved work
-                // (a "Bar 1 here" / meter edit the user didn't think to save) from the
-                // eframe-storage stash. The JSON remains the record; the stash only speaks when
-                // there is no record yet, so a hand-edited file is never overwritten.
                 if let Some(file) = self.p.annotations.get(&self.current_source).cloned() {
                     self.annotation.songs =
                         file.songs.into_iter().map(|s| (s.song_id, s)).collect();
@@ -2096,8 +1732,6 @@ impl OptimeApp {
                     self.annotation.status = "no labels yet".into();
                 }
             }
-            // Never fall back to "empty" on a bad file: that would look like no labels, and the
-            // next save would overwrite them.
             Err(e) => {
                 self.annotation.songs.clear();
                 self.annotation.status = format!("⚠ {e}");
@@ -2109,7 +1743,6 @@ impl OptimeApp {
         self.annotation.dirty = false;
     }
 
-    /// The current game's labels as the file that gets written/downloaded.
     fn annotation_file(&self) -> crate::annotation::model::GameAnnotations {
         let game_code = self
             .archives
@@ -2125,11 +1758,6 @@ impl OptimeApp {
             .to_file(self.current_source.clone(), game_code, spb)
     }
 
-    /// Persists the current game's labels.
-    ///
-    /// Native writes `ml/annotations/*.json` in the source tree — that file *is* the training data.
-    /// Web has no filesystem, so it downloads the same JSON for the user to drop in; the schema is
-    /// identical either way, which is the point of the format being the contract.
     #[cfg(not(target_arch = "wasm32"))]
     fn save_annotations(&mut self) {
         let file = self.annotation_file();
@@ -2143,10 +1771,6 @@ impl OptimeApp {
         }
     }
 
-    /// Downloads the current game's labels as JSON (web has no source tree to write to).
-    ///
-    /// The working copy already lives in eframe storage (see [`Self::stash_annotations`]), so this
-    /// is an *export* rather than the only thing standing between the user and data loss.
     #[cfg(target_arch = "wasm32")]
     fn save_annotations(&mut self) {
         let file = self.annotation_file();
@@ -2161,13 +1785,6 @@ impl OptimeApp {
         }
     }
 
-    /// Keeps the working copy in eframe storage so a refresh (web) or restart (native) can't
-    /// destroy unsaved work — most often a grid/meter edit ("Bar 1 here", meter, beat snap) the
-    /// user doesn't think to commit, since it isn't a chord label.
-    ///
-    /// This is **session recovery, not the record**: the source-tree JSON (native) and the
-    /// downloaded file (web) stay authoritative. The stash only fills in when there is no
-    /// committed file yet, so it can never silently overwrite a hand-edited record.
     fn stash_annotations(&mut self) {
         if !self.annotation.dirty {
             return;
@@ -2176,7 +1793,6 @@ impl OptimeApp {
         self.p.annotations.insert(self.current_source.clone(), file);
     }
 
-    /// Web: restore the working copy from eframe storage.
     #[cfg(target_arch = "wasm32")]
     fn load_annotations(&mut self) {
         if self.annotation.loaded_for.as_deref() == Some(self.current_source.as_str()) {
@@ -2197,8 +1813,6 @@ impl OptimeApp {
         self.annotation.dirty = false;
     }
 
-    /// Opens a native file dialog; on web spawns the async picker. Loaded bytes arrive via
-    /// [`Self::pending_file`].
     fn open_file_dialog(&mut self) {
         let inbox = self.pending_file.clone();
         #[cfg(not(target_arch = "wasm32"))]
@@ -2238,7 +1852,6 @@ impl OptimeApp {
         }
     }
 
-    /// Drains a pending picked/fetched file, if any.
     fn poll_pending_file(&mut self) {
         let pending = self.pending_file.lock().ok().and_then(|mut s| s.take());
         if let Some((key, bytes)) = pending {
@@ -2247,7 +1860,6 @@ impl OptimeApp {
         }
     }
 
-    /// Renders the current song offline to WAV and saves (native) / downloads (web).
     fn export_wav(&mut self) {
         let Some(i) = self.current_song else {
             self.status = "Nothing to export.".to_owned();
@@ -2262,14 +1874,10 @@ impl OptimeApp {
         self.status = format!("Exported {name}.wav ({} frames).", samples.len());
     }
 
-    /// Whether a GBA ROM is currently loaded (enables the audio-data export button).
     fn gba_loaded(&self) -> bool {
         self.archives.iter().any(|a| a.as_any().is::<GbaRom>())
     }
 
-    /// Exports the loaded GBA ROM's audio data as an audio-only `.gba` image: everything the
-    /// MP2K engine can't reach from the song table is stripped, so the file can be shipped
-    /// (e.g. in `demos/`) without bundling the game's code or art.
     fn export_gba_audio(&mut self) {
         let Some(rom) = self
             .archives
@@ -2292,9 +1900,6 @@ impl OptimeApp {
         );
     }
 
-    /// Pushes UI config (config / paused / volume) into the audio thread and pulls a note snapshot
-    /// for the visualizer. The fade-out + advance now live entirely in the audio callback (see
-    /// [`crate::audio`]); the UI reflects the result via [`Self::reconcile_playback`].
     fn sync_audio(&mut self) -> VisSnapshot {
         let config = self.config();
         let mut snap = VisSnapshot::default();
@@ -2307,10 +1912,8 @@ impl OptimeApp {
         st.config = config;
         st.paused = self.paused;
         st.playback.repeat = self.p.repeat;
-        // Swipe attenuation: the song gets quieter as its visualizer slides offscreen.
         st.volume = self.p.volume * self.swipe_gain;
 
-        // Sample the performance meters (drawn in the top bar).
         const METER_SAMPLES: usize = 128;
         self.cpu_history.push_back(st.dsp_load);
         self.voice_history.push_back(st.voices as f32);
@@ -2321,7 +1924,6 @@ impl OptimeApp {
             self.voice_history.pop_front();
         }
 
-        // Sample the high-band-compressor GR meter (drawn inside its settings block).
         self.high_comp_gr_db = st.high_comp_gr_db;
 
         if let Some(controller) = &st.controller {
@@ -2338,10 +1940,7 @@ impl OptimeApp {
         snap
     }
 
-    /// The desktop piano-roll panel: a pre-rendered whole-track overview bar with the visible
-    /// window highlighted, the current tempo marking beneath it, then the scrolling roll.
     fn piano_roll_panel(&mut self, ui: &mut egui::Ui, snap: &VisSnapshot) {
-        // Lazily (re)build the overview texture from the song loaded in `on_now_playing`.
         if self.overview_tex.is_none()
             && let Some(ov) = &self.overview
         {
@@ -2353,9 +1952,6 @@ impl OptimeApp {
             ));
         }
 
-        // The overview bar (whole track) with the on-screen window highlighted. In annotation mode
-        // it is also the scrub control — dragging it seeks, which only works because the song is
-        // bounced (the sequencer itself cannot seek).
         let mut scrub_to: Option<f64> = None;
         if let (Some(tex), Some(ov)) = (&self.overview_tex, &self.overview) {
             let bar_h = 32.0;
@@ -2387,7 +1983,6 @@ impl OptimeApp {
             painter.rect_stroke(bar, 2.0, egui::Stroke::new(1.0_f32, crate::theme::HAIRLINE));
 
             if scrubbable {
-                // The playhead, so the bar reads as a transport rather than a thumbnail.
                 let px = bar.min.x + frac(self.piano_roll.display_tick()) * bar.width();
                 painter.line_segment(
                     [egui::pos2(px, bar.min.y), egui::pos2(px, bar.max.y)],
@@ -2405,7 +2000,6 @@ impl OptimeApp {
             self.annotation_seek(step);
         }
 
-        // The current tempo marking and musical position, below the bar.
         ui.horizontal(|ui| {
             if snap.active && snap.bpm > 0.0 {
                 ui.label(
@@ -2414,7 +2008,6 @@ impl OptimeApp {
                         .color(egui::Color32::from_gray(0xc0)),
                 );
             }
-            // Where the playhead is in musical terms — the coordinate an annotator thinks in.
             if let Some((bar, beat)) = self
                 .piano_roll
                 .grid()
@@ -2434,7 +2027,6 @@ impl OptimeApp {
             ui.add_space(2.0);
         }
 
-        // The scrolling roll fills the rest of the panel.
         let input = self.piano_roll.draw(ui, snap.active);
         if self.annotation.enabled {
             self.annotation_roll_input(input);
@@ -2444,10 +2036,7 @@ impl OptimeApp {
         }
     }
 
-    /// The full song list with like / add-to-playlist menus and status badges.
-    /// Returns `true` if a song was started.
     fn song_list_ui(&mut self, ui: &mut egui::Ui) -> bool {
-        // "Edit song names" mode replaces the list with an inline title/order editor (native only).
         #[cfg(not(target_arch = "wasm32"))]
         if self.song_edit_enabled {
             return self.song_edit_list_ui(ui);
@@ -2458,8 +2047,6 @@ impl OptimeApp {
             Add(usize, usize),
         }
         let mut action = None;
-        // The Like / Add-to-playlist menu body, shared between the per-row `…` button (works
-        // by tap — touch has no right-click) and the desktop context menu.
         let song_menu = |ui: &mut egui::Ui,
                          i: usize,
                          liked: bool,
@@ -2482,8 +2069,6 @@ impl OptimeApp {
                 }
             });
         };
-        // Sort selector (by native order, name, or computed length) with an ascending/descending
-        // direction toggle.
         let mut mode = self.p.sort_mode;
         let mut desc = self.p.sort_descending;
         ui.horizontal(|ui| {
@@ -2495,7 +2080,6 @@ impl OptimeApp {
                     ui.selectable_value(&mut mode, SortMode::Name, SortMode::Name.label());
                     ui.selectable_value(&mut mode, SortMode::Length, SortMode::Length.label());
                 });
-            // "▲" ascending / "▼" descending, toggled on click.
             let arrow = if desc { "▼" } else { "▲" };
             if ui
                 .add(egui::Button::new(arrow).frame(false))
@@ -2516,7 +2100,6 @@ impl OptimeApp {
         }
         ui.add_space(2.0);
         ui.spacing_mut().item_spacing.y = 0.0;
-        // Pad every id to the widest song's digit count so the names line up in one column.
         let id_digits = self
             .songs
             .iter()
@@ -2540,7 +2123,6 @@ impl OptimeApp {
                 .playlists
                 .iter()
                 .any(|pl| pl.tracks.iter().any(|x| x.same_song(&track)));
-            // Status badges: green playlist marker, accent heart.
             let mut badges: Vec<(&str, egui::Color32)> = Vec::new();
             if liked {
                 badges.push(("❤", crate::theme::ACCENT));
@@ -2548,22 +2130,16 @@ impl OptimeApp {
             if in_playlist {
                 badges.push(("🎵", egui::Color32::from_rgb(0x32, 0xd7, 0x4b)));
             }
-            // Right-to-left so the trailing menu button takes its true size first and the
-            // row label fills exactly the remainder — the row can never overflow the panel
-            // (overflow makes a resizable SidePanel grow every frame).
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), 42.0),
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
-                    // "…" — U+22EF is missing from egui's bundled fonts and renders as tofu.
                     ui.menu_button(
                         egui::RichText::new("…")
                             .size(22.0)
                             .color(crate::theme::TEXT_DIM),
                         |ui| song_menu(ui, i, liked, &self.p.library.playlists, &mut action),
                     );
-                    // The id sits to the left of the name (as in the editor): place it first in a
-                    // left-to-right sub-area, then let the row fill the remaining width.
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         let resp = song_id_and_title(
                             ui,
@@ -2604,13 +2180,8 @@ impl OptimeApp {
         false
     }
 
-    /// The library list in "Edit song names" mode: every loaded song as an editable row (rename +
-    /// reorder), plus a "Save to JSON" header that writes the titles and order back to the
-    /// source-tree JSON. Operates directly on [`Self::songs`] in `Vec` order (sorting is suspended
-    /// while editing). Native only.
     #[cfg(not(target_arch = "wasm32"))]
     fn song_edit_list_ui(&mut self, ui: &mut egui::Ui) -> bool {
-        /// One deferred edit applied after the row loop (so we never reorder mid-iteration).
         enum Edit {
             Play(usize),
             MoveUp(usize),
@@ -2620,8 +2191,6 @@ impl OptimeApp {
         }
         let mut edit: Option<Edit> = None;
 
-        // Seed the (adjustable) target filename from the loaded game's table the first time, and
-        // again whenever a different game is loaded — but keep the user's edits in between.
         if self.song_edit_filename_for != self.current_source {
             let game_code = self
                 .archives
@@ -2675,9 +2244,7 @@ impl OptimeApp {
         let len = self.songs.len();
         for i in 0..len {
             let song_id = self.songs[i].song_id;
-            // Curated songs (accent-coloured id) are the ones a save will write.
             let curated = self.songs[i].curated;
-            // The currently-playing song's play button is shown red.
             let is_current = self.current_song == Some(i);
             let mut pos = i + 1;
             ui.horizontal(|ui| {
@@ -2731,10 +2298,8 @@ impl OptimeApp {
                 if resp.changed() && !self.songs[i].name.trim().is_empty() {
                     let s = &mut self.songs[i];
                     s.label = format!("{} (#{})", s.name, s.song_id);
-                    s.curated = true; // a rename opts the song into the saved table
+                    s.curated = true;
                 }
-                // Clearing the field resets the song to its default (ROM/derived) title and drops it
-                // from the curated table — applied on commit so the field can be cleared and retyped.
                 if resp.lost_focus() && self.songs[i].name.trim().is_empty() {
                     let default = self.default_song_name(i);
                     let s = &mut self.songs[i];
@@ -2744,7 +2309,6 @@ impl OptimeApp {
                     s.sparse_index = None;
                 }
             });
-            // A DragValue change is detected by the position drifting from this row's index.
             if pos != i + 1 {
                 edit = Some(Edit::MoveTo(i, pos.saturating_sub(1).min(len - 1)));
             }
@@ -2755,9 +2319,6 @@ impl OptimeApp {
                 self.play_from_list(i);
                 return true;
             }
-            // The moved song travels through the unlabeled slots only; every *other* curated song
-            // stays pinned to its list position, so reordering never shifts a curated song. The
-            // moved song opts into the saved table.
             Some(Edit::MoveUp(i)) => self.reposition_song(i, CuratedTarget::Up),
             Some(Edit::MoveDown(i)) => self.reposition_song(i, CuratedTarget::Down),
             Some(Edit::MoveTo(from, to)) => self.reposition_song(from, CuratedTarget::Abs(to)),
@@ -2767,8 +2328,6 @@ impl OptimeApp {
         false
     }
 
-    /// The song's default (non-curated) title: the ROM-embedded name if any, otherwise `Song {id}` —
-    /// i.e. the title it would have with no curated-JSON entry. Used to reset a cleared row.
     #[cfg(not(target_arch = "wasm32"))]
     fn default_song_name(&self, i: usize) -> String {
         let s = &self.songs[i];
@@ -2777,17 +2336,9 @@ impl OptimeApp {
             .unwrap_or_else(|| format!("Song {}", s.song_id))
     }
 
-    /// Moves the song at `moved_slot` to a new list position by bubbling it through its own slot plus
-    /// the unlabeled slots — every *other* curated (labeled) song is pinned, so a reorder never
-    /// shifts a curated song; only unlabeled songs flow around the move. The target is a neighbouring
-    /// movable slot (`Up`/`Down`) or, for a typed list position (`Abs`), just past the unlabeled
-    /// songs still ahead of it. (Labels the moved song, and preserves the current-song highlight via
-    /// the same identity-remap [`Self::apply_sort`] uses.)
     #[cfg(not(target_arch = "wasm32"))]
     fn reposition_song(&mut self, moved_slot: usize, target: CuratedTarget) {
         self.songs[moved_slot].curated = true;
-        // The slots the move may touch: the moved song's own slot plus every unlabeled song's. Other
-        // curated songs are absent, so they're never swapped — they keep their exact list position.
         let slots: Vec<usize> = (0..self.songs.len())
             .filter(|&j| j == moved_slot || !self.songs[j].curated)
             .collect();
@@ -2796,7 +2347,6 @@ impl OptimeApp {
         let to_rank = match target {
             CuratedTarget::Up => from_rank.saturating_sub(1),
             CuratedTarget::Down => (from_rank + 1).min(k - 1),
-            // Land just past the unlabeled songs still ahead of the typed position.
             CuratedTarget::Abs(to) => slots
                 .iter()
                 .filter(|&&s| s < to && s != moved_slot)
@@ -2810,8 +2360,6 @@ impl OptimeApp {
             .current_song
             .and_then(|c| self.songs.get(c))
             .map(|s| (s.archive_index, s.song_id));
-        // Bubble the song one movable slot at a time (each swap exchanges it with an unlabeled song,
-        // never another curated song).
         if to_rank > from_rank {
             for r in from_rank..to_rank {
                 self.songs.swap(slots[r], slots[r + 1]);
@@ -2829,13 +2377,6 @@ impl OptimeApp {
         }
     }
 
-    /// Writes the current [`Self::songs`] titles and order (the editor's state) back to the matching
-    /// source-tree JSON, as `[{ "songId", "title", "sparseIndex" }]`. Only the **curated** songs (the
-    /// ones from the loaded table plus any renamed/reordered this session) are written, each with its
-    /// absolute list position (`sparseIndex`) so a sparse table keeps its songs interspersed among the
-    /// unlabeled ones on reload — untouched ROM-named songs stay out of the file. Native dev-tool:
-    /// only works when the app runs from the checkout. Also mirrors the saved positions into
-    /// `sparse_index` so the order survives a later Default re-sort this session.
     #[cfg(not(target_arch = "wasm32"))]
     fn save_song_names(&mut self) {
         #[derive(serde::Serialize)]
@@ -2864,7 +2405,6 @@ impl OptimeApp {
             return;
         }
         let n = entries.len();
-        // Write to the editor's adjustable filename (seeded from the loaded game's table).
         let file = self.song_edit_filename.trim().to_owned();
         if file.is_empty() {
             self.status = "Enter a filename to save to.".to_owned();
@@ -2888,8 +2428,6 @@ impl OptimeApp {
             self.status = format!("Failed to write {}: {e}", path.display());
             return;
         }
-        // Mirror the saved positions in-session: each curated song keeps its absolute list index as
-        // its `sparse_index`, so the Default re-sort puts it right back where it is now.
         for i in 0..self.songs.len() {
             self.songs[i].sparse_index = self.songs[i].curated.then_some(i);
         }
@@ -2904,7 +2442,6 @@ impl OptimeApp {
         };
     }
 
-    /// Whether the inline song-name editor is active (always `false` on web, where it isn't built).
     fn song_edit_active(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2916,9 +2453,6 @@ impl OptimeApp {
         }
     }
 
-    /// Adds song `i` to the end of playlist `p` and reports the result in the status line. A song
-    /// already in the list is added again rather than refused: a playlist is an ordered programme,
-    /// and a track may legitimately recur in one.
     fn add_song_to_playlist(&mut self, i: usize, p: usize) {
         let Some(t) = self.track_ref(i) else { return };
         let Some(pl) = self.p.library.playlists.get_mut(p) else {
@@ -2933,7 +2467,6 @@ impl OptimeApp {
         pl.tracks.push(t);
     }
 
-    /// The library browser (liked / recent / playlists). Returns `true` if playback started.
     fn library_ui(&mut self, ui: &mut egui::Ui) -> bool {
         match self.library_view {
             LibraryView::Root => {
@@ -2944,7 +2477,6 @@ impl OptimeApp {
         }
     }
 
-    /// The library root: collection rows plus playlist management, iOS-grouped-list style.
     fn library_root_ui(&mut self, ui: &mut egui::Ui) {
         use crate::theme::{ios_row, section_header};
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -2960,7 +2492,6 @@ impl OptimeApp {
         let mut open = None;
         let mut delete = None;
         for (p, pl) in self.p.library.playlists.iter().enumerate() {
-            // RTL: trash button sized first, row fills the exact remainder (no overflow).
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), 42.0),
                 egui::Layout::right_to_left(egui::Align::Center),
@@ -3008,8 +2539,6 @@ impl OptimeApp {
         );
     }
 
-    /// One open collection (liked / recent / a playlist): play all, play/remove single tracks.
-    /// Returns `true` if playback started.
     fn collection_ui(&mut self, ui: &mut egui::Ui, view: LibraryView) -> bool {
         let (title, tracks, removable) = match view {
             LibraryView::Liked => ("❤ Liked Songs", self.p.library.liked.clone(), true),
@@ -3059,7 +2588,6 @@ impl OptimeApp {
         let mut play = None;
         let mut remove = None;
         for (i, t) in tracks.iter().enumerate() {
-            // RTL: remove button sized first, row fills the exact remainder (no overflow).
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), 42.0),
                 egui::Layout::right_to_left(egui::Align::Center),
@@ -3102,8 +2630,6 @@ impl OptimeApp {
         started
     }
 
-    /// FL-Studio-style top-bar performance meters: 🖥 DSP load and 🎶 active voices, each a
-    /// small scrolling graph with the exact numbers on hover.
     fn meters_ui(&self, ui: &mut egui::Ui) {
         let cpu = self.cpu_history.back().copied().unwrap_or(0.0);
         let danger = ui.visuals().error_fg_color;
@@ -3131,20 +2657,13 @@ impl OptimeApp {
         );
     }
 
-    /// The synthesis settings (shared between the desktop side panel and the mobile tab).
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        // The settings panel edits whichever console the current song plays on; the DS and GBA
-        // keep independent copies.
         let device_name = self.current_device_name();
         let is_gba = self.current_is_gba();
-        // Snapshot before the mutable `d` borrow below — the high-band-compressor GR bar reads
-        // this inside the HBC sub-block.
         let gr_db = self.high_comp_gr_db;
         let d = self.device_settings_mut();
         ui.heading("Settings");
         ui.label(format!("Settings are stored independently for each supported emulated device. You are currently editing the settings for: {device_name}"));
-        // GBA presets: a one-click swap of the whole settings block. "Enhanced" is the polished
-        // default; "Original" is the raw m4a chain (8-bit mixer, linear/nearest resampling, no DSP).
         if is_gba {
             ui.horizontal(|ui| {
                 ui.label("Presets:");
@@ -3218,9 +2737,6 @@ impl OptimeApp {
                 });
             });
         ui.separator();
-        // Every de-click control lives here, whatever stage of the chain it acts on: the two
-        // pop-smoothing kinds, the ramp time and edge they share, pan smoothing, and the stereo
-        // widener's delay handling.
         ui.label("Smoothing (anti-pop & clicks)");
         ui.checkbox(
             &mut d.instrument_resample.smooth_psg_pops,
@@ -3302,7 +2818,6 @@ impl OptimeApp {
             "instrument-to-mixer-resampling",
             &mut d.instrument_resample.choice,
         );
-        // Only the options of the selected mode are shown.
         if matches!(
             d.instrument_resample.choice,
             InstrumentResampleChoice::SincOutputNyquist
@@ -3397,8 +2912,6 @@ impl OptimeApp {
         let psg_crunch_compensation = &mut d.psg_crunch_compensation;
         ui.add_enabled_ui(use_mixer, |ui| {
             resample_combo(ui, "mixer-to-output-resampling", &mut ms.choice);
-            // Same per-selected-mode controls as the instrument stage, minus the PSG-specific ones
-            // (the bus is a finished mix): the sinc modes show taps, crunch shows a single cutoff.
             if matches!(
                 ms.choice,
                 InstrumentResampleChoice::SincOutputNyquist
@@ -3440,7 +2953,6 @@ impl OptimeApp {
         );
         ui.separator();
 
-        // Master high-shelf EQ — per device, like the resampling settings above.
         ui.label("Master high-shelf EQ");
         {
             ui.checkbox(&mut d.shelf.enabled, "Enable high-shelf")
@@ -3472,9 +2984,6 @@ impl OptimeApp {
             });
         }
         ui.separator();
-        // Per-bus high-band compressor (PSG and sampled). Each bus gets its own enable so a
-        // user can tame DirectSound highs without touching PSG, or vice-versa. Both require
-        // the intermediate mixer (the buses are only isolated there).
         ui.label("High-band compressor");
         let hbc = &mut d.high_band_compress;
         let use_mixer = d.use_mixer;
@@ -3567,7 +3076,6 @@ impl OptimeApp {
         if d.tuning_choice == 1 {
             ui.add(egui::Slider::new(&mut d.pure_tonic, 0..=11).text("Tonic (semitones from A)"));
         }
-        // `d` (the device-settings borrow) is no longer used past here, so we can touch `self`.
         ui.separator();
         if ui
             .button("📊 Stats for Nerds")
@@ -3575,10 +3083,8 @@ impl OptimeApp {
             .clicked()
         {
             self.stats_open = true;
-            self.stats_cache = None; // recompute for whatever is playing now
+            self.stats_cache = None;
         }
-        // Maintainer dev-tool: turn the library list into an inline title/order editor that writes
-        // the curated names back to this crate's source-tree JSON (only when run from the checkout).
         #[cfg(not(target_arch = "wasm32"))]
         {
             ui.separator();
@@ -3591,8 +3097,6 @@ impl OptimeApp {
             );
         }
 
-        // Chord annotation. Available on the web too — the labelling itself needs nothing but the
-        // engine, and only where the JSON *lands* differs (source tree vs browser download).
         ui.separator();
         let mut annotating = self.annotation.enabled;
         let changed = ui
@@ -3609,8 +3113,6 @@ impl OptimeApp {
             self.set_annotation_mode(annotating);
         }
 
-        // Build provenance: which commit this binary was built from, and when. Embedded at compile
-        // time by build.rs (falls back to "unknown" when git isn't available).
         ui.separator();
         ui.label(
             egui::RichText::new(format!(
@@ -3624,8 +3126,6 @@ impl OptimeApp {
         .on_hover_text(format!("Commit date: {}", env!("OPTIME_COMMIT_DATE")));
     }
 
-    /// The DC-offset stats for the current song, computed (and cached) on demand. `None` when no
-    /// song is loaded.
     fn current_waveform_stats(&mut self) -> Option<&[optime_core::WaveformDcStat]> {
         let key = self
             .current_song
@@ -3638,8 +3138,6 @@ impl OptimeApp {
         self.stats_cache.as_ref().map(|(_, v)| v.as_slice())
     }
 
-    /// The "Stats for Nerds" window: every decoded sample for the current song with how far it was
-    /// shifted to remove its DC offset, most-shifted first.
     fn stats_ui(&mut self, ctx: &egui::Context) {
         if !self.stats_open {
             return;
@@ -3693,8 +3191,6 @@ impl OptimeApp {
         self.stats_open = open;
     }
 
-    /// The compact phone layout: a bottom navigation bar (Now Playing / Library / Playlists /
-    /// Settings) with a floating mini-player above it on every screen except Now Playing.
     fn mobile_ui(&mut self, ctx: &egui::Context, snap: &VisSnapshot) {
         egui::TopBottomPanel::top("m_meters")
             .show_separator_line(false)
@@ -3718,7 +3214,6 @@ impl OptimeApp {
                     (MobileTab::Playlists, "🎵", "Playlists"),
                     (MobileTab::Settings, "⚙", "Settings"),
                 ];
-                // iOS-style tab bar: hairline on top, accent tint on the active tab.
                 let top = ui.max_rect().top();
                 ui.painter().line_segment(
                     [
@@ -3739,7 +3234,6 @@ impl OptimeApp {
                         } else {
                             crate::theme::TEXT_DIM
                         };
-                        // Painter-drawn so the label is exactly centered under the icon.
                         let painter = col.painter_at(rect);
                         painter.text(
                             rect.center() - egui::vec2(0.0, 10.0),
@@ -3822,15 +3316,12 @@ impl OptimeApp {
         }
     }
 
-    /// The Spotify-style floating mini-player: animated EQ bars, song title, and transport;
-    /// tapping it opens the Now Playing screen.
     fn mini_player(&mut self, ui: &mut egui::Ui) {
         let height = 52.0;
         let (rect, resp) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), height),
             egui::Sense::click(),
         );
-        // Floating-card look: soft drop shadow, rounded fill.
         let painter = ui.painter();
         painter.rect_filled(
             rect.translate(egui::vec2(0.0, 2.0)).expand(2.0),
@@ -3845,10 +3336,6 @@ impl OptimeApp {
         };
         painter.rect_filled(rect, 12.0, bg);
 
-        // A small EQ-bar "now playing" indicator. Deliberately static (a fixed silhouette when
-        // playing, flat when paused) rather than animated: the mini-player only appears on the
-        // non-piano-roll tabs, which idle at 1 Hz to save battery, so animating it here would
-        // force continuous repaints and defeat that.
         let accent = crate::theme::ACCENT;
         let playing = !self.paused;
         let bar_w = 4.0;
@@ -3865,7 +3352,6 @@ impl OptimeApp {
             painter.rect_filled(bar, 2.0, accent);
         }
 
-        // Song title.
         let title = self
             .current_song
             .and_then(|i| self.songs.get(i))
@@ -3875,7 +3361,6 @@ impl OptimeApp {
             egui::pos2(rect.left() + 48.0, rect.top()),
             egui::pos2(rect.right() - 92.0, rect.bottom()),
         );
-        // Clipped to its own rect so long titles never run under the buttons.
         ui.painter_at(text_rect).text(
             text_rect.left_center(),
             egui::Align2::LEFT_CENTER,
@@ -3884,7 +3369,6 @@ impl OptimeApp {
             crate::theme::TEXT,
         );
 
-        // Transport buttons layered on the right edge of the bar.
         let btn = egui::vec2(36.0, 36.0);
         let pause_icon = if self.paused { "▶" } else { "⏸" };
         let pause_rect =
@@ -3909,13 +3393,10 @@ impl OptimeApp {
         }
     }
 
-    /// The full-screen Now Playing view: visualizer with animated swipe navigation plus the
-    /// large transport.
     fn mobile_now_playing(&mut self, ctx: &egui::Context, snap: &VisSnapshot) {
         egui::TopBottomPanel::bottom("m_transport").show(ctx, |ui| {
             use crate::theme::icon_button;
             ui.add_space(8.0);
-            // Title + status above the controls.
             let title = self
                 .current_song
                 .and_then(|i| self.songs.get(i))
@@ -3936,18 +3417,12 @@ impl OptimeApp {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                // iOS-style transport: five small circular buttons around a large filled
-                // play/pause disc, evenly spaced. The heart slot is always present so the
-                // row never shifts.
                 let have_songs = !self.songs.is_empty();
                 let small = 42.0;
                 let big = 58.0;
                 let total = 5.0 * small + big;
                 let spacing = (ui.available_width() - total).max(0.0) / 7.0;
                 ui.spacing_mut().item_spacing.x = spacing;
-                // Pin the row height to the largest button up front, so the small buttons
-                // placed before the big play disc center to the same height as those after
-                // it (otherwise egui center-aligns them against the shorter row they see).
                 ui.set_min_height(big);
                 ui.add_space(spacing);
 
@@ -3988,8 +3463,6 @@ impl OptimeApp {
                 }
                 let current = self.current_track_ref();
                 let liked = current.as_ref().is_some_and(|t| self.p.library.is_liked(t));
-                // Same glyph either way (the outline heart isn't in egui's fonts); the
-                // active flag tints it accent when liked, white otherwise.
                 let heart = "❤";
                 if icon_button(ui, heart, small, 18.0, false, liked, current.is_some()).clicked()
                     && let Some(t) = current
@@ -4018,18 +3491,12 @@ impl OptimeApp {
         egui::CentralPanel::default()
             .frame(card_frame)
             .show(ctx, |ui| {
-                // The piano roll doubles as the album art; swipe horizontally to change songs.
-                // While dragging, the roll follows the finger; past the threshold the old song
-                // slides out and the next one slides in from the opposite edge, with the volume
-                // dipping in proportion to how far offscreen the view is.
                 let rect = ui.max_rect();
                 let w = rect.width().max(1.0);
                 let resp = ui.interact(rect, egui::Id::new("swipe"), egui::Sense::drag());
                 let dt = ui.input(|i| i.stable_dt).min(0.1);
                 if resp.dragged() {
                     self.swipe_offset += resp.drag_delta().x;
-                    // Keep a preview of the song the swipe is heading toward, so it is already
-                    // visible (notes and all) next to the outgoing roll.
                     let dir: isize = if self.swipe_offset < -4.0 {
                         1
                     } else if self.swipe_offset > 4.0 {
@@ -4044,13 +3511,10 @@ impl OptimeApp {
                     }
                 } else if resp.drag_stopped() {
                     if self.swipe_offset.abs() >= 0.25 * w {
-                        // Committed: the old roll keeps sliding out while the preview (already
-                        // populated with the next song's notes) becomes the live roll.
                         let exit_side = self.swipe_offset.signum();
                         let old_roll = std::mem::take(&mut self.piano_roll);
                         self.swipe_out = Some((old_roll, exit_side));
                         if let Some(p) = self.swipe_preview.take() {
-                            // `dir`: +1 = next (dragged left), -1 = previous.
                             self.send_transport(p.dir);
                             self.piano_roll = p.roll;
                             if let Some(look) = p.look {
@@ -4064,7 +3528,6 @@ impl OptimeApp {
                         self.swipe_preview = None;
                     }
                 } else if self.swipe_offset != 0.0 {
-                    // Spring back / slide in.
                     self.swipe_offset *= (-12.0 * dt).exp();
                     if self.swipe_offset.abs() < 0.5 {
                         self.swipe_offset = 0.0;
@@ -4075,13 +3538,11 @@ impl OptimeApp {
                 }
                 self.swipe_gain = 1.0 - (self.swipe_offset.abs() / w).clamp(0.0, 1.0);
 
-                // The live roll, offset by the swipe.
                 let child_rect = rect.translate(egui::vec2(self.swipe_offset, 0.0));
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(child_rect));
                 child.set_clip_rect(rect);
                 self.piano_roll.draw(&mut child, snap.active);
 
-                // The incoming song's preview alongside it while dragging.
                 let offset = self.swipe_offset;
                 if let Some(p) = &mut self.swipe_preview {
                     let r = rect.translate(egui::vec2(offset + p.dir as f32 * w, 0.0));
@@ -4089,7 +3550,6 @@ impl OptimeApp {
                     child.set_clip_rect(rect);
                     p.roll.draw(&mut child, true);
                 }
-                // The old song's roll sliding out after a committed swipe.
                 if let Some((roll, side)) = &mut self.swipe_out {
                     let r = rect.translate(egui::vec2(offset + *side * w, 0.0));
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
@@ -4097,8 +3557,6 @@ impl OptimeApp {
                     roll.draw(&mut child, true);
                 }
 
-                // Round the corners of the (rectangularly-clipped) roll by masking the four
-                // square corners with the panel background, then draw the card outline on top.
                 crate::theme::mask_rounded_corners(ui.painter(), rect, 12.0, crate::theme::BG);
                 ui.painter().rect_stroke(
                     rect,
@@ -4108,8 +3566,6 @@ impl OptimeApp {
             });
     }
 
-    /// The mobile library: file open, demo archives, and the song list. Selecting a song starts
-    /// it in the mini-player rather than jumping to the visualizer.
     fn mobile_library(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -4144,12 +3600,7 @@ impl OptimeApp {
         });
     }
 
-    /// All keyboard shortcuts pass through here so they share one inhibition rule: whenever egui is
-    /// routing keystrokes to a focused widget (e.g. typing a title in the song-name editor, or any
-    /// text field / active drag-value), every shortcut is suppressed — the keystroke belongs to that
-    /// widget. Otherwise each shortcut *consumes* its key so it can't also reach a background widget.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        // A focused text field (or any widget wanting keyboard input) inhibits all shortcuts.
         if ctx.wants_keyboard_input() {
             return;
         }
@@ -4160,7 +3611,6 @@ impl OptimeApp {
                 i.consume_key(egui::Modifiers::NONE, egui::Key::Space),
             )
         });
-        // Arrow keys switch songs; spacebar toggles play/pause (starting the first song if idle).
         if prev {
             self.send_transport(-1);
         }
@@ -4178,9 +3628,7 @@ impl OptimeApp {
 }
 
 impl eframe::App for OptimeApp {
-    /// Persists the library, playback prefs, and synth settings (native: disk; web: localStorage).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        // Capture the currently playing song so a refresh/relaunch restores it.
         if let Some(track) = self.current_track_ref() {
             self.p.last_track = Some(track);
         }
@@ -4194,32 +3642,22 @@ impl eframe::App for OptimeApp {
         self.poll_pending_file();
         self.update_library_order(ctx);
 
-        // All keyboard shortcuts (song nav + play/pause), with the focused-widget inhibition.
         self.handle_shortcuts(ctx);
 
         self.handle_media_controls(ctx, frame);
 
-        // Apply any advance the audio thread performed on its own (keeps working while frozen),
-        // then sync config + pull the visualizer snapshot for the now-current song.
         self.reconcile_playback();
         let snap = self.sync_audio();
-        // Re-derived each frame by the Now Playing swipe; full volume everywhere else.
         self.swipe_gain = 1.0;
 
-        // Advance the piano roll's smoothed playhead (frozen when paused / no song), then drive
-        // the look-ahead runner so it stays buffered ahead of the playhead, and pull its notes.
         let playing = snap.active && !self.paused;
         let dt = ctx.input(|i| i.stable_dt) as f64;
         self.piano_roll.advance(&snap, dt, playing);
         if self.annotation.enabled {
-            // Annotation drives everything from the bounce: notes from the whole-song overview
-            // (the look-ahead's rolling window can't serve an editor that scrubs backwards) and the
-            // playhead from the buffer position.
             self.sync_annotation(ctx);
         } else if let Some(look) = &mut self.look_ahead {
             let target =
                 self.piano_roll.display_tick().ceil() as u32 + crate::piano_roll::RUN_AHEAD_TICKS;
-            // Bounded catch-up so a stalled/zero-BPM sequence can't spin forever.
             let mut guard = 0u32;
             while look.steps_elapsed() < target && guard < 200_000 {
                 look.tick();
@@ -4228,14 +3666,10 @@ impl eframe::App for OptimeApp {
             self.piano_roll.ingest(look);
         }
 
-        // The "Stats for Nerds" window floats over either layout.
         self.stats_ui(ctx);
 
-        // Narrow screens (phones) get the Spotify-style mobile layout.
         if ctx.screen_rect().width() < 600.0 {
             self.mobile_ui(ctx, &snap);
-            // On mobile, to save battery, only repaint the Playing and Settings tab for animating
-            // the piano roll and compressor gain reduction bar, respectively.
             if matches!(self.mobile_tab, MobileTab::NowPlaying | MobileTab::Settings) {
                 #[cfg(target_arch = "wasm32")]
                 ctx.request_repaint_after(std::time::Duration::from_millis(33));
@@ -4361,8 +3795,6 @@ impl eframe::App for OptimeApp {
                 {
                     self.export_gba_audio();
                 }
-                // Meters live at the right edge; skip them when the bar is too narrow
-                // rather than overlapping the left-to-right content.
                 const METERS_W: f32 = 220.0;
                 if ui.available_width() >= METERS_W {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -4410,10 +3842,6 @@ impl eframe::App for OptimeApp {
             }
         });
 
-        // Keep animating the visualizer. On the web, cpal generates audio on the *main thread*
-        // (ScriptProcessorNode), so an unthrottled full-rate repaint starves the audio callback
-        // and causes dropouts. Cap the visualizer to ~30 fps there to leave the main thread for
-        // audio; native keeps the audio callback on its own thread, so repaint as fast as it can.
         #[cfg(target_arch = "wasm32")]
         ctx.request_repaint_after(std::time::Duration::from_millis(33));
         #[cfg(not(target_arch = "wasm32"))]
@@ -4421,11 +3849,7 @@ impl eframe::App for OptimeApp {
     }
 }
 
-/// A small horizontal gain-reduction meter for the high-band compressor: 0 dB at the right edge,
-/// `−GR_FULL_SCALE_DB` at the left, fill grows leftward as `gr_db` goes more negative. Industry
-/// convention (compression-only, no makeup); silent (0 dB) when neither bus is active.
 fn draw_gr_bar(ui: &mut egui::Ui, gr_db: f32) {
-    /// Full-scale span (left edge = `−this` dB). 
     const GR_FULL_SCALE_DB: f32 = 96.0;
     let accent = crate::theme::ACCENT;
     let warn = ui.visuals().warn_fg_color;
@@ -4436,7 +3860,6 @@ fn draw_gr_bar(ui: &mut egui::Ui, gr_db: f32) {
         let (rect, _resp) = ui.allocate_exact_size(egui::vec2(180.0, 10.0), egui::Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-        // Fill grows from the right (0 dB anchor) leftward as reduction deepens.
         let fill_w = rect.width() * frac;
         let fill_rect = egui::Rect::from_min_size(
             egui::pos2(rect.right() - fill_w, rect.top()),
@@ -4445,7 +3868,6 @@ fn draw_gr_bar(ui: &mut egui::Ui, gr_db: f32) {
         if fill_w > 0.0 {
             painter.rect_filled(fill_rect, 2.0, color);
         }
-        // Tick at the −12 dB mark.
         let tick_x = rect.right() - rect.width() * (12.0 / GR_FULL_SCALE_DB);
         painter.line_segment(
             [
@@ -4461,8 +3883,6 @@ fn draw_gr_bar(ui: &mut egui::Ui, gr_db: f32) {
     });
 }
 
-/// One scrolling history graph for the top-bar meters: an icon label, a filled line plot, and
-/// the current value drawn inside the plot.
 #[allow(clippy::too_many_arguments)]
 fn draw_meter(
     ui: &mut egui::Ui,
@@ -4488,7 +3908,6 @@ fn draw_meter(
                 egui::pos2(x, y)
             })
             .collect();
-        // Soft fill under the curve, then the line itself.
         let fill = color.linear_multiply(0.25);
         for p in &pts {
             painter.line_segment(
@@ -4508,8 +3927,6 @@ fn draw_meter(
     resp.on_hover_text(hover);
 }
 
-/// Saves bytes to disk (native, via dialog) or triggers a browser download (web).
-/// Formats a song length in seconds as `M:SS`.
 fn fmt_duration(secs: f64) -> String {
     let total = secs.round().max(0.0) as u64;
     format!("{}:{:02}", total / 60, total % 60)
@@ -4532,7 +3949,6 @@ fn save_bytes(filename: &str, bytes: &[u8]) {
 mod tests {
     use super::sparse_default_order;
 
-    // Helper: songs identified by native order; `anchored[i]` gives song i its sparse_index.
     fn keys(anchored: &[(usize, usize)], n: usize) -> Vec<(Option<usize>, usize)> {
         (0..n)
             .map(|i| {
@@ -4544,30 +3960,24 @@ mod tests {
 
     #[test]
     fn anchored_song_holds_its_absolute_position() {
-        // Song 2 anchored at index 2 stays put among the unlabeled ones.
         assert_eq!(
             sparse_default_order(&keys(&[(2, 2)], 5)),
             vec![0, 1, 2, 3, 4]
         );
-        // Anchored at the front: it jumps to 0, the rest keep native order.
         assert_eq!(sparse_default_order(&keys(&[(2, 0)], 4)), vec![2, 0, 1, 3]);
-        // Anchored near the end.
         assert_eq!(sparse_default_order(&keys(&[(0, 3)], 4)), vec![1, 2, 3, 0]);
     }
 
     #[test]
     fn two_anchored_intersperse_and_collisions_resolve() {
-        // Two anchors at 1 and 3, three fillers fill 0,2,4.
         assert_eq!(
             sparse_default_order(&keys(&[(0, 1), (4, 3)], 5)),
             vec![1, 0, 2, 4, 3]
         );
-        // Colliding targets (both want 2): first lands at 2, the other at the next free slot.
         assert_eq!(
             sparse_default_order(&keys(&[(0, 2), (1, 2)], 5)),
             vec![2, 3, 0, 1, 4]
         );
-        // Out-of-range index parks at the end.
         assert_eq!(sparse_default_order(&keys(&[(1, 99)], 3)), vec![0, 2, 1]);
     }
 

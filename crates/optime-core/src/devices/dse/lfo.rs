@@ -1,24 +1,5 @@
-//! DSE channel LFOs — vibrato (pitch), tremolo (volume), and auto-pan — transcribed from the
-//! `pret/pmd-sky` `dc_lfo` engine:
-//!
-//! - [`Lfo::build`] is `SoundLfoBank_Set` (`lib/DSE/asm/dc_lfo_1.s`): amplitude = `depth << 10`,
-//!   `ticks_per_phase = max(1, period_ms * 1000 / tick_us)`, `output_delta = amplitude / ticks`,
-//!   the fade-in envelope (`delay`/`fade` in ms), and the waveform pick.
-//! - [`Lfo::tick`] + the eight waveform steps are `SoundLfoBank_Tick` and the `SoundLfoWave_*`
-//!   functions (`lib/DSE/src/dc_lfo_2.c`), reproduced exactly (phase counters, `>> 8` output,
-//!   `(output * (envelope_level >> 8)) >> 16` scaling).
-//! - The output is applied by `DseVoice_UpdateParameters` (`main_02071EB4.s`): the pitch LFO is
-//!   added straight to the 8.8-fixed `note_key`; the volume and pan LFOs are added as `>> 6` to the
-//!   0..=127 note-volume / pan index. Routing flags come from `LFO_OUTPUT_VOICE_UPDATE_FLAGS`.
-//!
-//! In the game each *voice* builds its own bank from the channel's pending config at note-on, so
-//! vibrato/tremolo restart their fade-in per note. We mirror that for pitch/volume (per-voice) and
-//! run a single auto-pan LFO per track (pan is a track property in the synth layer).
-
 use super::envelope::USEC_PER_DRIVER_TICK;
 
-/// Where an LFO's output is routed (config byte +2). Matches the dest → voice-update-flag map in
-/// `LFO_OUTPUT_VOICE_UPDATE_FLAGS` (1 = pitch, 2 = volume, 3 = pan).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LfoDest {
     Pitch,
@@ -37,31 +18,17 @@ impl LfoDest {
     }
 }
 
-/// One LFO's pending configuration, written by the SMD `Setup*Lfo` / `SetupLfoEnvelope` /
-/// `Use*Lfo` / `SetLfoParameter` opcodes (the `DseTrackEvent_*` handlers). Built into a live
-/// [`Lfo`] at note-on by [`Lfo::build`]. All four channel LFO slots live at `channel + 0x74`
-/// (0x10 bytes each); the dedicated key-bend/volume/pan opcodes target slots 0/1/2.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LfoConfig {
-    /// `0` = disabled, `1` = USE_ENVELOPE (fade-in), `3` = CONST_ENVELOPE (config +1).
     pub enabled: u8,
-    /// Output destination code (config +2): 1 = pitch, 2 = volume, 3 = pan.
     pub dest: u8,
-    /// Waveform index into `LFO_WAVEFORM_CALLBACKS` (config +3).
     pub waveform: u8,
-    /// Depth, sign-extended (config +4): the amplitude is `depth << 10`.
     pub depth: i16,
-    /// Oscillation period in ms (config +8): `ticks_per_phase = max(1, period*1000/tick_us)`.
     pub period: u16,
-    /// Envelope fade-in delay in ms (config +0xA).
     pub delay: u16,
-    /// Envelope fade-in duration in ms (config +0xC).
     pub fade: u16,
 }
 
-/// A deterministic copy of `DseUtil_GetRandomNumber` (`main_0206A878.s`): a 32-bit xorshift whose
-/// low 15 bits feed the noise waveforms. Seeded to a fixed nonzero value so playback is
-/// reproducible (the game seeds `DRIVER_WORK+0x34` once at init).
 #[derive(Debug, Clone)]
 pub struct LfoRng {
     state: u32,
@@ -74,7 +41,6 @@ impl Default for LfoRng {
 }
 
 impl LfoRng {
-    /// `DseUtil_GetRandomNumber`: `x ^= x<<17; x ^= (s32)x >> 15;` then return `x & 0x7FFF`.
     fn next(&mut self) -> i32 {
         let mut x = self.state;
         x ^= x << 17;
@@ -84,7 +50,6 @@ impl LfoRng {
     }
 }
 
-/// One live LFO (a `dse_lfo`).
 #[derive(Debug, Clone)]
 pub struct Lfo {
     pub dest: LfoDest,
@@ -101,20 +66,14 @@ pub struct Lfo {
     envelope_delta: i32,
 }
 
-/// Fixed-point "full" LFO envelope level (`0x1000000`); `(level >> 8)` is the unity multiplier.
 const ENV_FULL: i32 = 0x0100_0000;
 
 impl Lfo {
-    /// Builds a live LFO from a channel config slot, or `None` if the slot is disabled or
-    /// degenerate (`SoundLfoBank_Set`). `const_level` (0..=127) is the forced level for a
-    /// CONST_ENVELOPE LFO; it is irrelevant to the usual fade-in (`USE_ENVELOPE`) LFOs.
     pub fn build(cfg: &LfoConfig, const_level: i32) -> Option<Lfo> {
         if cfg.enabled == 0 {
             return None;
         }
         let dest = LfoDest::from_code(cfg.dest)?;
-        // A zero period would leave the amplitude uninitialised in the ROM; real data never does
-        // this, so treat it as "no LFO".
         if cfg.period == 0 {
             return None;
         }
@@ -127,7 +86,6 @@ impl Lfo {
 
         let (ticks_until_started, envelope_ticks_left, envelope_level, envelope_delta) =
             if cfg.enabled == 1 {
-                // USE_ENVELOPE: fade in from 0 to full over `fade` ms after a `delay` ms wait.
                 let delay_ticks = to_ticks(cfg.delay) as u16;
                 let fade_ticks = to_ticks(cfg.fade) as u16;
                 if fade_ticks != 0 {
@@ -136,7 +94,6 @@ impl Lfo {
                     (delay_ticks, 0, ENV_FULL, 0)
                 }
             } else {
-                // CONST_ENVELOPE: a fixed level, no fade-in (SoundLfoBank_SetConstEnvelopes).
                 (0, 0, ((const_level << 8) / 127) << 16, 0)
             };
 
@@ -156,9 +113,6 @@ impl Lfo {
         })
     }
 
-    /// Advances the LFO one driver tick and returns its signed output contribution (the value
-    /// summed into the destination's accumulator). `0` while still inside the start delay
-    /// (`SoundLfoBank_Tick`).
     pub fn tick(&mut self, rng: &mut LfoRng) -> i32 {
         if self.ticks_until_started != 0 {
             self.ticks_until_started -= 1;
@@ -175,13 +129,10 @@ impl Lfo {
             }
         }
 
-        // (output * (envelope_level >> 8)) >> 16, matching the ROM's 32-bit truncating multiply.
         let env = (self.envelope_level as u32) >> 8;
         output.wrapping_mul(env as i32) >> 16
     }
 
-    /// One step of the selected waveform, returning `current_output` (the eight `SoundLfoWave_*`
-    /// functions). Index 8+ is `Invalid` (silent).
     fn waveform_step(&mut self, rng: &mut LfoRng) -> i32 {
         match self.waveform {
             0 => self.half_square(),
@@ -304,7 +255,6 @@ mod tests {
     use super::*;
 
     fn vibrato_cfg() -> LfoConfig {
-        // A full-triangle pitch vibrato: depth 0x40, 200 ms period, no fade-in.
         LfoConfig {
             enabled: 1,
             dest: 1,
@@ -329,9 +279,7 @@ mod tests {
         let lfo = Lfo::build(&vibrato_cfg(), 127).unwrap();
         assert_eq!(lfo.dest, LfoDest::Pitch);
         assert_eq!(lfo.amplitude, 0x40 << 10);
-        // period 200 ms / 10 ms per tick = 20 ticks per phase.
         assert_eq!(lfo.ticks_per_phase_change, 20);
-        // No fade-in: envelope already full.
         assert_eq!(lfo.envelope_level, ENV_FULL);
     }
 
@@ -341,24 +289,21 @@ mod tests {
         let mut rng = LfoRng::default();
         let mut min = i32::MAX;
         let mut max = i32::MIN;
-        // Two full periods (4 * 20 ticks) covers a full up/down swing.
         for _ in 0..160 {
             let out = lfo.tick(&mut rng);
             min = min.min(out);
             max = max.max(out);
         }
-        // A symmetric vibrato: swings both above and below the centre by a similar amount.
         assert!(max > 0, "should swing positive, got max {max}");
         assert!(min < 0, "should swing negative, got min {min}");
-        // Peak magnitude is the amplitude scaled by the tick's `>> 8` (≈ depth << 2).
         assert!(max <= (0x40 << 2) + 8, "peak {max} too large");
     }
 
     #[test]
     fn fade_in_ramps_from_silence_to_full() {
         let mut cfg = vibrato_cfg();
-        cfg.fade = 1000; // 1000 ms / 10 = 100 ticks of fade-in
-        cfg.waveform = 1; // full square: constant ±amplitude so the envelope is visible
+        cfg.fade = 1000;
+        cfg.waveform = 1;
         let mut lfo = Lfo::build(&cfg, 127).unwrap();
         let mut rng = LfoRng::default();
         let first = lfo.tick(&mut rng).abs();
@@ -372,7 +317,7 @@ mod tests {
     #[test]
     fn start_delay_holds_output_at_zero() {
         let mut cfg = vibrato_cfg();
-        cfg.delay = 300; // 30 ticks of delay
+        cfg.delay = 300;
         cfg.waveform = 1;
         let mut lfo = Lfo::build(&cfg, 127).unwrap();
         let mut rng = LfoRng::default();

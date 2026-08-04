@@ -1,5 +1,3 @@
-//! SDAT container parsing: SYMB symbol tables, INFO records, the FAT, and SBNK bank decoding.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -9,85 +7,55 @@ use super::bank::{
 };
 use crate::util::{read_u8, read_u16, read_u32, search_for_sequence};
 
-/// INFO record for a sequence (SSEQ).
 #[derive(Debug, Clone, Default)]
 pub struct SseqInfo {
-    /// FAT file id of the SSEQ data.
     pub file_id: u16,
-    /// Instrument bank (SBNK) id this sequence uses.
     pub bank: u16,
-    /// Sequence master volume.
     pub volume: u8,
-    /// Channel pressure range (purpose unclear in the original).
     pub cpr: u8,
-    /// Polyphonic pressure range (purpose unclear in the original).
     pub ppr: u8,
-    /// Play setting (purpose unclear in the original).
     pub ply: u8,
 }
 
-/// INFO record for a sequence archive (SSAR).
 #[derive(Debug, Clone, Default)]
 pub struct SsarInfo {
-    /// FAT file id.
     pub file_id: u16,
 }
 
-/// INFO record for an instrument bank (SBNK), referencing up to four sample archives.
 #[derive(Debug, Clone, Default)]
 pub struct BankInfo {
-    /// FAT file id of the bank.
     pub file_id: u16,
-    /// Linked SWAR archive ids.
     pub swar_id: [u16; 4],
 }
 
-/// INFO record for a sample/wave archive (SWAR).
 #[derive(Debug, Clone, Default)]
 pub struct SwarInfo {
-    /// FAT file id.
     pub file_id: u16,
 }
 
-/// A parsed SDAT sound archive.
 pub struct Sdat {
-    /// The raw SDAT container bytes.
     pub data: Arc<[u8]>,
-    /// Ids of sequences that have INFO records, in order.
     pub sseq_list: Vec<u32>,
-    /// SSEQ INFO records, indexed by id.
     pub sseq_infos: Vec<Option<SseqInfo>>,
-    /// Sequence name → id.
     pub sseq_name_to_id: HashMap<String, u32>,
-    /// Sequence id → name.
     pub sseq_id_to_name: HashMap<u32, String>,
-    /// Bank name → id.
     pub sbnk_name_to_id: HashMap<String, u32>,
-    /// Bank id → name.
     pub sbnk_id_to_name: HashMap<u32, String>,
-    /// SSAR INFO records, indexed by id.
     pub ssar_infos: Vec<Option<SsarInfo>>,
-    /// SBNK INFO records, indexed by id.
     pub sbnk_infos: Vec<Option<BankInfo>>,
-    /// SWAR INFO records, indexed by id.
     pub swar_infos: Vec<Option<SwarInfo>>,
-    /// Decoded instrument banks, indexed by bank id.
     pub instrument_banks: Vec<Option<InstrumentBank>>,
-    /// File Allocation Table: file id → (offset, length) into `data`.
     pub fat: HashMap<u32, (usize, usize)>,
 }
 
-/// SDAT container magic: "SDAT", byte order 0xFEFF, version 0x0100.
 const SDAT_MAGIC: [u8; 8] = [0x53, 0x44, 0x41, 0x54, 0xFF, 0xFE, 0x00, 0x01];
 
 impl Sdat {
-    /// Returns the bytes of FAT file `id`, if present.
     pub fn file(&self, id: u16) -> Option<&[u8]> {
         let (off, len) = self.fat.get(&u32::from(id)).copied()?;
         self.data.get(off..off + len)
     }
 
-    /// Scans `rom` for every SDAT container and parses each one.
     pub fn load_all(rom: &[u8]) -> Vec<Sdat> {
         search_for_sequence(rom, &SDAT_MAGIC)
             .into_iter()
@@ -95,9 +63,6 @@ impl Sdat {
             .collect()
     }
 
-    /// Parses a single SDAT container starting at the beginning of `view`.
-    ///
-    /// Returns `None` if the header looks malformed.
     pub fn parse(view: &[u8]) -> Option<Sdat> {
         let header_size = read_u16(view, 0xC);
         if header_size > 256 {
@@ -108,7 +73,6 @@ impl Sdat {
         let info_offs = read_u32(view, 0x18) as usize;
         let fat_offs = read_u32(view, 0x20) as usize;
 
-        // Copy the container so the Sdat owns its bytes independent of the ROM buffer.
         let data: Arc<[u8]> = Arc::from(view.to_vec());
 
         let mut sdat = Sdat {
@@ -128,7 +92,6 @@ impl Sdat {
 
         let d = &data[..];
 
-        // --- SYMB: SSEQ names ---
         if symb_offs != 0 {
             let symb = symb_offs;
             let sseq_list_offs = read_u32(d, symb + 0x8) as usize;
@@ -144,7 +107,6 @@ impl Sdat {
                 }
             }
 
-            // --- SYMB: BANK names ---
             let bank_list_offs = read_u32(d, symb + 0x10) as usize;
             let bn = read_u32(d, symb + bank_list_offs) as usize;
             for i in 0..bn {
@@ -157,7 +119,6 @@ impl Sdat {
             }
         }
 
-        // --- INFO: SSEQ ---
         let info = info_offs;
         let sseq_info_offs = read_u32(d, info + 0x8) as usize;
         let sseq_n = read_u32(d, info + sseq_info_offs) as usize;
@@ -177,7 +138,6 @@ impl Sdat {
             }
         }
 
-        // --- INFO: SSAR ---
         let ssar_info_offs = read_u32(d, info + 0xC) as usize;
         let ssar_n = read_u32(d, info + ssar_info_offs) as usize;
         sdat.ssar_infos.resize(ssar_n, None);
@@ -190,7 +150,6 @@ impl Sdat {
             }
         }
 
-        // --- INFO: BANK ---
         let bank_info_offs = read_u32(d, info + 0x10) as usize;
         let bank_n = read_u32(d, info + bank_info_offs) as usize;
         sdat.sbnk_infos.resize(bank_n, None);
@@ -209,7 +168,6 @@ impl Sdat {
             }
         }
 
-        // --- INFO: SWAR ---
         let swar_info_offs = read_u32(d, info + 0x14) as usize;
         let swar_n = read_u32(d, info + swar_info_offs) as usize;
         sdat.swar_infos.resize(swar_n, None);
@@ -222,7 +180,6 @@ impl Sdat {
             }
         }
 
-        // --- FAT ---
         let fat = fat_offs;
         let num_files = read_u32(d, fat + 8) as usize;
         for i in 0..num_files {
@@ -232,7 +189,6 @@ impl Sdat {
             sdat.fat.insert(i as u32, (file_offs, file_size));
         }
 
-        // --- Decode instrument banks (SBNK) ---
         sdat.instrument_banks.resize(sdat.sbnk_infos.len(), None);
         for i in 0..sdat.sbnk_infos.len() {
             let Some(bank_info) = sdat.sbnk_infos[i].clone() else {
@@ -249,7 +205,6 @@ impl Sdat {
     }
 }
 
-/// Reads a NUL-terminated ASCII string from `data` starting at `offset`.
 fn read_c_string(data: &[u8], offset: usize) -> String {
     let mut s = String::new();
     let mut i = offset;
@@ -264,14 +219,12 @@ fn read_c_string(data: &[u8], offset: usize) -> String {
     s
 }
 
-/// Decodes one SBNK bank file into an [`InstrumentBank`].
 fn decode_bank(bank_file: &[u8]) -> InstrumentBank {
     let num_instruments = read_u32(bank_file, 0x38) as usize;
     let mut bank = InstrumentBank {
         instruments: Vec::with_capacity(num_instruments),
     };
 
-    // Reads the 12-byte region payload at `record_offset + offset` into a region.
     let read_region = |record_offset: usize, offset: usize| -> InstrumentRegion {
         let base = record_offset + offset;
         let attack = read_u8(bank_file, base + 0x5);

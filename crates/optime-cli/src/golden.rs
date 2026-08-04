@@ -1,8 +1,3 @@
-//! Golden-output harness: renders a fixed slice of audio from every demo SDAT under a few
-//! `PerDeviceSettings` variants and prints an FNV-1a hash of the rendered f32 bits. Used to verify that
-//! refactors are behavior-preserving (the hashes must not change). Not a correctness oracle —
-//! just a bit-for-bit baseline of the current engine.
-
 use clap::Args as ClapArgs;
 use optime_core::{
     InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
@@ -10,7 +5,7 @@ use optime_core::{
 };
 
 const SAMPLE_RATE: f64 = 32768.0;
-const FRAMES: usize = 32768 * 4; // ~4 seconds of stereo audio per config.
+const FRAMES: usize = 32768 * 4;
 
 fn fnv1a(hash: &mut u64, bytes: &[u8]) {
     for &b in bytes {
@@ -19,8 +14,6 @@ fn fnv1a(hash: &mut u64, bytes: &[u8]) {
     }
 }
 
-/// Renders `FRAMES` stereo frames of song 0 from `data` under `config`, folding every output
-/// f32's raw bits into `hash`.
 fn render_into(hash: &mut u64, data: &dyn SoundData, config: &PerDeviceSettings) {
     let Some(mut ctrl) = SynthController::new(SAMPLE_RATE, data, 0) else {
         fnv1a(hash, b"<no-controller>");
@@ -41,7 +34,7 @@ fn configs() -> Vec<(&'static str, PerDeviceSettings)> {
             PerDeviceSettings {
                 stereo_separation: true,
                 bass_mono: true,
-                tuning_choice: 1, // Pure, tonic 0
+                tuning_choice: 1,
                 pure_tonic: 0,
                 instrument_resample: InstrumentResampleSettings {
                     choice: InstrumentResampleChoice::SincSampleNyquist,
@@ -80,7 +73,6 @@ fn configs() -> Vec<(&'static str, PerDeviceSettings)> {
     about = "Hash a fixed render of every demo SDAT under several settings (refactor guard)."
 )]
 pub struct Args {
-    /// Directory of `.sdat` demos to hash. Defaults to the repo's `demos/`.
     #[arg(long)]
     demos: Option<std::path::PathBuf>,
 }

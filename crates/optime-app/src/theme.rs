@@ -1,27 +1,13 @@
-//! The app-wide visual theme: an iOS-dark palette applied to egui's style, plus small
-//! Apple-style widget helpers (list rows, section headers, circular icon buttons) shared by
-//! the mobile and desktop layouts.
-
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, TextStyle, Vec2};
 
-/// Near-black app background.
 pub const BG: Color32 = Color32::from_rgb(0x0b, 0x0b, 0x0f);
-/// Card / raised-surface fill.
 pub const CARD: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x20);
-/// Hovered / pressed surface fill.
 pub const CARD_HI: Color32 = Color32::from_rgb(0x26, 0x26, 0x2e);
-/// Hairline separators.
 pub const HAIRLINE: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x32);
-/// The accent (Apple-Music-style red-pink).
 pub const ACCENT: Color32 = Color32::from_rgb(0xfc, 0x46, 0x64);
-/// Primary text.
 pub const TEXT: Color32 = Color32::from_rgb(0xee, 0xee, 0xf2);
-/// Secondary / caption text.
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0x9a, 0x9a, 0xa5);
 
-/// Installs the UI typeface: real SF Pro when it's installed on the system (Apple's license
-/// forbids bundling it), otherwise the embedded Inter — the standard open SF Pro metric-alike —
-/// with egui's defaults kept as fallbacks for emoji/symbol coverage.
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
@@ -37,7 +23,6 @@ fn install_fonts(ctx: &egui::Context) {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // Use the genuine article when the user has installed it.
         for candidate in [
             "C:\\Windows\\Fonts\\SF-Pro.ttf",
             "C:\\Windows\\Fonts\\SF-Pro-Display-Regular.otf",
@@ -62,11 +47,8 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Applies the theme to the egui context (call once at startup).
 pub fn apply(ctx: &egui::Context) {
     install_fonts(ctx);
-    // Pin the app to dark mode: egui 0.29 keeps separate dark/light styles and follows the
-    // OS theme by default, which would swap in the stock light style on light-mode systems.
     ctx.set_theme(egui::ThemePreference::Dark);
     let mut style = (*ctx.style()).clone();
 
@@ -123,7 +105,6 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
-/// A small gray uppercase section header, iOS-grouped-list style.
 pub fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(10.0);
     ui.label(
@@ -134,9 +115,6 @@ pub fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-/// One iOS-style list row: full-width tappable area, optional leading icon, title, trailing
-/// status badges (icon + tint), optional chevron, hairline separator underneath. `width` lets
-/// callers reserve space for trailing widgets (pass `ui.available_width()` otherwise).
 pub fn ios_row(
     ui: &mut egui::Ui,
     width: f32,
@@ -149,8 +127,6 @@ pub fn ios_row(
     ios_row_ext(ui, width, icon, title, None, badges, selected, chevron)
 }
 
-/// As [`ios_row`], but with optional `trailing` text drawn in a lower-contrast colour at the
-/// right edge (before any badges) — used for the song length in the library.
 #[allow(clippy::too_many_arguments)]
 pub fn ios_row_ext(
     ui: &mut egui::Ui,
@@ -182,7 +158,6 @@ pub fn ios_row_ext(
         x += 28.0;
     }
     let mut badge_x = rect.right() - if chevron { 28.0 } else { 12.0 };
-    // Trailing dim text (e.g. song length), right-aligned before the badges.
     if let Some(trailing) = trailing {
         let galley = painter.text(
             Pos2::new(badge_x, rect.center().y),
@@ -193,7 +168,6 @@ pub fn ios_row_ext(
         );
         badge_x -= galley.width() + 8.0;
     }
-    // Trailing status badges (liked / in-playlist), right-aligned before the chevron.
     for (glyph, tint) in badges {
         painter.text(
             Pos2::new(badge_x, rect.center().y),
@@ -204,7 +178,6 @@ pub fn ios_row_ext(
         );
         badge_x -= 20.0;
     }
-    // Clip the title so it never runs under the badges / chevron.
     let title_right = badge_x - 6.0;
     let title_painter = ui.painter_at(Rect::from_min_max(
         Pos2::new(x, rect.top()),
@@ -236,9 +209,6 @@ pub fn ios_row_ext(
     resp
 }
 
-/// A circular icon button (Apple-transport style). `filled` paints a solid accent disc (the
-/// big play button); otherwise the glyph floats with a soft circle on hover/press. `active`
-/// tints the glyph with the accent (shuffle/repeat/heart states).
 pub fn icon_button(
     ui: &mut egui::Ui,
     icon: &str,
@@ -293,23 +263,12 @@ pub fn icon_button(
     resp
 }
 
-/// Paints `color`-filled wedges over the four square corners of `rect` so opaque content
-/// drawn underneath (e.g. the piano roll, which can only be clipped to an axis-aligned rect)
-/// appears to have rounded corners of `radius`. Fill `color` with the surrounding background
-/// so the masked corners blend into the panel.
-///
-/// Each corner notch (square corner minus quarter-disc) is *concave*, so it can't be drawn as
-/// a single `convex_polygon` — egui's tessellator would collapse it to the straight chord
-/// (visible as a diagonal line, notably on the iOS WebGL backend). Instead the notch is built
-/// as an explicit triangle fan in a `Mesh`, which renders exactly on every backend.
 pub fn mask_rounded_corners(painter: &egui::Painter, rect: Rect, radius: f32, color: Color32) {
     use std::f32::consts::FRAC_PI_2;
     let r = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
     if r <= 0.0 {
         return;
     }
-    // (square corner point, arc center, arc start angle) per corner. The quarter-circle arc
-    // bulges toward the square corner; the fan from the corner across the arc fills the notch.
     let corners = [
         (
             rect.left_top(),

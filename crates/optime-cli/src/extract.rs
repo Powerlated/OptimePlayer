@@ -1,7 +1,3 @@
-//! Extracts the MP2K audio data from a GBA ROM into an audio-only image (see
-//! `devices/gba/extract.rs`), verifies the result loads with the same song list and renders a
-//! few songs bit-identically, and writes it next to the input as `<stem>-audio.gba`.
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -12,7 +8,6 @@ use optime_core::{PerDeviceSettings, SynthController, load_all};
 #[derive(ClapArgs)]
 #[command(about = "Strip a GBA ROM down to an audio-only image and verify it renders identically.")]
 pub struct Args {
-    /// The GBA ROM to extract MP2K audio data from.
     rom: PathBuf,
 }
 
@@ -53,7 +48,6 @@ pub fn run(args: Args) -> ExitCode {
         100.0 * kept as f64 / bytes.len() as f64
     );
 
-    // Verify: same song list, and a sample of songs renders bit-identically.
     let Some(stripped) = load_all(&extracted).pop() else {
         eprintln!("BUG: the extracted image no longer parses.");
         return ExitCode::FAILURE;

@@ -1,18 +1,3 @@
-//! Captures the mixer-to-output resampler's effect on **real DirectSound content** so MATLAB can
-//! measure the spectral power loss of switching the mixer-to-output stage from "Nearest neighbor"
-//! to "Sinc - output Nyquist (crunch)".
-//!
-//! For each Emerald song it:
-//!   1. renders the isolated sampled (DirectSound) mixer bus at `MIXER_RATE`
-//!      ([`SynthController::fill_mixer_bus`] — no PSG, no resampling), then
-//!   2. feeds that exact bus through a [`StreamResampler`] twice — once nearest, once crunch — at
-//!      `MIXER_RATE → OUT_RATE`, exactly as the engine's mixer-to-output stage does.
-//!
-//! The two output-rate streams (concatenated across all songs, mono = (L+R)/2) are written as raw
-//! little-endian `f32` to the scratchpad, alongside a small meta file. Because the resampler is
-//! linear its transfer function is input-independent; real songs only supply the *spectral
-//! weighting* that makes the "average" power-loss number reflect actual musical content.
-
 use std::io::Write as _;
 use std::process::ExitCode;
 
@@ -21,39 +6,26 @@ use optime_core::{
     InstrumentResampleMode, PerDeviceSettings, StreamResampler, SynthController, load_all,
 };
 
-/// Mixer-bus (DirectSound) rate — deliberately below the output rate so nearest-neighbour ZOH
-/// upsampling produces real imaging for the crunch low-pass to remove.
 const MIXER_RATE: f64 = 32_768.0;
-/// Output (audio device) rate.
 const OUT_RATE: f64 = 48_000.0;
-/// Sinc tap count (per side) for the crunch mode — the app's mixer default.
 const HALF_TAPS: usize = 32;
-/// Crunch low-pass cutoff (Hz) for the sampled bus — the app's mixer default (`MIXER_CUTOFF_HZ`).
 const CRUNCH_CUTOFF_HZ: u32 = 15_000;
-/// Seconds of DirectSound captured per song.
 const SECS_PER_SONG: f64 = 8.0;
 
-/// The Emerald song ids the user picked as test material.
 const SONGS: &[u32] = &[
     548, 413, 465, 403, 429, 444, 374, 539, 398, 474, 538, 479, 524,
 ];
 
-/// A config that captures the isolated mixer (DirectSound) bus at [`MIXER_RATE`]. The captured bus
-/// is independent of the mixer→output resampler (`fill_mixer_bus` reads the bus directly), so the
-/// neutral mixer_resample is fine; the per-voice resampling stays at neutral's nearest-neighbour.
 fn mixer_config() -> PerDeviceSettings {
     PerDeviceSettings {
         use_mixer: true,
         mixer_sample_rate: MIXER_RATE as u32,
-        // Mono-summed analysis: keep the stereo expander out of the captured bus.
         stereo_separation: false,
         bass_mono: false,
         ..PerDeviceSettings::neutral()
     }
 }
 
-/// Resamples a captured mixer-rate stereo bus to the output rate in `mode`, returning the mono
-/// `(L+R)/2` output stream.
 fn resample_bus(bus: &[(f32, f32)], mode: InstrumentResampleMode) -> Vec<f32> {
     let mut rs = StreamResampler::new();
     rs.set(MIXER_RATE as f32, OUT_RATE as f32, mode);
@@ -77,7 +49,6 @@ fn resample_bus(bus: &[(f32, f32)], mode: InstrumentResampleMode) -> Vec<f32> {
 #[derive(ClapArgs)]
 #[command(about = "Capture the mixer-to-output resampler's effect on real DirectSound content.")]
 pub struct Args {
-    /// Directory to write `near.f32`, `crunch.f32` and `meta.txt` into.
     #[arg(default_value = ".")]
     out_dir: String,
 }
@@ -114,8 +85,7 @@ pub fn run(args: Args) -> ExitCode {
         let mut controller =
             SynthController::new(OUT_RATE, &**data, song).expect("controller for song");
 
-        // Capture the isolated DirectSound bus at the mixer rate.
-        let cfg = mixer_config(); // capture is mode-independent; reuse one config
+        let cfg = mixer_config();
         let mut buf = vec![0.0f32; 2 * frames];
         controller.fill_mixer_bus(&mut buf, &cfg);
         let bus: Vec<(f32, f32)> = buf.chunks_exact(2).map(|c| (c[0], c[1])).collect();

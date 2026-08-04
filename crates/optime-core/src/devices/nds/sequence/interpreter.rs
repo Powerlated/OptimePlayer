@@ -1,21 +1,13 @@
-//! The SSEQ bytecode interpreter: one command step per call, plus the control-command
-//! (`0xC0`/`0xD0`), variable/arithmetic (`0xB0`), and loop-end handlers.
-
 use super::MessageType;
 use super::{Sequence, ValType};
 use crate::TRACK_COUNT;
 
 impl Sequence {
-    /// Executes a single command for track `idx`, following pokediamond's `TrackStepTicks`.
-    ///
-    /// Handles the `0xA2` conditional / `0xA0` random / `0xA1` variable prefixes, the note-on
-    /// commands (`< 0x80`) with note-wait timing, and the control-command groups.
     pub fn execute_track(&mut self, idx: usize) {
         let mut opcode = self.read_pc_inc(idx, 1) as u8;
         #[cfg(test)]
         super::OPCODE_SEEN[opcode as usize].store(true, std::sync::atomic::Ordering::Relaxed);
 
-        // Prefix bytes (pokediamond order: conditional, then random, then variable).
         let mut run_cmd = true;
         let mut special: Option<ValType> = None;
         if opcode == 0xA2 {
@@ -31,7 +23,6 @@ impl Sequence {
             special = Some(ValType::Var);
         }
 
-        // Note-on: velocity (u8) + duration (value), key transposed and clamped.
         if opcode < 0x80 {
             let velocity = self.read_pc_inc(idx, 1) as i32;
             let length = self.parse_value(idx, special.unwrap_or(ValType::Vlv));
@@ -109,7 +100,6 @@ impl Sequence {
                 _ => {}
             },
             0xB0 => {
-                // Variable op: var index (u8) + value (u16 unless prefixed).
                 let var_idx = (self.read_pc_inc(idx, 1) as usize) & 0xF;
                 let val = self.parse_value(idx, special.unwrap_or(ValType::U16)) as i16 as i32;
                 if run_cmd {
@@ -140,38 +130,29 @@ impl Sequence {
                 match opcode {
                     0xFD => self.tracks[idx].pc = self.pop(idx),
                     0xFC => self.loop_end(idx),
-                    // In our layout the `0xFE <mask>` track-allocation header sits at the start of
-                    // track 0's stream (pokediamond consumes it during player setup, before
-                    // stepping), so we read and discard its 2 bytes here to stay PC-aligned.
                     0xFE => {
                         let _ = self.read_pc_inc(idx, 2);
                     }
                     0xFF => {
                         self.end_track(idx);
                         self.send_message(idx, MessageType::TrackEnded);
-                        // Non-zero so the per-tick `while resting_for == 0` loop stops.
                         self.tracks[idx].resting_for = 1;
                     }
                     _ => {}
                 }
             }
             _ => {
-                // Unknown opcode; stop the track to avoid runaway execution.
                 self.end_track(idx);
                 self.tracks[idx].resting_for = 1;
             }
         }
     }
 
-    /// Applies a `0xC0`/`0xD0`-group control command with its already-parsed operand.
     fn apply_control(&mut self, idx: usize, opcode: u8, raw: i32) {
         let u8v = raw & 0xFF;
         let s8v = u8v as u8 as i8 as i32;
         match opcode {
             0xC0 => {
-                // Keep our 0..128 pan representation (centre 64); the `127 -> 128` nudge makes a
-                // hard-right pan symmetric. (pokediamond stores the signed `raw - 0x40`; our
-                // stereo engine is a separate Haas/crossover design, so we keep this mapping.)
                 let pan = if u8v == 127 { 128 } else { u8v };
                 self.tracks[idx].pan = pan;
                 self.send_message(idx, MessageType::PanChange { pan });
@@ -208,7 +189,6 @@ impl Sequence {
             0xD2 => self.tracks[idx].sustain_rate = u8v,
             0xD3 => self.tracks[idx].release_rate = u8v,
             0xD4 => {
-                // Loop start: push the current PC and the loop count onto the shared stack.
                 let sp = self.tracks[idx].sp;
                 if sp < self.tracks[idx].stack.len() {
                     let pc = self.tracks[idx].pc;
@@ -218,13 +198,10 @@ impl Sequence {
                 }
             }
             0xD5 => self.tracks[idx].expression = u8v,
-            // 0xD6 print var, 0xD7 mute: not modelled (operand already consumed).
             _ => {}
         }
     }
 
-    /// Loop-end (`0xFC`): decrement the top loop counter and jump back, or pop when it reaches 0.
-    /// A stored count of 0 means an infinite loop. Mirrors pokediamond's `0xFC` handling.
     fn loop_end(&mut self, idx: usize) {
         let sp = self.tracks[idx].sp;
         if sp == 0 {
@@ -242,7 +219,6 @@ impl Sequence {
         self.tracks[idx].pc = self.tracks[idx].stack[sp - 1];
     }
 
-    /// Applies a `0xB0`-group variable/arithmetic/compare command (pokediamond `0xB0`–`0xBD`).
     fn apply_var_op(&mut self, idx: usize, opcode: u8, var_idx: usize, par: i32) {
         let v = &mut self.variables[var_idx];
         let cur = i32::from(*v);
@@ -275,7 +251,6 @@ impl Sequence {
             0xBB => self.tracks[idx].cmp = cur <= par,
             0xBC => self.tracks[idx].cmp = cur < par,
             0xBD => self.tracks[idx].cmp = cur != par,
-            // 0xB7 (unused in pokediamond) and others: no-op.
             _ => {}
         }
     }

@@ -1,12 +1,3 @@
-//! Renders every playable song from a loaded sound archive (DS SDAT, DSE, or GBA / `.gbaaudio`
-//! image) to a mono 16-bit WAV, so the clips can be audio-fingerprinted against a reference
-//! recording (see the `match-ost` subcommand, which does that matching in-process). Also writes a
-//! `manifest.json` mapping each clip back to its native listing index and song id, so an external
-//! matcher can resolve which `songId` an audio match belongs to (the curated table's `sparseIndex`
-//! comes from the reference playlist order, not this native index).
-//!
-//! The input must already be decompressed — gunzip any `*.gbaaudio.gz` first.
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -20,11 +11,8 @@ const SAMPLE_RATE: u32 = 32_768;
 #[derive(Parser)]
 #[command(about = "Render every playable song in an archive to a mono WAV, plus a manifest.")]
 pub struct Args {
-    /// Decompressed sound archive (DS SDAT, DSE, or GBA `.gbaaudio`).
     archive: PathBuf,
-    /// Directory to write the WAVs and `manifest.json` into; created if missing.
     out_dir: PathBuf,
-    /// Seconds of audio to render per song.
     #[arg(default_value_t = 40.0)]
     seconds: f64,
 }
@@ -58,7 +46,6 @@ pub fn run(args: Args) -> ExitCode {
 
     let config = PerDeviceSettings::neutral();
     let frames = (args.seconds * f64::from(SAMPLE_RATE)) as usize;
-    // manifest.json entries, hand-formatted (the shape is fixed and trivially small).
     let mut manifest = String::from("[\n");
 
     for (index, &id) in song_ids.iter().enumerate() {
@@ -67,7 +54,6 @@ pub fn run(args: Args) -> ExitCode {
             eprintln!("song {id}: failed to start, skipping");
             continue;
         };
-        // Render `frames` stereo frames in device-buffer-sized chunks, downmixing to mono.
         let mut mono = Vec::with_capacity(frames);
         let mut buf = vec![0.0f32; 2 * 512];
         while mono.len() < frames {

@@ -1,6 +1,3 @@
-//! Entry point. Native: opens a window via `eframe::run_native`. Web: mounts the eframe app
-//! onto the `<canvas>` in `index.html` (compiled to wasm by Trunk).
-
 fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     {
