@@ -192,6 +192,41 @@ mod tests {
         spurious_free_snr_db(&out, SOURCE_PERIODS as f64 / SOURCE_LEN as f64 * ratio)
     }
 
+    fn alternating_square() -> Vec<f32> {
+        (0..SOURCE_LEN)
+            .map(|k| if k % 2 == 0 { 1.0 } else { -1.0 })
+            .collect()
+    }
+
+    fn additive_square(t: f64, fc: f64) -> f64 {
+        let mut sum = 0.0;
+        let mut harmonic = 1;
+        while harmonic as f64 * 0.5 < fc {
+            sum += (std::f64::consts::PI * harmonic as f64 * t).sin() / harmonic as f64;
+            harmonic += 2;
+        }
+        sum * 4.0 / std::f64::consts::PI
+    }
+
+    fn step_snr_db<R: Resampler>(half_taps: usize, ratio: f64) -> f64 {
+        let source = alternating_square();
+        let tables = R::tables(half_taps);
+        let fc = 0.5 / ratio as f32;
+        let (mut reference, mut residual) = (0.0f64, 0.0f64);
+        for n in 0..OUTPUT_LEN {
+            let pos = (half_taps as f64 + n as f64 * ratio) as f32;
+            let (lo, hi) = R::tap_window(&tables, pos);
+            let window: Vec<f32> = (lo..=hi)
+                .map(|k| source[k.rem_euclid(SOURCE_LEN as i64) as usize])
+                .collect();
+            let got = f64::from(R::resample(&tables, &window, pos, fc, true));
+            let want = additive_square(f64::from(pos), f64::from(fc));
+            reference += want * want;
+            residual += (got - want) * (got - want);
+        }
+        10.0 * (reference / residual.max(f64::MIN_POSITIVE)).log10()
+    }
+
     const RATIOS: [f64; 4] = [7.0 / 16.0, 1.0, 43.0 / 32.0, 3.0];
     const CONTRACT_SNR_DB: f64 = 100.0;
     const MIN_HALF_TAPS_FOR_CONTRACT: usize = 16;
@@ -219,6 +254,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    const STEP_RATIOS: [f64; 6] = [0.25, 0.26, 0.17, 0.4, 0.45, 0.7];
+    const STEP_SPREAD_RATIOS: [f64; 4] = [0.26, 0.17, 0.45, 0.7];
+    const STEP_CONTRACT_SNR_DB: f64 = 35.0;
+    const UNTRUNCATED_STEP_SNR_DB: f64 = 85.0;
+
+    #[test]
+    fn step_mode_renders_a_band_limited_square_wave() {
+        for ratio in STEP_RATIOS {
+            for half_taps in [MIN_HALF_TAPS_FOR_CONTRACT, 32, 64] {
+                for (name, snr) in [
+                    (
+                        "simd/4",
+                        step_snr_db::<ResampleImplSimd<4>>(half_taps, ratio),
+                    ),
+                    (
+                        "simd/8",
+                        step_snr_db::<ResampleImplSimd<8>>(half_taps, ratio),
+                    ),
+                    (
+                        "closed/4",
+                        step_snr_db::<ResampleImplSimdClosedForm<4>>(half_taps, ratio),
+                    ),
+                    (
+                        "closed/8",
+                        step_snr_db::<ResampleImplSimdClosedForm<8>>(half_taps, ratio),
+                    ),
+                ] {
+                    assert!(
+                        snr > STEP_CONTRACT_SNR_DB,
+                        "{name}: half_taps={half_taps} ratio={ratio} gave {snr:.1} dB"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_untruncated_step_kernel_sharpens_with_more_taps() {
+        for ratio in STEP_SPREAD_RATIOS {
+            let thin = step_snr_db::<ResampleImplSimdClosedForm>(MIN_HALF_TAPS_FOR_CONTRACT, ratio);
+            let wide = step_snr_db::<ResampleImplSimdClosedForm>(64, ratio);
+            assert!(wide > thin, "ratio={ratio}: {thin:.1} dB -> {wide:.1} dB");
+            assert!(
+                wide > UNTRUNCATED_STEP_SNR_DB,
+                "ratio={ratio}: 64 half-taps gave {wide:.1} dB"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tabulated_step_kernel_degrades_past_its_table_reach() {
+        let ratio = 0.26;
+        let thin = step_snr_db::<ResampleImplSimd>(MIN_HALF_TAPS_FOR_CONTRACT, ratio);
+        let wide = step_snr_db::<ResampleImplSimd>(64, ratio);
+        assert!(
+            wide < thin,
+            "widening past the table reach should cost SNR: {thin:.1} dB -> {wide:.1} dB"
+        );
     }
 
     #[test]

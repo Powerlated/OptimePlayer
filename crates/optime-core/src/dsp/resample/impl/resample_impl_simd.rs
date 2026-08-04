@@ -74,7 +74,8 @@ impl<const LANES: usize> Resampler for ResampleImplSimd<LANES> {
         let d0 = pos - k_lo as f32;
         let p = tables.half_taps as f32;
         let (out, wsum): (Sample, Sample) = if step_mode {
-            let (first, last) = taps_within_reach::<LANES>(k, d0, sinc_idx_step, src.len());
+            let support = kernel_support(k, sinc_idx_step);
+            let (first, last) = taps_within_reach::<LANES>(d0, support, src.len());
             gather_step::<LANES>(k, &src[first..last], d0 - first as f32, sinc_idx_step, p)
         } else {
             gather_impulse::<LANES>(src, d0, fc, p)
@@ -169,13 +170,12 @@ fn sinc_int_simd<const N: usize>(k: &Kernels, idx: Fv<N>) -> Fv<N> {
         .copysign(idx)
 }
 
-fn taps_within_reach<const N: usize>(
-    k: &Kernels,
-    d0: f32,
-    sinc_idx_step: f32,
-    taps: usize,
-) -> (usize, usize) {
-    let support = table_reach(k) / sinc_idx_step;
+#[inline]
+fn kernel_support(k: &Kernels, sinc_idx_step: f32) -> f32 {
+    table_reach(k) / sinc_idx_step
+}
+
+fn taps_within_reach<const N: usize>(d0: f32, support: f32, taps: usize) -> (usize, usize) {
     let clamp = |edge: f32| edge.clamp(0.0, taps as f32) as usize;
     let first = clamp(d0 - support - 1.0) / N * N;
     let last = (clamp(d0 + support) + 2).next_multiple_of(N).min(taps);
