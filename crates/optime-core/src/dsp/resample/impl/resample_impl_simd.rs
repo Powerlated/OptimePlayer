@@ -1,4 +1,5 @@
-//! Resampler implementation 1: Blackman-windowed sinc, in two modes. Impulse mode is ordinary
+//! The tabulated SIMD resampler, and the default: Blackman-windowed sinc in two modes. Impulse mode
+//! is ordinary
 //! band-limited interpolation — each source sample weighted by a sinc lobe at its distance from the
 //! read position. Step mode treats the source as a zero-order hold instead, weighting each sample by
 //! the *difference* of the integrated sinc across the sample it spans, so a square wave's edges come
@@ -19,14 +20,14 @@ use super::{Fv, LANES, Phasor, blackman, blackman_from_cos, gather_impulse, sinc
 use crate::dsp::resample::{MAX_HALF_TAPS, Resampler};
 use crate::waveform::Sample;
 
-pub struct ResampleImpl1;
+pub struct ResampleImplSimd;
 
 #[derive(Clone)]
 pub struct Tables {
     pub half_taps: usize,
 }
 
-impl Resampler for ResampleImpl1 {
+impl Resampler for ResampleImplSimd {
     type Tables = Tables;
 
     fn tables(half_taps: usize) -> Tables {
@@ -207,7 +208,7 @@ mod tests {
     }
 
     fn staged(tables: &Tables, pos: f64, f: impl Fn(i64) -> f64) -> Vec<f32> {
-        let (k_lo, k_hi) = ResampleImpl1::tap_window(tables, pos as f32);
+        let (k_lo, k_hi) = ResampleImplSimd::tap_window(tables, pos as f32);
         (k_lo..=k_hi).map(|t| f(t) as f32).collect()
     }
 
@@ -282,11 +283,11 @@ mod tests {
 
     #[test]
     fn step_mode_preserves_dc() {
-        let tables = ResampleImpl1::tables(16);
+        let tables = ResampleImplSimd::tables(16);
         for fc in [0.1, 0.25, 0.5, 1.5] {
             for pos in [3.0, 7.35, 20.7] {
                 let src = staged(&tables, pos, |_| 1.0);
-                let out = f64::from(ResampleImpl1::resample(
+                let out = f64::from(ResampleImplSimd::resample(
                     &tables, &src, pos as f32, fc as f32, true,
                 ));
                 assert!(close(out, 1.0, 1e-9), "DC at fc={fc}, pos={pos}: {out}");
@@ -296,11 +297,11 @@ mod tests {
 
     #[test]
     fn step_mode_is_a_bandlimited_step() {
-        let tables = ResampleImpl1::tables(32);
+        let tables = ResampleImplSimd::tables(32);
         let fc = 0.5 / 4.0;
         let step = |k: i64| if k >= 0 { 1.0_f64 } else { 0.0 };
         let at = |pos: f64| {
-            f64::from(ResampleImpl1::resample(
+            f64::from(ResampleImplSimd::resample(
                 &tables,
                 &staged(&tables, pos, step),
                 pos as f32,
@@ -327,10 +328,10 @@ mod tests {
 
     #[test]
     fn impulse_mode_dc_gain() {
-        let tables = ResampleImpl1::tables(16);
+        let tables = ResampleImplSimd::tables(16);
         let pos = 12.37;
         let src = staged(&tables, pos, |_| 1.0);
-        let out = f64::from(ResampleImpl1::resample(
+        let out = f64::from(ResampleImplSimd::resample(
             &tables, &src, pos as f32, 0.4, false,
         ));
         assert!(close(out, 1.0, 1e-6), "DC gain = {out}");
@@ -338,14 +339,14 @@ mod tests {
 
     #[test]
     fn impulse_mode_passband_signal_reconstructed() {
-        let tables = ResampleImpl1::tables(16);
+        let tables = ResampleImplSimd::tables(16);
         let fc = 0.45;
         let f0 = 0.05;
         let get = |k: i64| (2.0 * PI * f0 * k as f64).cos();
         for frac in [0.0, 0.25, 0.5, 0.75] {
             let pos = 32.0 + frac;
             let ideal = (2.0 * PI * f0 * pos).cos();
-            let out = f64::from(ResampleImpl1::resample(
+            let out = f64::from(ResampleImplSimd::resample(
                 &tables,
                 &staged(&tables, pos, get),
                 pos as f32,

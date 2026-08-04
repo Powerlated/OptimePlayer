@@ -1,5 +1,6 @@
-//! Resampler implementation 2: the same windowed-sinc contract as implementation 1, reached from the
-//! other side of the convolution. The source is read as a train of scaled Dirac deltas, and the
+//! The same windowed-sinc contract as `resample_impl_simd`, and the same SIMD lanes, but with the
+//! table replaced by evaluated functions — and reached from the other side of the convolution to
+//! make that possible. The source is read as a train of scaled Dirac deltas, and the
 //! zero-order hold that turns that train into a staircase is folded into the reconstruction kernel
 //! instead of into the signal — so step mode convolves the deltas with a *band-limited rect*, one
 //! rect per source sample, stretched or squeezed by the cutoff the resample ratio asks for. Impulse
@@ -7,11 +8,11 @@
 //! every implementation already agrees on, so it defers to the shared `gather_impulse`.
 //!
 //! The band-limited rect is the difference of the band-limited step at the rect's two edges, and
-//! that step is the sine integral. Implementation 1 tables it and reads the table with a SIMD
-//! gather; this file evaluates it in closed form instead — Taylor series near the origin, the
-//! Abramowitz and Stegun auxiliary rationals beyond it — so nothing here touches memory outside the
-//! tap window. That is the whole point of having two: same output within float tolerance, opposite
-//! answers to whether a kernel should cost a table lookup or arithmetic.
+//! that step is the sine integral. `resample_impl_simd` tables it and reads the table with a SIMD
+//! gather; this file evaluates it instead — Taylor series near the origin, Padé approximants of the
+//! auxiliary asymptotic series beyond it — so nothing here touches memory outside the tap window.
+//! That is the whole point of having both: same output within float tolerance, opposite answers to
+//! whether a kernel should cost a table lookup or arithmetic.
 
 use core::f32::consts::{FRAC_PI_2, PI};
 use std::simd::prelude::*;
@@ -50,14 +51,14 @@ const fn si_taylor_coefficients() -> [f64; SI_TAYLOR_TERMS] {
     coefficients
 }
 
-pub struct ResampleImpl2;
+pub struct ResampleImplSimdClosedForm;
 
 #[derive(Clone)]
 pub struct Tables {
     pub half_taps: usize,
 }
 
-impl Resampler for ResampleImpl2 {
+impl Resampler for ResampleImplSimdClosedForm {
     type Tables = Tables;
 
     fn tables(half_taps: usize) -> Tables {
@@ -209,7 +210,7 @@ fn convolve_rects(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsp::resample::ResampleImpl1;
+    use crate::dsp::resample::ResampleImplSimd;
 
     fn simpson(steps: usize, lo: f64, hi: f64, f: impl Fn(f64) -> f64) -> f64 {
         let h = (hi - lo) / steps as f64;
@@ -273,14 +274,14 @@ mod tests {
         let mut worst: f64 = 0.0;
         for half_taps in [8usize, 32] {
             for fc in [0.25f32, 1.4, 2.9] {
-                let tables = ResampleImpl2::tables(half_taps);
+                let tables = ResampleImplSimdClosedForm::tables(half_taps);
                 for i in 0..8 {
                     let pos = half_taps as f32 + i as f32 * 0.41;
-                    let (lo, hi) = ResampleImpl2::tap_window(&tables, pos);
+                    let (lo, hi) = ResampleImplSimdClosedForm::tap_window(&tables, pos);
                     let src: Vec<f32> = (lo..=hi)
                         .map(|k| data[k.rem_euclid(data.len() as i64) as usize])
                         .collect();
-                    let got = ResampleImpl2::resample(&tables, &src, pos, fc, true);
+                    let got = ResampleImplSimdClosedForm::resample(&tables, &src, pos, fc, true);
                     let want = integrated_rect_reference(
                         &src,
                         f64::from(pos - lo as f32),
@@ -316,18 +317,18 @@ mod tests {
     }
 
     fn agreement(half_taps: usize, fc: f32, step_mode: bool, data: &[f32]) -> f32 {
-        let one = ResampleImpl1::tables(half_taps);
-        let two = ResampleImpl2::tables(half_taps);
+        let one = ResampleImplSimd::tables(half_taps);
+        let two = ResampleImplSimdClosedForm::tables(half_taps);
         let mut worst: f32 = 0.0;
         for i in 0..64 {
             let pos = half_taps as f32 + i as f32 * 0.37;
-            let (lo, hi) = ResampleImpl1::tap_window(&one, pos);
-            assert_eq!((lo, hi), ResampleImpl2::tap_window(&two, pos));
+            let (lo, hi) = ResampleImplSimd::tap_window(&one, pos);
+            assert_eq!((lo, hi), ResampleImplSimdClosedForm::tap_window(&two, pos));
             let src: Vec<f32> = (lo..=hi)
                 .map(|k| data[k.rem_euclid(data.len() as i64) as usize])
                 .collect();
-            let a = ResampleImpl1::resample(&one, &src, pos, fc, step_mode);
-            let b = ResampleImpl2::resample(&two, &src, pos, fc, step_mode);
+            let a = ResampleImplSimd::resample(&one, &src, pos, fc, step_mode);
+            let b = ResampleImplSimdClosedForm::resample(&two, &src, pos, fc, step_mode);
             worst = worst.max((a - b).abs());
         }
         worst
@@ -360,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn implementation_1_truncates_taps_beyond_its_tabulated_kernel() {
+    fn the_tabulated_implementation_truncates_taps_beyond_its_kernel() {
         let data: Vec<f32> = (0..256)
             .map(|k| (0.7 * (k as f32) + 0.3 * (k as f32).sin()).sin())
             .collect();

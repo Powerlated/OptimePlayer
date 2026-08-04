@@ -15,13 +15,13 @@ pub mod r#impl;
 pub mod mode;
 pub mod stream;
 
-pub use r#impl::{ResampleImpl1, ResampleImpl2};
+pub use r#impl::{ResampleImplSimd, ResampleImplSimdClosedForm};
 pub(crate) use mode::{EffectiveGather, effective_gather, mode_half_taps, sinc_fc};
 pub use stream::StreamResampler;
 
 use crate::waveform::Sample;
 
-pub type DefaultResampler = ResampleImpl1;
+pub type DefaultResampler = ResampleImplSimd;
 
 pub const MAX_HALF_TAPS: usize = 64;
 pub(crate) const GATHER_BUF_LEN: usize = 2 * MAX_HALF_TAPS + 2;

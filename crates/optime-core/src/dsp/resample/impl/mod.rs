@@ -1,21 +1,22 @@
-//! The resampler implementations, one module each, numbered by the order they were written — plus
-//! the primitives they are built from. A file under `impl/` holds only what makes *that* one
-//! different: its kernel, and its tables if it has any. Anything two implementations would otherwise
-//! both need is defined here once — the SIMD lane width, `sinc`, the Blackman window and its
-//! cos-folded SIMD form, the `Phasor` rotation that supplies both without a transcendental per tap,
-//! and the impulse-mode gather, which no implementation has yet had reason to do differently.
-//! Sharing is not negotiable for the sake of keeping implementations independent: they exist to be
-//! benchmarked against each other, and a duplicated helper that drifts makes the comparison measure
-//! the drift instead of the design.
+//! The resampler implementations, one module each, plus the primitives they are built from. A file
+//! under `impl/` is named for how it computes, not for when it was written — `resample_impl_simd` is
+//! the tabulated SIMD kernel, `resample_impl_simd_closed_form` swaps that table for evaluated
+//! functions — and holds only what makes *that* one different: its kernel, and its tables if it has
+//! any. Anything two of them would otherwise both need is defined here once: the SIMD lane width,
+//! `sinc`, the Blackman window and its cos-folded SIMD form, the `Phasor` rotation that supplies
+//! both without a transcendental per tap, and the impulse-mode gather, which no implementation has
+//! yet had reason to do differently. Sharing is not negotiable for the sake of keeping
+//! implementations independent: they exist to be benchmarked against each other, and a duplicated
+//! helper that drifts makes the comparison measure the drift instead of the design.
 
 use core::f32::consts::PI;
 use std::simd::prelude::*;
 
-pub mod resample_impl_1;
-pub mod resample_impl_2;
+pub mod resample_impl_simd;
+pub mod resample_impl_simd_closed_form;
 
-pub use resample_impl_1::ResampleImpl1;
-pub use resample_impl_2::ResampleImpl2;
+pub use resample_impl_simd::ResampleImplSimd;
+pub use resample_impl_simd_closed_form::ResampleImplSimdClosedForm;
 
 const LANES: usize = 4;
 

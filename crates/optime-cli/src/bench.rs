@@ -11,8 +11,8 @@ use std::time::Instant;
 use clap::Args as ClapArgs;
 use optime_core::{
     InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
-    PerDeviceSettings, PopSmoothingEdge, ResampleImpl1, ResampleImpl2, Resampler, SoundData,
-    SynthController, load_all,
+    PerDeviceSettings, PopSmoothingEdge, ResampleImplSimd, ResampleImplSimdClosedForm, Resampler,
+    SoundData, SynthController, load_all,
 };
 
 const SAMPLE_RATE: f64 = 48_000.0;
@@ -124,10 +124,10 @@ pub fn run(args: Args) -> ExitCode {
     let clean = settings(InstrumentResampleChoice::SincSampleNyquist, sinc_taps);
     let crunch = settings(InstrumentResampleChoice::SincOutputNyquist, sinc_taps);
     let mut contenders: Vec<Box<dyn Contender>> = [
-        contender::<ResampleImpl1>("impl 1", "clean", clean.clone(), data, sseq_id),
-        contender::<ResampleImpl2>("impl 2", "clean", clean, data, sseq_id),
-        contender::<ResampleImpl1>("impl 1", "crunch", crunch.clone(), data, sseq_id),
-        contender::<ResampleImpl2>("impl 2", "crunch", crunch, data, sseq_id),
+        contender::<ResampleImplSimd>("simd", "clean", clean.clone(), data, sseq_id),
+        contender::<ResampleImplSimdClosedForm>("simd/closed", "clean", clean, data, sseq_id),
+        contender::<ResampleImplSimd>("simd", "crunch", crunch.clone(), data, sseq_id),
+        contender::<ResampleImplSimdClosedForm>("simd/closed", "crunch", crunch, data, sseq_id),
     ]
     .into_iter()
     .flatten()
@@ -158,7 +158,7 @@ pub fn run(args: Args) -> ExitCode {
         let median = rendered_seconds / wall[wall.len() / 2];
         let best = rendered_seconds / wall[0];
         println!(
-            "  {:<7} {:<7}  median {median:7.2}× real-time   best {best:7.2}×",
+            "  {:<12} {:<7}  median {median:7.2}× real-time   best {best:7.2}×",
             c.implementation(),
             c.mode()
         );

@@ -316,7 +316,7 @@ fn fold_pos(pos: Sample, fold: bool, data_len: Sample, loop_len: Sample) -> (Sam
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dsp::resample::ResampleImpl1;
+    use crate::dsp::resample::ResampleImplSimd;
     use core::f64::consts::PI;
 
     fn crunch(half_taps: usize) -> InstrumentResampleMode {
@@ -341,7 +341,7 @@ mod tests {
         let mut instr = WaveformInstrument::new(44_100.0, waveform);
         instr.set_pitch(VoicePitch::DataRateHz(22_050.0), TuningSystem::Equal);
 
-        instr.advance::<ResampleImpl1>(
+        instr.advance::<ResampleImplSimd>(
             InstrumentResampleMode::NearestNeighbor,
             None,
             PopSmoothing::default(),
@@ -353,7 +353,7 @@ mod tests {
         );
 
         instr.set_sample_rate(22_050.0);
-        instr.advance::<ResampleImpl1>(
+        instr.advance::<ResampleImplSimd>(
             InstrumentResampleMode::NearestNeighbor,
             None,
             PopSmoothing::default(),
@@ -369,7 +369,7 @@ mod tests {
         out_rate: f64,
         waveform: Arc<Waveform>,
         mode: InstrumentResampleMode,
-        tables: Option<&<ResampleImpl1 as Resampler>::Tables>,
+        tables: Option<&<ResampleImplSimd as Resampler>::Tables>,
         n: usize,
     ) -> Vec<Sample> {
         let mut instr = WaveformInstrument::new(out_rate, waveform);
@@ -384,7 +384,7 @@ mod tests {
         instr.playing = true;
         (0..n)
             .map(|_| {
-                instr.advance::<ResampleImpl1>(mode, tables, PopSmoothing::default());
+                instr.advance::<ResampleImplSimd>(mode, tables, PopSmoothing::default());
                 instr.output
             })
             .collect()
@@ -410,7 +410,7 @@ mod tests {
         let image_hz = 7680.0;
         let warmup = 256;
         let n = 2048;
-        let tables = ResampleImpl1::tables(16);
+        let tables = ResampleImplSimd::tables(16);
 
         let crunch = render(
             out_rate,
@@ -458,7 +458,7 @@ mod tests {
         let alias_hz = 4608.0;
         let warmup = 256;
         let n = 2560;
-        let tables = ResampleImpl1::tables(16);
+        let tables = ResampleImplSimd::tables(16);
 
         let nearest = render(
             out_rate,
@@ -504,7 +504,7 @@ mod tests {
         let mut waveform = Waveform::new(vec![1.0, 1.0, -1.0, -1.0], 440.0, 16384.0, true, 0);
         waveform.is_psg_square = true;
         let waveform = Arc::new(waveform);
-        let tables = ResampleImpl1::tables(16);
+        let tables = ResampleImplSimd::tables(16);
         let n = 512;
         let crunch_mode = render(out_rate, waveform.clone(), crunch(16), Some(&tables), n);
         let clean_mode = render(
@@ -526,7 +526,7 @@ mod tests {
         let tone_hz = 4096.0;
         let warmup = 256;
         let n = 2048;
-        let tables = ResampleImpl1::tables(32);
+        let tables = ResampleImplSimd::tables(32);
         for is_psg in [false, true] {
             let mut s = sine_waveform(4, 64, src_rate);
             if is_psg {
@@ -608,7 +608,7 @@ mod tests {
             ..PopSmoothing::default()
         };
         instr.begin_note(1.0, psg_on);
-        instr.advance::<ResampleImpl1>(InstrumentResampleMode::NearestNeighbor, None, psg_on);
+        instr.advance::<ResampleImplSimd>(InstrumentResampleMode::NearestNeighbor, None, psg_on);
         assert!(
             instr.output < 0.05,
             "smoothed start must ramp from silence, got {}",
@@ -617,7 +617,11 @@ mod tests {
         let mut prev = instr.output;
         let mut reached = false;
         for _ in 0..1024 {
-            instr.advance::<ResampleImpl1>(InstrumentResampleMode::NearestNeighbor, None, psg_on);
+            instr.advance::<ResampleImplSimd>(
+                InstrumentResampleMode::NearestNeighbor,
+                None,
+                psg_on,
+            );
             let delta = instr.output - prev;
             assert!((-1e-12..0.02).contains(&delta), "ramp step {delta}");
             prev = instr.output;
@@ -633,7 +637,11 @@ mod tests {
             if !instr.playing {
                 break;
             }
-            instr.advance::<ResampleImpl1>(InstrumentResampleMode::NearestNeighbor, None, psg_on);
+            instr.advance::<ResampleImplSimd>(
+                InstrumentResampleMode::NearestNeighbor,
+                None,
+                psg_on,
+            );
         }
         assert!(!instr.playing, "fade-out must stop the voice");
         assert_eq!(instr.output, 0.0);
@@ -642,7 +650,7 @@ mod tests {
         hard.set_pitch(pitch, TuningSystem::Equal);
         hard.playing = true;
         hard.begin_note(1.0, PopSmoothing::default());
-        hard.advance::<ResampleImpl1>(
+        hard.advance::<ResampleImplSimd>(
             InstrumentResampleMode::NearestNeighbor,
             None,
             PopSmoothing::default(),
@@ -676,7 +684,7 @@ mod tests {
             instr.set_pitch(pitch, TuningSystem::Equal);
             instr.playing = true;
             instr.begin_note(1.0, pops);
-            instr.advance::<ResampleImpl1>(mode, None, pops);
+            instr.advance::<ResampleImplSimd>(mode, None, pops);
             (instr, pops)
         };
 
@@ -689,7 +697,7 @@ mod tests {
         attack.volume = 1.0;
         attack.gain.set(1.0);
         attack.begin_fade_out();
-        attack.advance::<ResampleImpl1>(mode, None, pops);
+        attack.advance::<ResampleImplSimd>(mode, None, pops);
         assert_eq!(attack.output, 0.0, "an attack-only cut must be instant");
         assert!(!attack.playing, "the instant cut must stop the voice");
 
@@ -700,7 +708,7 @@ mod tests {
             release.output
         );
         release.begin_fade_out();
-        release.advance::<ResampleImpl1>(mode, None, pops);
+        release.advance::<ResampleImplSimd>(mode, None, pops);
         assert!(
             release.output > 0.9 && release.playing,
             "a release-only fade-out must ramp, got {}",
@@ -713,7 +721,7 @@ mod tests {
         let src_rate = 20480.0;
         let alias_hz = 3072.0;
         let waveform = sine_waveform(4, 64, src_rate);
-        let tables = ResampleImpl1::tables(half_taps);
+        let tables = ResampleImplSimd::tables(half_taps);
         let warmup = 256;
         let n = 2048;
         let out = render(
