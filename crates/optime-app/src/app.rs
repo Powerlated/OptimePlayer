@@ -185,6 +185,8 @@ enum LibraryView {
     Playlist(usize),
 }
 
+const SHOW_INFERRED_CHORDS: bool = false;
+
 const DEMOS: &[(&str, &str)] = &[
     ("Super Mario 64 DS", "super-mario-64-ds.sdat"),
     ("New Super Mario Bros.", "new-super-mario-bros.sdat"),
@@ -959,6 +961,9 @@ impl OptimeApp {
     }
 
     fn chord_spans(&self, archive_index: usize, song_id: u32) -> Vec<crate::piano_roll::LaneSpan> {
+        if !SHOW_INFERRED_CHORDS {
+            return Vec::new();
+        }
         let game_code = self.archives[archive_index]
             .as_any()
             .downcast_ref::<GbaRom>()
