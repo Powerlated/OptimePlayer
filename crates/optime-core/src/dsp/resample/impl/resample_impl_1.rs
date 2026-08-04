@@ -1,4 +1,15 @@
-//! Resampler implementation 1: windowed-sinc interpolation, with a band-limited step mode for square and other stepped waveforms.
+//! Resampler implementation 1: Blackman-windowed sinc, in two modes. Impulse mode is ordinary
+//! band-limited interpolation — each source sample weighted by a sinc lobe at its distance from the
+//! read position. Step mode treats the source as a zero-order hold instead, weighting each sample by
+//! the *difference* of the integrated sinc across the sample it spans, so a square wave's edges come
+//! out band-limited rather than ringing; that is what PSG voices and the crunchy output-Nyquist mode
+//! want. Both normalise by the summed weights, so an arbitrary cutoff never shifts the gain.
+//!
+//! The integrated sinc is the only table: `OVERSAMPLE` entries per sample of lag, built once,
+//! Kahan-summed and rescaled so its tail lands exactly on the half it must converge to. Impulse mode
+//! needs no table at all — its sinc and window both come from a `Phasor`, a complex rotation stepped
+//! four lanes at a time, which trades a transcendental per tap for two multiplies and turns the
+//! whole gather into SIMD over the tap window with a scalar tail.
 
 use core::f32::consts::PI;
 use std::simd::prelude::*;

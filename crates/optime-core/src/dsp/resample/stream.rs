@@ -1,4 +1,13 @@
-//! Continuous fixed-ratio stereo resampling, carrying the mixer bus up to the output rate.
+//! Continuous fixed-ratio stereo resampling, carrying the mixer bus up to the output rate. Unlike a
+//! voice, which reads a finite waveform it already holds, this reads a stream that does not exist
+//! yet: input arrives through a pull closure, so the ring is filled on demand to exactly the last
+//! input the block's taps will reach, and the same call site can be driven a block or a sample at a
+//! time without changing the output.
+//!
+//! Stream position is an integer plus a fraction rather than one float, so an hour of playback
+//! costs no precision. The ring is a power of two sized from the resample ratio — a full block's
+//! worth of input, plus the widest tap window — and grows only when a rate change demands it, since
+//! growing resets the phase.
 
 use crate::dsp::block::MAX_BLOCK;
 use crate::dsp::resample::mode::{EffectiveGather, effective_gather, mode_half_taps, sinc_fc};

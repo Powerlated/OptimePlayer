@@ -1,4 +1,12 @@
-//! Resolves a user-facing resample mode into the gather and cutoff a voice or a stream should actually use.
+//! Resolves a user-facing `InstrumentResampleMode` into what a voice or stream actually runs: which
+//! gather, in step or impulse mode, at what normalised cutoff. The mode alone doesn't decide it —
+//! whether the source is PSG does too, which is why every entry point here takes that flag and why
+//! the settings type never resolves this itself. Linear on a PSG collapses to nearest (a stepped
+//! waveform interpolated linearly is neither), sample-Nyquist steps only for PSG, output-Nyquist
+//! always steps and picks the PSG or sampler cutoff slider to match.
+//!
+//! `sinc_fc` is the cutoff rule: fold to the Nyquist of whichever rate is lower, then clamp to an
+//! explicit cutoff if the mode carries one. This is the whole of the resampler's frequency policy.
 
 use crate::waveform::InstrumentResampleMode;
 

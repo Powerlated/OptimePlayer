@@ -1,10 +1,21 @@
-//! The resampler seam: the trait an implementation satisfies, and the loop-aware source window every implementation gathers from.
+//! The resampler seam. `Resampler` is what an implementation satisfies: build tables for a tap
+//! count, report the window those tables need around a fractional position, and interpolate a
+//! contiguous slice covering that window. Everything above it — voices, the mixer bus — names the
+//! implementation as a type parameter defaulting to `DefaultResampler`, so the choice is made at
+//! compile time and no dyn dispatch or runtime branch reaches the hot path.
+//!
+//! The provided `gather` is why an implementation writes only a kernel: it owns the awkward part,
+//! turning a `GatherSource` (a waveform plus its loop geometry) into that contiguous slice. Inside
+//! the waveform with no wrap in play it borrows the slice directly; otherwise it copies the window
+//! into a stack buffer, following the loop backwards and forwards so taps that fall off either end
+//! read the looped signal rather than silence, and zero-filling only where there is genuinely
+//! nothing. `MAX_HALF_TAPS` caps the window so that buffer can be a fixed-size array.
 
 pub mod r#impl;
 pub mod mode;
 pub mod stream;
 
-pub use r#impl::ResampleImpl1;
+pub use r#impl::{ResampleImpl1, ResampleImpl2};
 pub(crate) use mode::{EffectiveGather, effective_gather, mode_half_taps, sinc_fc};
 pub use stream::StreamResampler;
 
