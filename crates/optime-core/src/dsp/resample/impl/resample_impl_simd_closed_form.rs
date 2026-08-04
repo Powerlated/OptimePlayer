@@ -17,7 +17,7 @@
 use core::f32::consts::{FRAC_PI_2, PI};
 use std::simd::prelude::*;
 
-use super::{Fv, LANES, Phasor, blackman, blackman_from_cos, gather_impulse};
+use super::{DEFAULT_LANES, Fv, Phasor, blackman, blackman_from_cos, gather_impulse, lane_offsets};
 use crate::dsp::resample::{MAX_HALF_TAPS, Resampler};
 use crate::waveform::Sample;
 
@@ -51,14 +51,14 @@ const fn si_taylor_coefficients() -> [f64; SI_TAYLOR_TERMS] {
     coefficients
 }
 
-pub struct ResampleImplSimdClosedForm;
+pub struct ResampleImplSimdClosedForm<const LANES: usize = DEFAULT_LANES>;
 
 #[derive(Clone)]
 pub struct Tables {
     pub half_taps: usize,
 }
 
-impl Resampler for ResampleImplSimdClosedForm {
+impl<const LANES: usize> Resampler for ResampleImplSimdClosedForm<LANES> {
     type Tables = Tables;
 
     fn tables(half_taps: usize) -> Tables {
@@ -95,9 +95,9 @@ impl Resampler for ResampleImplSimdClosedForm {
         let d0 = pos - k_lo as f32;
         let p = tables.half_taps as f32;
         let (out, wsum) = if step_mode {
-            convolve_rects(src, d0, fc, p)
+            convolve_rects::<LANES>(src, d0, fc, p)
         } else {
-            gather_impulse(src, d0, fc, p)
+            gather_impulse::<LANES>(src, d0, fc, p)
         };
         let wsum = if step_mode { wsum.abs() } else { wsum };
 
@@ -140,61 +140,61 @@ fn si_asymptotic(a: f32, sin_a: f32, cos_a: f32) -> f32 {
 }
 
 #[inline]
-fn band_limited_step_simd(t: Fv, sin_t: Fv, cos_t: Fv) -> Fv {
-    let one = Fv::splat(1.0);
+fn band_limited_step_simd<const N: usize>(t: Fv<N>, sin_t: Fv<N>, cos_t: Fv<N>) -> Fv<N> {
+    let one = Fv::<N>::splat(1.0);
     let a = t.abs();
-    let negative = t.simd_lt(Fv::splat(0.0));
+    let negative = t.simd_lt(Simd::splat(0.0));
 
     let y = one / (a * a);
-    let f = (one + y * (Fv::splat(F_NUM_1) + y * Fv::splat(F_NUM_2)))
-        / (a * (one + y * (Fv::splat(F_DEN_1) + y * Fv::splat(F_DEN_2))));
-    let g = y * (one + y * (Fv::splat(G_NUM_1) + y * Fv::splat(G_NUM_2)))
-        / (one + y * (Fv::splat(G_DEN_1) + y * Fv::splat(G_DEN_2)));
-    let mut si = Fv::splat(FRAC_PI_2) - f * cos_t - g * negative.select(-sin_t, sin_t);
+    let f = (one + y * (Simd::splat(F_NUM_1) + y * Simd::splat(F_NUM_2)))
+        / (a * (one + y * (Simd::splat(F_DEN_1) + y * Simd::splat(F_DEN_2))));
+    let g = y * (one + y * (Simd::splat(G_NUM_1) + y * Simd::splat(G_NUM_2)))
+        / (one + y * (Simd::splat(G_DEN_1) + y * Simd::splat(G_DEN_2)));
+    let mut si = Fv::<N>::splat(FRAC_PI_2) - f * cos_t - g * negative.select(-sin_t, sin_t);
 
-    let near_origin = a.simd_le(Fv::splat(SI_TAYLOR_LIMIT));
+    let near_origin = a.simd_le(Simd::splat(SI_TAYLOR_LIMIT));
     if near_origin.any() {
-        for i in 0..LANES {
+        for i in 0..N {
             if near_origin.test(i) {
                 si.as_mut_array()[i] = si_near_origin(a[i]);
             }
         }
     }
-    negative.select(-si, si) * Fv::splat(1.0 / PI)
+    negative.select(-si, si) * Simd::splat(1.0 / PI)
 }
 
-fn convolve_rects(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32, f32) {
-    let lane_offsets = Fv::from_array([0.0, 1.0, 2.0, 3.0]);
+fn convolve_rects<const N: usize>(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32, f32) {
     let edge_rate = 2.0 * PI * fc;
-    let mut edges = Phasor::new(edge_rate, d0 - 1.0);
-    let mut window = Phasor::new(PI / p, d0 - 0.5);
-    let (mut out, mut wsum) = (Fv::splat(0.0), Fv::splat(0.0));
+    let mut edges = Phasor::<N>::new(edge_rate, d0 - 1.0);
+    let mut window = Phasor::<N>::new(PI / p, d0 - 0.5);
+    let (mut out, mut wsum) = (Fv::<N>::splat(0.0), Fv::<N>::splat(0.0));
     let mut carry = band_limited_step(edge_rate * d0);
     let mut base = d0 - 1.0;
 
-    for chunk in src.chunks_exact(LANES) {
-        let d_lower = Fv::splat(base) - lane_offsets;
-        let lower = band_limited_step_simd(d_lower * Fv::splat(edge_rate), edges.sin, edges.cos);
+    for chunk in src.chunks_exact(N) {
+        let d_lower = Fv::<N>::splat(base) - lane_offsets::<N>();
+        let lower =
+            band_limited_step_simd::<N>(d_lower * Simd::splat(edge_rate), edges.sin, edges.cos);
         let mut upper = lower.rotate_elements_right::<1>();
         upper.as_mut_array()[0] = carry;
-        carry = lower.as_array()[LANES - 1];
+        carry = lower.as_array()[N - 1];
 
-        let mid = Fv::splat(base + 0.5) - lane_offsets;
-        let inside = mid.abs().simd_lt(Fv::splat(p));
+        let mid = Fv::<N>::splat(base + 0.5) - lane_offsets::<N>();
+        let inside = mid.abs().simd_lt(Simd::splat(p));
         let w = inside.select(
             blackman_from_cos(window.cos) * (upper - lower),
-            Fv::splat(0.0),
+            Simd::splat(0.0),
         );
 
-        out += Fv::from_slice(chunk) * w;
+        out += Fv::<N>::from_slice(chunk) * w;
         wsum += w;
-        base -= LANES as f32;
+        base -= N as f32;
         edges.rotate();
         window.rotate();
     }
     let (mut out, mut wsum) = (out.reduce_sum(), wsum.reduce_sum());
 
-    let done = src.len() - src.chunks_exact(LANES).remainder().len();
+    let done = src.len() - src.chunks_exact(N).remainder().len();
     let mut upper = carry;
     for (j, &s) in src.iter().enumerate().skip(done) {
         let d = d0 - j as f32;
@@ -274,14 +274,15 @@ mod tests {
         let mut worst: f64 = 0.0;
         for half_taps in [8usize, 32] {
             for fc in [0.25f32, 1.4, 2.9] {
-                let tables = ResampleImplSimdClosedForm::tables(half_taps);
+                let tables = ResampleImplSimdClosedForm::<4>::tables(half_taps);
                 for i in 0..8 {
                     let pos = half_taps as f32 + i as f32 * 0.41;
-                    let (lo, hi) = ResampleImplSimdClosedForm::tap_window(&tables, pos);
+                    let (lo, hi) = ResampleImplSimdClosedForm::<4>::tap_window(&tables, pos);
                     let src: Vec<f32> = (lo..=hi)
                         .map(|k| data[k.rem_euclid(data.len() as i64) as usize])
                         .collect();
-                    let got = ResampleImplSimdClosedForm::resample(&tables, &src, pos, fc, true);
+                    let got =
+                        ResampleImplSimdClosedForm::<4>::resample(&tables, &src, pos, fc, true);
                     let want = integrated_rect_reference(
                         &src,
                         f64::from(pos - lo as f32),
@@ -297,13 +298,15 @@ mod tests {
 
     #[test]
     fn simd_and_scalar_band_limited_steps_agree() {
+        const LANES: usize = 4;
         for start in [-40.0f32, -8.5, -0.3, 0.0, 3.0, 9.0, 61.7] {
-            let t = Fv::from_array([start, start + 1.0, start + 2.0, start + 3.0]);
+            let t = Fv::<LANES>::from_array([start, start + 1.0, start + 2.0, start + 3.0]);
             let (mut sin, mut cos) = ([0.0f32; LANES], [0.0f32; LANES]);
             for i in 0..LANES {
                 (sin[i], cos[i]) = f32::sin_cos(t[i]);
             }
-            let got = band_limited_step_simd(t, Fv::from_array(sin), Fv::from_array(cos));
+            let got =
+                band_limited_step_simd::<LANES>(t, Simd::from_array(sin), Simd::from_array(cos));
             for i in 0..LANES {
                 let want = band_limited_step(t[i]);
                 assert!(
@@ -317,18 +320,21 @@ mod tests {
     }
 
     fn agreement(half_taps: usize, fc: f32, step_mode: bool, data: &[f32]) -> f32 {
-        let one = ResampleImplSimd::tables(half_taps);
-        let two = ResampleImplSimdClosedForm::tables(half_taps);
+        let one = ResampleImplSimd::<4>::tables(half_taps);
+        let two = ResampleImplSimdClosedForm::<4>::tables(half_taps);
         let mut worst: f32 = 0.0;
         for i in 0..64 {
             let pos = half_taps as f32 + i as f32 * 0.37;
-            let (lo, hi) = ResampleImplSimd::tap_window(&one, pos);
-            assert_eq!((lo, hi), ResampleImplSimdClosedForm::tap_window(&two, pos));
+            let (lo, hi) = ResampleImplSimd::<4>::tap_window(&one, pos);
+            assert_eq!(
+                (lo, hi),
+                ResampleImplSimdClosedForm::<4>::tap_window(&two, pos)
+            );
             let src: Vec<f32> = (lo..=hi)
                 .map(|k| data[k.rem_euclid(data.len() as i64) as usize])
                 .collect();
-            let a = ResampleImplSimd::resample(&one, &src, pos, fc, step_mode);
-            let b = ResampleImplSimdClosedForm::resample(&two, &src, pos, fc, step_mode);
+            let a = ResampleImplSimd::<4>::resample(&one, &src, pos, fc, step_mode);
+            let b = ResampleImplSimdClosedForm::<4>::resample(&two, &src, pos, fc, step_mode);
             worst = worst.max((a - b).abs());
         }
         worst

@@ -410,7 +410,7 @@ mod tests {
         let image_hz = 7680.0;
         let warmup = 256;
         let n = 2048;
-        let tables = ResampleImplSimd::tables(16);
+        let tables = ResampleImplSimd::<4>::tables(16);
 
         let crunch = render(
             out_rate,
@@ -458,7 +458,7 @@ mod tests {
         let alias_hz = 4608.0;
         let warmup = 256;
         let n = 2560;
-        let tables = ResampleImplSimd::tables(16);
+        let tables = ResampleImplSimd::<4>::tables(16);
 
         let nearest = render(
             out_rate,
@@ -504,7 +504,7 @@ mod tests {
         let mut waveform = Waveform::new(vec![1.0, 1.0, -1.0, -1.0], 440.0, 16384.0, true, 0);
         waveform.is_psg_square = true;
         let waveform = Arc::new(waveform);
-        let tables = ResampleImplSimd::tables(16);
+        let tables = ResampleImplSimd::<4>::tables(16);
         let n = 512;
         let crunch_mode = render(out_rate, waveform.clone(), crunch(16), Some(&tables), n);
         let clean_mode = render(
@@ -526,7 +526,7 @@ mod tests {
         let tone_hz = 4096.0;
         let warmup = 256;
         let n = 2048;
-        let tables = ResampleImplSimd::tables(32);
+        let tables = ResampleImplSimd::<4>::tables(32);
         for is_psg in [false, true] {
             let mut s = sine_waveform(4, 64, src_rate);
             if is_psg {
@@ -721,7 +721,7 @@ mod tests {
         let src_rate = 20480.0;
         let alias_hz = 3072.0;
         let waveform = sine_waveform(4, 64, src_rate);
-        let tables = ResampleImplSimd::tables(half_taps);
+        let tables = ResampleImplSimd::<4>::tables(half_taps);
         let warmup = 256;
         let n = 2048;
         let out = render(

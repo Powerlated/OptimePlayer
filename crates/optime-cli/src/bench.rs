@@ -124,10 +124,26 @@ pub fn run(args: Args) -> ExitCode {
     let clean = settings(InstrumentResampleChoice::SincSampleNyquist, sinc_taps);
     let crunch = settings(InstrumentResampleChoice::SincOutputNyquist, sinc_taps);
     let mut contenders: Vec<Box<dyn Contender>> = [
-        contender::<ResampleImplSimd>("simd", "clean", clean.clone(), data, sseq_id),
-        contender::<ResampleImplSimdClosedForm>("simd/closed", "clean", clean, data, sseq_id),
-        contender::<ResampleImplSimd>("simd", "crunch", crunch.clone(), data, sseq_id),
-        contender::<ResampleImplSimdClosedForm>("simd/closed", "crunch", crunch, data, sseq_id),
+        contender::<ResampleImplSimd<4>>("simd x4", "clean", clean.clone(), data, sseq_id),
+        contender::<ResampleImplSimd<8>>("simd x8", "clean", clean.clone(), data, sseq_id),
+        contender::<ResampleImplSimdClosedForm<4>>(
+            "closed x4",
+            "clean",
+            clean.clone(),
+            data,
+            sseq_id,
+        ),
+        contender::<ResampleImplSimdClosedForm<8>>("closed x8", "clean", clean, data, sseq_id),
+        contender::<ResampleImplSimd<4>>("simd x4", "crunch", crunch.clone(), data, sseq_id),
+        contender::<ResampleImplSimd<8>>("simd x8", "crunch", crunch.clone(), data, sseq_id),
+        contender::<ResampleImplSimdClosedForm<4>>(
+            "closed x4",
+            "crunch",
+            crunch.clone(),
+            data,
+            sseq_id,
+        ),
+        contender::<ResampleImplSimdClosedForm<8>>("closed x8", "crunch", crunch, data, sseq_id),
     ]
     .into_iter()
     .flatten()

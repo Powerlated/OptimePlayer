@@ -1,10 +1,11 @@
 //! Hashes a fixed render of every demo archive, as a guard that a refactor changed no samples.
+//! Every config pins the resampler to nearest-neighbour deliberately: the sinc kernels are held to
+//! an SNR contract (`every_implementation_resamples_above_100_db_snr`), not to a hash, so that an
+//! implementation may reassociate its sums or narrow its kernel to what actually carries weight.
+//! Hashing them here would forbid exactly the changes that contract is meant to allow.
 
 use clap::Args as ClapArgs;
-use optime_core::{
-    InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
-    PerDeviceSettings, PopSmoothingEdge, SoundData, SynthController, load_all,
-};
+use optime_core::{PerDeviceSettings, SoundData, SynthController, load_all};
 
 const SAMPLE_RATE: f64 = 32768.0;
 const FRAMES: usize = 32768 * 4;
@@ -32,38 +33,19 @@ fn configs() -> Vec<(&'static str, PerDeviceSettings)> {
     vec![
         ("default", PerDeviceSettings::neutral()),
         (
-            "sinc+stereo",
+            "stereo+tuning",
             PerDeviceSettings {
                 stereo_separation: true,
                 bass_mono: true,
                 tuning_choice: 1,
                 pure_tonic: 0,
-                instrument_resample: InstrumentResampleSettings {
-                    choice: InstrumentResampleChoice::SincSampleNyquist,
-                    sinc_taps: 32,
-                    psg_cutoff_hz: 0,
-                    sampler_cutoff_hz: 0,
-                    smooth_psg_pops: false,
-                    smooth_sample_pops: false,
-                    pop_slew_ms: 2.0,
-                    pop_smooth_edge: PopSmoothingEdge::Both,
-                },
                 ..PerDeviceSettings::neutral()
             },
         ),
         (
-            "crunch",
+            "mixer",
             PerDeviceSettings {
-                instrument_resample: InstrumentResampleSettings {
-                    choice: InstrumentResampleChoice::SincOutputNyquist,
-                    sinc_taps: 16,
-                    psg_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
-                    sampler_cutoff_hz: InstrumentResampleMode::CUTOFF_OFF_HZ,
-                    smooth_psg_pops: false,
-                    smooth_sample_pops: false,
-                    pop_slew_ms: 2.0,
-                    pop_smooth_edge: PopSmoothingEdge::Both,
-                },
+                use_mixer: true,
                 ..PerDeviceSettings::neutral()
             },
         ),

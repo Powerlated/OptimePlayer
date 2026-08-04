@@ -1,33 +1,40 @@
 //! The tabulated SIMD resampler, and the default: Blackman-windowed sinc in two modes. Impulse mode
-//! is ordinary
-//! band-limited interpolation — each source sample weighted by a sinc lobe at its distance from the
-//! read position. Step mode treats the source as a zero-order hold instead, weighting each sample by
-//! the *difference* of the integrated sinc across the sample it spans, so a square wave's edges come
-//! out band-limited rather than ringing; that is what PSG voices and the crunchy output-Nyquist mode
-//! want. Both normalise by the summed weights, so an arbitrary cutoff never shifts the gain.
+//! is ordinary band-limited interpolation — each source sample weighted by a sinc lobe at its
+//! distance from the read position. Step mode treats the source as a zero-order hold instead,
+//! weighting each sample by the *difference* of the integrated sinc across the sample it spans, so a
+//! square wave's edges come out band-limited rather than ringing; that is what PSG voices and the
+//! crunchy output-Nyquist mode want. Both normalise by the summed weights, so an arbitrary cutoff
+//! never shifts the gain.
 //!
 //! The integrated sinc is the only table, and the whole of what this file adds: `OVERSAMPLE` entries
 //! per sample of lag out to `TAU_MAX`, built once, Kahan-summed and rescaled so its tail lands
 //! exactly on the half it must converge to (a uniform scale, which the weight normalisation cancels).
 //! Step mode reads it with a SIMD gather, one interpolated lookup per rect edge, each edge shared
 //! with the neighbouring tap. Impulse mode needs no table and is the shared `gather_impulse`.
+//!
+//! `TAU_MAX` is therefore a real, finite kernel support, not just a table size: past it both of a
+//! tap's edges saturate to the same half and the tap's weight is exactly zero. `taps_within_reach`
+//! finds where that starts and the gather never visits those taps, which at the cutoffs heavy
+//! upsampling asks for is most of a wide tap window.
 
 use core::f32::consts::PI;
 use std::simd::prelude::*;
 use std::sync::OnceLock;
 
-use super::{Fv, LANES, Phasor, blackman, blackman_from_cos, gather_impulse, sinc};
+use super::{
+    DEFAULT_LANES, Fv, Phasor, blackman, blackman_from_cos, gather_impulse, lane_offsets, sinc,
+};
 use crate::dsp::resample::{MAX_HALF_TAPS, Resampler};
 use crate::waveform::Sample;
 
-pub struct ResampleImplSimd;
+pub struct ResampleImplSimd<const LANES: usize = DEFAULT_LANES>;
 
 #[derive(Clone)]
 pub struct Tables {
     pub half_taps: usize,
 }
 
-impl Resampler for ResampleImplSimd {
+impl<const LANES: usize> Resampler for ResampleImplSimd<LANES> {
     type Tables = Tables;
 
     fn tables(half_taps: usize) -> Tables {
@@ -67,9 +74,10 @@ impl Resampler for ResampleImplSimd {
         let d0 = pos - k_lo as f32;
         let p = tables.half_taps as f32;
         let (out, wsum): (Sample, Sample) = if step_mode {
-            gather_step(k, src, d0, sinc_idx_step, p)
+            let (first, last) = taps_within_reach::<LANES>(k, d0, sinc_idx_step, src.len());
+            gather_step::<LANES>(k, &src[first..last], d0 - first as f32, sinc_idx_step, p)
         } else {
-            gather_impulse(src, d0, fc, p)
+            gather_impulse::<LANES>(src, d0, fc, p)
         };
         let wsum = if step_mode { wsum.abs() } else { wsum };
 
@@ -132,58 +140,82 @@ fn lerp(tab: &[f32], idx: f32) -> f32 {
 }
 
 #[inline]
+fn table_reach(k: &Kernels) -> f32 {
+    (k.sinc_int.len() - 1) as f32
+}
+
+#[inline]
 fn sinc_int_at(k: &Kernels, idx: f32) -> f32 {
     let mag = idx.abs();
-    let v = if mag >= (k.sinc_int.len() - 1) as f32 {
+    let v = if mag >= table_reach(k) {
         0.5
     } else {
         lerp(&k.sinc_int, mag)
     };
-    if idx < 0.0 { -v } else { v }
+    v.copysign(idx)
 }
 
 #[inline]
-fn sinc_int_simd(k: &Kernels, idx: Fv) -> Fv {
+fn sinc_int_simd<const N: usize>(k: &Kernels, idx: Fv<N>) -> Fv<N> {
     let mag = idx.abs();
-    let past_end = mag.simd_ge(Fv::splat((k.sinc_int.len() - 1) as f32));
-    let mag = past_end.select(Fv::splat(0.0), mag);
+    let past_end = mag.simd_ge(Simd::splat(table_reach(k)));
+    let mag = past_end.select(Simd::splat(0.0), mag);
     let i = mag.cast::<usize>();
     let frac = mag - i.cast::<f32>();
-    let lo = Fv::gather_or_default(&k.sinc_int, i);
-    let hi = Fv::gather_or_default(&k.sinc_int, i + Simd::splat(1));
-    let v = past_end.select(Fv::splat(0.5), lo + (hi - lo) * frac);
-    idx.simd_lt(Fv::splat(0.0)).select(-v, v)
+    let lo = Fv::<N>::gather_or_default(&k.sinc_int, i);
+    let hi = Fv::<N>::gather_or_default(&k.sinc_int, i + Simd::splat(1));
+    past_end
+        .select(Simd::splat(0.5), lo + (hi - lo) * frac)
+        .copysign(idx)
 }
 
-fn gather_step(k: &Kernels, src: &[f32], d0: f32, sinc_idx_step: f32, p: f32) -> (f32, f32) {
-    let lane_offsets = Fv::from_array([0.0, 1.0, 2.0, 3.0]);
-    let mut ph_win = Phasor::new(PI / p, d0 - 0.5);
-    let (mut out, mut wsum) = (Fv::splat(0.0), Fv::splat(0.0));
+fn taps_within_reach<const N: usize>(
+    k: &Kernels,
+    d0: f32,
+    sinc_idx_step: f32,
+    taps: usize,
+) -> (usize, usize) {
+    let support = table_reach(k) / sinc_idx_step;
+    let clamp = |edge: f32| edge.clamp(0.0, taps as f32) as usize;
+    let first = clamp(d0 - support - 1.0) / N * N;
+    let last = (clamp(d0 + support) + 2).next_multiple_of(N).min(taps);
+    (first.min(last), last)
+}
+
+fn gather_step<const N: usize>(
+    k: &Kernels,
+    src: &[f32],
+    d0: f32,
+    sinc_idx_step: f32,
+    p: f32,
+) -> (f32, f32) {
+    let mut ph_win = Phasor::<N>::new(PI / p, d0 - 0.5);
+    let (mut out, mut wsum) = (Fv::<N>::splat(0.0), Fv::<N>::splat(0.0));
     let mut carry = sinc_int_at(k, sinc_idx_step * d0);
     let mut base = d0 - 1.0;
 
-    for chunk in src.chunks_exact(LANES) {
-        let d_lo = Fv::splat(base) - lane_offsets;
-        let s_lo = sinc_int_simd(k, d_lo * Fv::splat(sinc_idx_step));
+    for chunk in src.chunks_exact(N) {
+        let d_lo = Fv::<N>::splat(base) - lane_offsets::<N>();
+        let s_lo = sinc_int_simd::<N>(k, d_lo * Simd::splat(sinc_idx_step));
         let mut s_hi = s_lo.rotate_elements_right::<1>();
         s_hi.as_mut_array()[0] = carry;
-        carry = s_lo.as_array()[LANES - 1];
+        carry = s_lo.as_array()[N - 1];
 
-        let d_mid = Fv::splat(base + 0.5) - lane_offsets;
-        let inside = d_mid.abs().simd_lt(Fv::splat(p));
+        let d_mid = Fv::<N>::splat(base + 0.5) - lane_offsets::<N>();
+        let inside = d_mid.abs().simd_lt(Simd::splat(p));
         let w = inside.select(
             blackman_from_cos(ph_win.cos) * (s_hi - s_lo),
-            Fv::splat(0.0),
+            Simd::splat(0.0),
         );
 
-        out += Fv::from_slice(chunk) * w;
+        out += Fv::<N>::from_slice(chunk) * w;
         wsum += w;
-        base -= LANES as f32;
+        base -= N as f32;
         ph_win.rotate();
     }
     let (mut out, mut wsum) = (out.reduce_sum(), wsum.reduce_sum());
 
-    let done = src.len() - src.chunks_exact(LANES).remainder().len();
+    let done = src.len() - src.chunks_exact(N).remainder().len();
     let mut si_hi = carry;
     for (j, &s) in src.iter().enumerate().skip(done) {
         let d_hi = d0 - j as f32;
@@ -208,7 +240,7 @@ mod tests {
     }
 
     fn staged(tables: &Tables, pos: f64, f: impl Fn(i64) -> f64) -> Vec<f32> {
-        let (k_lo, k_hi) = ResampleImplSimd::tap_window(tables, pos as f32);
+        let (k_lo, k_hi) = ResampleImplSimd::<4>::tap_window(tables, pos as f32);
         (k_lo..=k_hi).map(|t| f(t) as f32).collect()
     }
 
@@ -264,7 +296,7 @@ mod tests {
                         let src: Vec<f32> = (0..n).map(|_| next()).collect();
                         let d0 = p as f32 + frac;
                         let step = 2.0 * fc * OVERSAMPLE as f32;
-                        let (got_o, got_w) = gather_step(k, &src, d0, step, p as f32);
+                        let (got_o, got_w) = gather_step::<4>(k, &src, d0, step, p as f32);
                         let (want_o, want_w) = oracle(&src, d0, step, p as f32);
                         let scale = want_w.abs().max(1e-3);
                         assert!(
@@ -283,11 +315,11 @@ mod tests {
 
     #[test]
     fn step_mode_preserves_dc() {
-        let tables = ResampleImplSimd::tables(16);
+        let tables = ResampleImplSimd::<4>::tables(16);
         for fc in [0.1, 0.25, 0.5, 1.5] {
             for pos in [3.0, 7.35, 20.7] {
                 let src = staged(&tables, pos, |_| 1.0);
-                let out = f64::from(ResampleImplSimd::resample(
+                let out = f64::from(ResampleImplSimd::<4>::resample(
                     &tables, &src, pos as f32, fc as f32, true,
                 ));
                 assert!(close(out, 1.0, 1e-9), "DC at fc={fc}, pos={pos}: {out}");
@@ -297,11 +329,11 @@ mod tests {
 
     #[test]
     fn step_mode_is_a_bandlimited_step() {
-        let tables = ResampleImplSimd::tables(32);
+        let tables = ResampleImplSimd::<4>::tables(32);
         let fc = 0.5 / 4.0;
         let step = |k: i64| if k >= 0 { 1.0_f64 } else { 0.0 };
         let at = |pos: f64| {
-            f64::from(ResampleImplSimd::resample(
+            f64::from(ResampleImplSimd::<4>::resample(
                 &tables,
                 &staged(&tables, pos, step),
                 pos as f32,
@@ -328,10 +360,10 @@ mod tests {
 
     #[test]
     fn impulse_mode_dc_gain() {
-        let tables = ResampleImplSimd::tables(16);
+        let tables = ResampleImplSimd::<4>::tables(16);
         let pos = 12.37;
         let src = staged(&tables, pos, |_| 1.0);
-        let out = f64::from(ResampleImplSimd::resample(
+        let out = f64::from(ResampleImplSimd::<4>::resample(
             &tables, &src, pos as f32, 0.4, false,
         ));
         assert!(close(out, 1.0, 1e-6), "DC gain = {out}");
@@ -339,14 +371,14 @@ mod tests {
 
     #[test]
     fn impulse_mode_passband_signal_reconstructed() {
-        let tables = ResampleImplSimd::tables(16);
+        let tables = ResampleImplSimd::<4>::tables(16);
         let fc = 0.45;
         let f0 = 0.05;
         let get = |k: i64| (2.0 * PI * f0 * k as f64).cos();
         for frac in [0.0, 0.25, 0.5, 0.75] {
             let pos = 32.0 + frac;
             let ideal = (2.0 * PI * f0 * pos).cos();
-            let out = f64::from(ResampleImplSimd::resample(
+            let out = f64::from(ResampleImplSimd::<4>::resample(
                 &tables,
                 &staged(&tables, pos, get),
                 pos as f32,
