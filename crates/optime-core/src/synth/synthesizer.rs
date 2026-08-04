@@ -7,7 +7,7 @@ use crate::PerDeviceSettings;
 use crate::devices::VoicePitch;
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::block;
-use crate::dsp::resample::{ResampleTables, mode_half_taps};
+use crate::dsp::resample::{DefaultResampler, Resampler, mode_half_taps};
 use crate::dsp::slewer::Slewer;
 use crate::synth_controller::{DelaySmoothing, PopSmoothing};
 use crate::tuning::TuningSystem;
@@ -15,7 +15,7 @@ use crate::waveform::{Sample, Waveform};
 
 const PAN_SLEW_SECONDS: f64 = 0.01;
 
-pub struct WaveformSynthesizer {
+pub struct WaveformSynthesizer<R: Resampler = DefaultResampler> {
     sample_rate: f64,
     instrs: Vec<WaveformInstrument>,
     active_instrs: Vec<usize>,
@@ -34,12 +34,18 @@ pub struct WaveformSynthesizer {
     crossover_hp: BiquadFilter,
     crossover_freq: f64,
     finetune: f64,
-    resample_tables: Option<ResampleTables>,
+    resample_tables: Option<R::Tables>,
     resample_half_taps: usize,
 }
 
-impl WaveformSynthesizer {
+impl WaveformSynthesizer<DefaultResampler> {
     pub fn new(sample_rate: f64, instrs_available: usize) -> Self {
+        Self::with_resampler(sample_rate, instrs_available)
+    }
+}
+
+impl<R: Resampler> WaveformSynthesizer<R> {
+    pub fn with_resampler(sample_rate: f64, instrs_available: usize) -> Self {
         let empty = Arc::new(Waveform::new(vec![0.0], 440.0, sample_rate, false, 0));
         let instrs = (0..instrs_available)
             .map(|_| WaveformInstrument::new(sample_rate, empty.clone()))
@@ -194,7 +200,7 @@ impl WaveformSynthesizer {
         if let Some(ht) = needed_taps
             && (self.resample_tables.is_none() || self.resample_half_taps != ht)
         {
-            self.resample_tables = Some(ResampleTables::new(ht));
+            self.resample_tables = Some(R::tables(ht));
             self.resample_half_taps = ht;
         }
     }
@@ -220,7 +226,7 @@ impl WaveformSynthesizer {
 
         let mut mono: [Sample; MAX_BLOCK] = [0.0; MAX_BLOCK];
         for &i in &self.active_instrs {
-            self.instrs[i].advance_block(resample, tables, pop_smoothing, &mut mono[..n]);
+            self.instrs[i].advance_block::<R>(resample, tables, pop_smoothing, &mut mono[..n]);
         }
         let quiet_at = self.quiet_at();
         self.prune_stopped();

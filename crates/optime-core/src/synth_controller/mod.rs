@@ -12,7 +12,7 @@ use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId}
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::block::{self, MAX_BLOCK};
 use crate::dsp::high_band_compressor::HighBandCompressorStage;
-use crate::dsp::resample::StreamResampler;
+use crate::dsp::resample::{DefaultResampler, Resampler, StreamResampler};
 use crate::waveform::{InstrumentResampleMode, Sample};
 use crate::{PerDeviceSettings, TRACK_COUNT, WaveformSynthesizer};
 use reverb::Reverb;
@@ -42,9 +42,9 @@ struct SlotOwner {
 
 type SlotOwners = Vec<Vec<Option<SlotOwner>>>;
 
-fn new_synth_set(sample_rate: f64) -> (Vec<WaveformSynthesizer>, SlotOwners) {
+fn new_synth_set<R: Resampler>(sample_rate: f64) -> (Vec<WaveformSynthesizer<R>>, SlotOwners) {
     let synths: Vec<_> = (0..TRACK_COUNT)
-        .map(|_| WaveformSynthesizer::new(sample_rate, 16))
+        .map(|_| WaveformSynthesizer::with_resampler(sample_rate, 16))
         .collect();
     let slot_owner = synths.iter().map(|s| vec![None; s.voice_count()]).collect();
     (synths, slot_owner)
@@ -56,8 +56,8 @@ fn find_slot(slot_owner: &SlotOwners, track: usize, voice: VoiceId) -> Option<us
         .position(|o| o.is_some_and(|o| o.voice == voice))
 }
 
-fn render_set_block(
-    synths: &mut [WaveformSynthesizer],
+fn render_set_block<R: Resampler>(
+    synths: &mut [WaveformSynthesizer<R>],
     enables: &[bool],
     config: &PerDeviceSettings,
     out_l: &mut [Sample],
@@ -87,8 +87,8 @@ fn bitcrush_block(block: &mut [Sample], bits: u32) {
     }
 }
 
-fn cut_finished(
-    synths: &mut [WaveformSynthesizer],
+fn cut_finished<R: Resampler>(
+    synths: &mut [WaveformSynthesizer<R>],
     slot_owner: &mut SlotOwners,
     notes_on: &mut [[u8; 128]],
     feedback: &mut TickFeedback,
@@ -135,16 +135,16 @@ impl ChainScratch {
     }
 }
 
-struct Bank {
-    resampler: StreamResampler,
+struct Bank<R: Resampler> {
+    resampler: StreamResampler<R>,
     rate: f64,
     was_active: bool,
 }
 
-impl Bank {
+impl<R: Resampler> Bank<R> {
     fn new(rate: f64) -> Self {
         Self {
-            resampler: StreamResampler::new(),
+            resampler: StreamResampler::with_resampler(),
             rate,
             was_active: false,
         }
@@ -345,14 +345,14 @@ impl Transition {
     }
 }
 
-pub struct SynthController {
+pub struct SynthController<R: Resampler = DefaultResampler> {
     sample_rate: f64,
     pub player: Box<dyn DevicePlayer>,
-    synths: Vec<WaveformSynthesizer>,
+    synths: Vec<WaveformSynthesizer<R>>,
     slot_owner: SlotOwners,
-    mixer_synths: Vec<WaveformSynthesizer>,
+    mixer_synths: Vec<WaveformSynthesizer<R>>,
     mixer_slot_owner: SlotOwners,
-    bank: Bank,
+    bank: Bank<R>,
     pub notes_on: Vec<[u8; 128]>,
     transition: Transition,
     messages: Vec<PlaybackEvent>,
@@ -372,13 +372,19 @@ pub struct SynthController {
     reverb: Reverb,
 }
 
-impl SynthController {
-    pub fn new(sample_rate: f64, data: &dyn SoundData, song_id: u32) -> Option<SynthController> {
+impl SynthController<DefaultResampler> {
+    pub fn new(sample_rate: f64, data: &dyn SoundData, song_id: u32) -> Option<Self> {
+        Self::with_resampler(sample_rate, data, song_id)
+    }
+}
+
+impl<R: Resampler> SynthController<R> {
+    pub fn with_resampler(sample_rate: f64, data: &dyn SoundData, song_id: u32) -> Option<Self> {
         let player = data.make_player(song_id)?;
         let mixer_rate = 48_000.0;
         let (synths, slot_owner) = new_synth_set(sample_rate);
         let (mixer_synths, mixer_slot_owner) = new_synth_set(mixer_rate);
-        Some(SynthController {
+        Some(Self {
             sample_rate,
             player,
             synths,
@@ -526,7 +532,7 @@ impl SynthController {
     }
 
     pub fn active_voice_count(&self) -> usize {
-        let count = |synths: &[WaveformSynthesizer]| -> usize {
+        let count = |synths: &[WaveformSynthesizer<R>]| -> usize {
             synths.iter().map(|s| s.active_voice_count()).sum()
         };
         count(&self.synths) + count(&self.mixer_synths)
@@ -790,7 +796,7 @@ impl SynthController {
     }
 
     #[inline]
-    fn set_mut(&mut self, mixer: bool) -> (&mut Vec<WaveformSynthesizer>, &mut SlotOwners) {
+    fn set_mut(&mut self, mixer: bool) -> (&mut Vec<WaveformSynthesizer<R>>, &mut SlotOwners) {
         if mixer {
             (&mut self.mixer_synths, &mut self.mixer_slot_owner)
         } else {

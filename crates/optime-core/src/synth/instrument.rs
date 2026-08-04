@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use crate::devices::VoicePitch;
-use crate::dsp::resample::{
-    EffectiveGather, GatherSource, ResampleTables, effective_gather, gather_sinc, sinc_fc,
-};
+use crate::dsp::resample::{EffectiveGather, GatherSource, Resampler, effective_gather, sinc_fc};
 use crate::dsp::slewer::{Direction, Slewer};
 use crate::synth_controller::{DEFAULT_POP_SLEW_SECONDS, PopSmoothing};
 use crate::tuning::{TuningSystem, midi_note_to_hz};
@@ -82,10 +80,10 @@ impl WaveformInstrument {
         self.refresh_pop_step();
     }
 
-    pub fn advance(
+    pub fn advance<R: Resampler>(
         &mut self,
         mode: InstrumentResampleMode,
-        tables: Option<&ResampleTables>,
+        tables: Option<&R::Tables>,
         pops: PopSmoothing,
     ) {
         let r = (self.freq_ratio * self.waveform.sample_rate * self.inv_sample_rate) as Sample;
@@ -158,7 +156,7 @@ impl WaveformInstrument {
                         loop_len,
                         wrapped: self.wrapped,
                     };
-                    gather_sinc(&src, tbl, pos, fc, step_mode)
+                    R::gather(&src, tbl, pos, fc, step_mode)
                 } else {
                     get(pos.floor() as i64)
                 }
@@ -168,10 +166,10 @@ impl WaveformInstrument {
         self.output = result * gain;
     }
 
-    pub fn advance_block(
+    pub fn advance_block<R: Resampler>(
         &mut self,
         mode: InstrumentResampleMode,
-        tables: Option<&ResampleTables>,
+        tables: Option<&R::Tables>,
         pops: PopSmoothing,
         out: &mut [Sample],
     ) {
@@ -187,7 +185,7 @@ impl WaveformInstrument {
         else {
             for (i, slot) in out.iter_mut().enumerate() {
                 let was_playing = self.playing;
-                self.advance(mode, tables, pops);
+                self.advance::<R>(mode, tables, pops);
                 if was_playing && !self.playing {
                     self.stopped_at.get_or_insert(i);
                 }
@@ -263,7 +261,7 @@ impl WaveformInstrument {
                 loop_len,
                 wrapped,
             };
-            let result = gather_sinc(&src, tbl, pos, fc, step_mode);
+            let result = R::gather(&src, tbl, pos, fc, step_mode);
             last = result * g;
             *slot += last;
         }
@@ -316,6 +314,7 @@ fn fold_pos(pos: Sample, fold: bool, data_len: Sample, loop_len: Sample) -> (Sam
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dsp::resample::ResampleImpl1;
     use core::f64::consts::PI;
 
     fn crunch(half_taps: usize) -> InstrumentResampleMode {
@@ -340,7 +339,7 @@ mod tests {
         let mut instr = WaveformInstrument::new(44_100.0, waveform);
         instr.set_pitch(VoicePitch::DataRateHz(22_050.0), TuningSystem::Equal);
 
-        instr.advance(
+        instr.advance::<ResampleImpl1>(
             InstrumentResampleMode::NearestNeighbor,
             None,
             PopSmoothing::default(),
@@ -352,7 +351,7 @@ mod tests {
         );
 
         instr.set_sample_rate(22_050.0);
-        instr.advance(
+        instr.advance::<ResampleImpl1>(
             InstrumentResampleMode::NearestNeighbor,
             None,
             PopSmoothing::default(),
@@ -368,7 +367,7 @@ mod tests {
         out_rate: f64,
         waveform: Arc<Waveform>,
         mode: InstrumentResampleMode,
-        tables: Option<&ResampleTables>,
+        tables: Option<&<ResampleImpl1 as Resampler>::Tables>,
         n: usize,
     ) -> Vec<Sample> {
         let mut instr = WaveformInstrument::new(out_rate, waveform);
@@ -383,7 +382,7 @@ mod tests {
         instr.playing = true;
         (0..n)
             .map(|_| {
-                instr.advance(mode, tables, PopSmoothing::default());
+                instr.advance::<ResampleImpl1>(mode, tables, PopSmoothing::default());
                 instr.output
             })
             .collect()
@@ -409,7 +408,7 @@ mod tests {
         let image_hz = 7680.0;
         let warmup = 256;
         let n = 2048;
-        let tables = ResampleTables::new(16);
+        let tables = ResampleImpl1::tables(16);
 
         let crunch = render(
             out_rate,
@@ -457,7 +456,7 @@ mod tests {
         let alias_hz = 4608.0;
         let warmup = 256;
         let n = 2560;
-        let tables = ResampleTables::new(16);
+        let tables = ResampleImpl1::tables(16);
 
         let nearest = render(
             out_rate,
@@ -503,7 +502,7 @@ mod tests {
         let mut waveform = Waveform::new(vec![1.0, 1.0, -1.0, -1.0], 440.0, 16384.0, true, 0);
         waveform.is_psg_square = true;
         let waveform = Arc::new(waveform);
-        let tables = ResampleTables::new(16);
+        let tables = ResampleImpl1::tables(16);
         let n = 512;
         let crunch_mode = render(out_rate, waveform.clone(), crunch(16), Some(&tables), n);
         let clean_mode = render(
@@ -525,7 +524,7 @@ mod tests {
         let tone_hz = 4096.0;
         let warmup = 256;
         let n = 2048;
-        let tables = ResampleTables::new(32);
+        let tables = ResampleImpl1::tables(32);
         for is_psg in [false, true] {
             let mut s = sine_waveform(4, 64, src_rate);
             if is_psg {
@@ -607,7 +606,7 @@ mod tests {
             ..PopSmoothing::default()
         };
         instr.begin_note(1.0, psg_on);
-        instr.advance(InstrumentResampleMode::NearestNeighbor, None, psg_on);
+        instr.advance::<ResampleImpl1>(InstrumentResampleMode::NearestNeighbor, None, psg_on);
         assert!(
             instr.output < 0.05,
             "smoothed start must ramp from silence, got {}",
@@ -616,7 +615,7 @@ mod tests {
         let mut prev = instr.output;
         let mut reached = false;
         for _ in 0..1024 {
-            instr.advance(InstrumentResampleMode::NearestNeighbor, None, psg_on);
+            instr.advance::<ResampleImpl1>(InstrumentResampleMode::NearestNeighbor, None, psg_on);
             let delta = instr.output - prev;
             assert!((-1e-12..0.02).contains(&delta), "ramp step {delta}");
             prev = instr.output;
@@ -632,7 +631,7 @@ mod tests {
             if !instr.playing {
                 break;
             }
-            instr.advance(InstrumentResampleMode::NearestNeighbor, None, psg_on);
+            instr.advance::<ResampleImpl1>(InstrumentResampleMode::NearestNeighbor, None, psg_on);
         }
         assert!(!instr.playing, "fade-out must stop the voice");
         assert_eq!(instr.output, 0.0);
@@ -641,7 +640,7 @@ mod tests {
         hard.set_pitch(pitch, TuningSystem::Equal);
         hard.playing = true;
         hard.begin_note(1.0, PopSmoothing::default());
-        hard.advance(
+        hard.advance::<ResampleImpl1>(
             InstrumentResampleMode::NearestNeighbor,
             None,
             PopSmoothing::default(),
@@ -675,7 +674,7 @@ mod tests {
             instr.set_pitch(pitch, TuningSystem::Equal);
             instr.playing = true;
             instr.begin_note(1.0, pops);
-            instr.advance(mode, None, pops);
+            instr.advance::<ResampleImpl1>(mode, None, pops);
             (instr, pops)
         };
 
@@ -688,7 +687,7 @@ mod tests {
         attack.volume = 1.0;
         attack.gain.set(1.0);
         attack.begin_fade_out();
-        attack.advance(mode, None, pops);
+        attack.advance::<ResampleImpl1>(mode, None, pops);
         assert_eq!(attack.output, 0.0, "an attack-only cut must be instant");
         assert!(!attack.playing, "the instant cut must stop the voice");
 
@@ -699,7 +698,7 @@ mod tests {
             release.output
         );
         release.begin_fade_out();
-        release.advance(mode, None, pops);
+        release.advance::<ResampleImpl1>(mode, None, pops);
         assert!(
             release.output > 0.9 && release.playing,
             "a release-only fade-out must ramp, got {}",
@@ -712,7 +711,7 @@ mod tests {
         let src_rate = 20480.0;
         let alias_hz = 3072.0;
         let waveform = sine_waveform(4, 64, src_rate);
-        let tables = ResampleTables::new(half_taps);
+        let tables = ResampleImpl1::tables(half_taps);
         let warmup = 256;
         let n = 2048;
         let out = render(

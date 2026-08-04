@@ -21,7 +21,7 @@ pub use devices::{
     DevicePlayer, SoundData, SynthEvent, VoiceId, VoicePitch, WaveformDcStat, load_all,
 };
 pub use dsp::biquad_filter;
-pub use dsp::resample::{ResampleTables, StreamResampler};
+pub use dsp::resample::{DefaultResampler, ResampleImpl1, Resampler, StreamResampler};
 pub use synth::{CROSSOVER_Q, DelayLine, WaveformInstrument, WaveformSynthesizer};
 pub use synth_controller::{
     DelaySmoothing, FsVisController, HighShelf, LoopAndTransitionOptions, PlaybackEvent,
