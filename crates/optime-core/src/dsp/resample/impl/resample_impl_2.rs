@@ -3,7 +3,8 @@
 //! zero-order hold that turns that train into a staircase is folded into the reconstruction kernel
 //! instead of into the signal — so step mode convolves the deltas with a *band-limited rect*, one
 //! rect per source sample, stretched or squeezed by the cutoff the resample ratio asks for. Impulse
-//! mode is the same expression with the rect collapsed to a point, leaving the bare windowed sinc.
+//! mode is that same expression with the rect collapsed to a point, which is the bare windowed sinc
+//! every implementation already agrees on, so it defers to the shared `gather_impulse`.
 //!
 //! The band-limited rect is the difference of the band-limited step at the rect's two edges, and
 //! that step is the sine integral. Implementation 1 tables it and reads the table with a SIMD
@@ -15,14 +16,12 @@
 use core::f32::consts::{FRAC_PI_2, PI};
 use std::simd::prelude::*;
 
+use super::{Fv, LANES, Phasor, blackman, blackman_from_cos, gather_impulse};
 use crate::dsp::resample::{MAX_HALF_TAPS, Resampler};
 use crate::waveform::Sample;
 
-const LANES: usize = 4;
 const SI_TAYLOR_TERMS: usize = 32;
 const SI_TAYLOR_LIMIT: f32 = 16.0;
-
-type Fv = Simd<f32, LANES>;
 
 const F_NUM_1: f32 = 214.0 / 3.0;
 const F_NUM_2: f32 = 1192.0 / 3.0;
@@ -97,7 +96,7 @@ impl Resampler for ResampleImpl2 {
         let (out, wsum) = if step_mode {
             convolve_rects(src, d0, fc, p)
         } else {
-            convolve_deltas(src, d0, fc, p)
+            gather_impulse(src, d0, fc, p)
         };
         let wsum = if step_mode { wsum.abs() } else { wsum };
 
@@ -107,27 +106,6 @@ impl Resampler for ResampleImpl2 {
             Sample::from(src[(pos.round() as i64 - k_lo) as usize])
         }
     }
-}
-
-fn sinc(x: f32) -> f32 {
-    if x.abs() < 1e-7 {
-        1.0
-    } else {
-        let px = PI * x;
-        px.sin() / px
-    }
-}
-
-fn blackman(x: f32) -> f32 {
-    if x >= 1.0 {
-        return 0.0;
-    }
-    0.42 + 0.5 * (PI * x).cos() + 0.08 * (2.0 * PI * x).cos()
-}
-
-#[inline]
-fn blackman_from_cos(c: Fv) -> Fv {
-    Fv::splat(0.34) + (Fv::splat(0.5) + Fv::splat(0.16) * c) * c
 }
 
 fn band_limited_step(t: f32) -> f32 {
@@ -184,42 +162,11 @@ fn band_limited_step_simd(t: Fv, sin_t: Fv, cos_t: Fv) -> Fv {
     negative.select(-si, si) * Fv::splat(1.0 / PI)
 }
 
-struct Rotor {
-    sin: Fv,
-    cos: Fv,
-    step_sin: f32,
-    step_cos: f32,
-}
-
-impl Rotor {
-    fn new(rate: f32, base: f32) -> Self {
-        let (mut sin, mut cos) = ([0.0; LANES], [0.0; LANES]);
-        for i in 0..LANES {
-            (sin[i], cos[i]) = f32::sin_cos(rate * (base - i as f32));
-        }
-        let (step_sin, step_cos) = f32::sin_cos(rate * LANES as f32);
-        Self {
-            sin: Fv::from_array(sin),
-            cos: Fv::from_array(cos),
-            step_sin,
-            step_cos,
-        }
-    }
-
-    #[inline]
-    fn rotate(&mut self) {
-        let (s, c) = (self.sin, self.cos);
-        let (ss, sc) = (Fv::splat(self.step_sin), Fv::splat(self.step_cos));
-        self.sin = s * sc - c * ss;
-        self.cos = c * sc + s * ss;
-    }
-}
-
 fn convolve_rects(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32, f32) {
     let lane_offsets = Fv::from_array([0.0, 1.0, 2.0, 3.0]);
     let edge_rate = 2.0 * PI * fc;
-    let mut edges = Rotor::new(edge_rate, d0 - 1.0);
-    let mut window = Rotor::new(PI / p, d0 - 0.5);
+    let mut edges = Phasor::new(edge_rate, d0 - 1.0);
+    let mut window = Phasor::new(PI / p, d0 - 0.5);
     let (mut out, mut wsum) = (Fv::splat(0.0), Fv::splat(0.0));
     let mut carry = band_limited_step(edge_rate * d0);
     let mut base = d0 - 1.0;
@@ -255,39 +202,6 @@ fn convolve_rects(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32, f32) {
         out += s * w;
         wsum += w;
         upper = lower;
-    }
-    (out, wsum)
-}
-
-fn convolve_deltas(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32, f32) {
-    let lane_offsets = Fv::from_array([0.0, 1.0, 2.0, 3.0]);
-    let sinc_rate = 2.0 * PI * fc;
-    let mut sincs = Rotor::new(sinc_rate, d0);
-    let mut window = Rotor::new(PI / p, d0);
-    let (mut out, mut wsum) = (Fv::splat(0.0), Fv::splat(0.0));
-    let mut d = Fv::splat(d0) - lane_offsets;
-
-    for chunk in src.chunks_exact(LANES) {
-        let arg = d * Fv::splat(sinc_rate);
-        let near_zero = arg.abs().simd_lt(Fv::splat(1e-7));
-        let lobe = near_zero.select(Fv::splat(1.0), sincs.sin / arg);
-        let inside = d.abs().simd_lt(Fv::splat(p));
-        let w = inside.select(lobe * blackman_from_cos(window.cos), Fv::splat(0.0));
-
-        out += Fv::from_slice(chunk) * w;
-        wsum += w;
-        d -= Fv::splat(LANES as f32);
-        sincs.rotate();
-        window.rotate();
-    }
-    let (mut out, mut wsum) = (out.reduce_sum(), wsum.reduce_sum());
-
-    let done = src.len() - src.chunks_exact(LANES).remainder().len();
-    for (j, &s) in src.iter().enumerate().skip(done) {
-        let d = d0 - j as f32;
-        let w = sinc(2.0 * fc * d) * blackman(d.abs() / p);
-        out += s * w;
-        wsum += w;
     }
     (out, wsum)
 }
