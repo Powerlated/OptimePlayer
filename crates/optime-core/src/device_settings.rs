@@ -2,7 +2,9 @@
 
 use crate::TRACK_COUNT;
 use crate::dsp::slewer::Direction;
-use crate::synth_controller::{DelaySmoothing, HighBandCompressor, HighShelf, PopSmoothing};
+use crate::synth_controller::{
+    DelaySmoothing, Exciter, HighBandCompressor, HighShelf, PopSmoothing,
+};
 use crate::tuning::TuningSystem;
 use crate::waveform::InstrumentResampleMode;
 
@@ -137,6 +139,8 @@ pub struct PerDeviceSettings {
     pub shelf: HighShelf,
     #[serde(default)]
     pub high_band_compress: HighBandCompressor,
+    #[serde(default)]
+    pub exciter: Exciter,
     pub delay_smoothing_choice: usize,
     pub mixer_sample_rate: u32,
     pub use_mixer: bool,
@@ -214,6 +218,7 @@ impl PerDeviceSettings {
             },
             shelf: HighShelf::default(),
             high_band_compress: HighBandCompressor::default(),
+            exciter: Exciter::default(),
             delay_smoothing_choice: 0,
             mixer_sample_rate: 48_000,
             use_mixer: false,
@@ -266,6 +271,7 @@ impl PerDeviceSettings {
                 gain_db: -10.0,
             },
             high_band_compress: HighBandCompressor::default(),
+            exciter: Exciter::default(),
             track_enables: all_tracks_enabled(),
         }
     }
@@ -314,7 +320,43 @@ impl PerDeviceSettings {
                 enabled_sampled: true,
                 ..HighBandCompressor::default()
             },
+            exciter: Exciter::default(),
             track_enables: all_tracks_enabled(),
+        }
+    }
+
+    pub fn enhanced_plus_gba() -> Self {
+        Self {
+            mixer_resample: MixerResampleSettings {
+                choice: InstrumentResampleChoice::SincSampleNyquist,
+                sinc_taps: 32,
+                cutoff_hz: 13379,
+            },
+            psg_crunch_compensation: false,
+            exciter: Exciter {
+                enabled: true,
+                crossover_hz: 1413.2,
+                drive: 15.06,
+                amount: 0.309,
+            },
+            high_band_compress: HighBandCompressor {
+                enabled_psg: true,
+                enabled_sampled: true,
+                cutoff_hz: 14731.7,
+                threshold_db: -59.96,
+                ratio: 3.528,
+                attack_ms: 1.102,
+                release_ms: 31.95,
+                makeup_db: 5.509,
+            },
+            shelf: HighShelf {
+                enabled: true,
+                order: 2,
+                q: 0.344,
+                cutoff_hz: 12688.9,
+                gain_db: -4.464,
+            },
+            ..Self::enhanced_gba()
         }
     }
 
@@ -355,6 +397,7 @@ impl PerDeviceSettings {
                 ..HighShelf::default()
             },
             high_band_compress: HighBandCompressor::default(),
+            exciter: Exciter::default(),
             track_enables: all_tracks_enabled(),
         }
     }

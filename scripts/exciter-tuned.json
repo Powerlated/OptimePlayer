@@ -1,0 +1,79 @@
+{
+  "archive": "demos/pokemon-emerald.gbaaudio",
+  "loss": {
+    "holdout": 0.7098627528175712,
+    "train": 0.9981342330574989
+  },
+  "parameters": {
+    "exciter.amount": 0.3094268168496569,
+    "exciter.crossover_hz": 1413.205143379073,
+    "exciter.drive": 15.056755379348472,
+    "high_band.attack_ms": 1.1016692571043116,
+    "high_band.cutoff_hz": 14731.691163770889,
+    "high_band.makeup_db": 5.5086527016815445,
+    "high_band.ratio": 3.5283927327501066,
+    "high_band.release_ms": 31.949057604151843,
+    "high_band.threshold_db": -59.96423743688071,
+    "shelf.cutoff_hz": 12688.93885766301,
+    "shelf.gain_db": -4.463617536142057,
+    "shelf.q": 0.3444723819816511
+  },
+  "rate": 48000,
+  "reference": "scripts/deltarune-timbre.json",
+  "seconds": 25.0,
+  "settings": {
+    "bass_mono": true,
+    "bass_mono_freq": 200.0,
+    "bitcrush_bits": 8,
+    "bitcrush_mixer": false,
+    "delay_smoothing_choice": 1,
+    "exciter": {
+      "amount": 0.30942681431770325,
+      "crossover_hz": 1413.205143379073,
+      "drive": 15.056755065917969,
+      "enabled": true
+    },
+    "force_stereo_separation": false,
+    "high_band_compress": {
+      "attack_ms": 1.1016692571043116,
+      "cutoff_hz": 14731.691163770889,
+      "enabled_psg": true,
+      "enabled_sampled": true,
+      "makeup_db": 5.5086527016815445,
+      "ratio": 3.5283927327501066,
+      "release_ms": 31.949057604151843,
+      "threshold_db": -59.96423743688071
+    },
+    "instrument_resample": {
+      "choice": "SincSampleNyquist",
+      "pop_slew_ms": 10.0,
+      "pop_smooth_edge": "Release",
+      "psg_cutoff_hz": 15000,
+      "sampler_cutoff_hz": 15000,
+      "sinc_taps": 32,
+      "smooth_psg_pops": false,
+      "smooth_sample_pops": true
+    },
+    "mixer_resample": {
+      "choice": "SincSampleNyquist",
+      "cutoff_hz": 13379,
+      "sinc_taps": 32
+    },
+    "mixer_sample_rate": 13379,
+    "mp2k_reverb": true,
+    "psg_crunch_compensation": false,
+    "pure_tonic": 0,
+    "remove_sample_dc_offset": false,
+    "shelf": {
+      "cutoff_hz": 12688.93885766301,
+      "enabled": true,
+      "gain_db": -4.463617536142057,
+      "order": 2,
+      "q": 0.3444723819816511
+    },
+    "smooth_pan": true,
+    "stereo_separation": true,
+    "tuning_choice": 0,
+    "use_mixer": true
+  }
+}

@@ -29,8 +29,8 @@ pub use dsp::resample::{
 };
 pub use synth::{CROSSOVER_Q, DelayLine, WaveformInstrument, WaveformSynthesizer};
 pub use synth_controller::{
-    DelaySmoothing, FsVisController, HighShelf, LoopAndTransitionOptions, PlaybackEvent,
-    PopSmoothing, SongOverview, SynthController, VisNote,
+    DelaySmoothing, Exciter, FsVisController, HighBandCompressor, HighShelf,
+    LoopAndTransitionOptions, PlaybackEvent, PopSmoothing, SongOverview, SynthController, VisNote,
 };
 pub use tuning::{TuningSystem, midi_note_to_hz};
 pub use waveform::{

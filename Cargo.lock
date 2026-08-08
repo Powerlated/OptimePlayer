@@ -2556,6 +2556,7 @@ dependencies = [
  "optime-core",
  "rayon",
  "rustfft",
+ "serde",
  "serde_json",
  "symphonia",
 ]

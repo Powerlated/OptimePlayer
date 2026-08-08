@@ -2687,6 +2687,21 @@ impl OptimeApp {
                     d.track_enables = te;
                 }
                 if ui
+                    .button("Enhanced+")
+                    .on_hover_text(
+                        "Enhanced, but the top end is generated rather than inherited: the mixer \
+                         upsamples cleanly instead of crunching a staircase, and a saturating \
+                         exciter puts the harmonics back on purpose. Exciter, high-band compressor \
+                         and shelf were fitted by SPSA against the DELTARUNE soundtrack's average \
+                         spectrum and dynamics — see docs/exciter-tuning.md, including what it does \
+                         and does not beat.",
+                    )
+                    .clicked()
+                {
+                    *d = PerDeviceSettings::enhanced_plus_gba();
+                    d.track_enables = te;
+                }
+                if ui
                     .button("Original")
                     .on_hover_text(
                         "The raw m4a signal chain: no stereo widening or smoothing, the intermediate \
@@ -2980,6 +2995,35 @@ impl OptimeApp {
                 .on_hover_text(
                     "Higher order steepens the shelf transition (more biquad sections).",
                 );
+            });
+        }
+        ui.separator();
+        ui.label("Top-end exciter");
+        {
+            ui.checkbox(&mut d.exciter.enabled, "Enable exciter")
+                .on_hover_text(
+                    "Drives the band above the crossover through a saturating waveshaper and adds \
+                    the harmonics it generates back into the mix. An alternative source of top end \
+                    to the crunch resampler's stepped reconstruction: the harmonics are placed on \
+                    purpose rather than inherited from the staircase. Antialiased by the \
+                    antiderivative method, so the added harmonics do not fold back down the band.",
+                );
+            ui.add_enabled_ui(d.exciter.enabled, |ui| {
+                ui.add(
+                    egui::Slider::new(&mut d.exciter.crossover_hz, 500.0..=14000.0)
+                        .text("Crossover")
+                        .suffix(" Hz")
+                        .logarithmic(true),
+                )
+                .on_hover_text("Only signal above this is driven, and only harmonics above it are added back.");
+                ui.add(
+                    egui::Slider::new(&mut d.exciter.drive, 0.5..=24.0)
+                        .text("Drive")
+                        .logarithmic(true),
+                )
+                .on_hover_text("How hard the high band is pushed into saturation, which sets how much harmonic content exists to add.");
+                ui.add(egui::Slider::new(&mut d.exciter.amount, 0.0..=2.0).text("Amount"))
+                    .on_hover_text("How much of the generated harmonic band is summed in. Zero is exactly transparent.");
             });
         }
         ui.separator();

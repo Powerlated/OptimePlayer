@@ -6,13 +6,14 @@ mod reverb;
 mod vis;
 
 pub use config::{
-    DEFAULT_POP_SLEW_SECONDS, DelaySmoothing, HighBandCompressor, HighShelf, PopSmoothing,
+    DEFAULT_POP_SLEW_SECONDS, DelaySmoothing, Exciter, HighBandCompressor, HighShelf, PopSmoothing,
 };
 pub use vis::{FsVisController, SongOverview, VisNote};
 
 use crate::devices::{DevicePlayer, SoundData, SynthEvent, TickFeedback, VoiceId};
 use crate::dsp::biquad_filter::BiquadFilter;
 use crate::dsp::block::{self, MAX_BLOCK};
+use crate::dsp::exciter::ExciterStage;
 use crate::dsp::high_band_compressor::HighBandCompressorStage;
 use crate::dsp::resample::{DefaultResampler, Resampler, StreamResampler};
 use crate::waveform::{InstrumentResampleMode, Sample};
@@ -371,6 +372,8 @@ pub struct SynthController<R: Resampler = DefaultResampler> {
     high_comp_sampled: HighBandCompressorStage,
     high_comp_psg_was_active: bool,
     high_comp_sampled_was_active: bool,
+    exciter: ExciterStage,
+    exciter_was_active: bool,
     reverb: Reverb,
 }
 
@@ -410,6 +413,8 @@ impl<R: Resampler> SynthController<R> {
             high_comp_sampled: HighBandCompressorStage::new(sample_rate),
             high_comp_psg_was_active: false,
             high_comp_sampled_was_active: false,
+            exciter: ExciterStage::new(sample_rate),
+            exciter_was_active: false,
             reverb: Reverb::new(),
         })
     }
@@ -514,6 +519,26 @@ impl<R: Resampler> SynthController<R> {
             .process_block(l, r, hbc.params(), high_l, high_r);
     }
 
+    fn excite_block(
+        &mut self,
+        l: &mut [Sample],
+        r: &mut [Sample],
+        config: &PerDeviceSettings,
+        high_l: &mut [Sample],
+        high_r: &mut [Sample],
+    ) {
+        if !config.exciter.is_active() {
+            self.exciter_was_active = false;
+            return;
+        }
+        if !self.exciter_was_active {
+            self.exciter.reset_state();
+            self.exciter_was_active = true;
+        }
+        self.exciter
+            .process_block(l, r, config.exciter.params(), high_l, high_r);
+    }
+
     #[inline]
     pub fn sample_rate(&self) -> f64 {
         self.sample_rate
@@ -572,6 +597,8 @@ impl<R: Resampler> SynthController<R> {
         self.high_comp_psg_was_active = false;
         self.high_comp_sampled.set_sample_rate(sample_rate);
         self.high_comp_sampled_was_active = false;
+        self.exciter.set_sample_rate(sample_rate);
+        self.exciter_was_active = false;
     }
 
     pub fn steps_elapsed(&self) -> u32 {
@@ -677,6 +704,7 @@ impl<R: Resampler> SynthController<R> {
                     *acc += m;
                 }
             }
+            self.excite_block(acc_l, acc_r, config, high_l, high_r);
             self.master_filter_block(acc_l, acc_r, config);
 
             let gain = &mut scratch.gain[..n];

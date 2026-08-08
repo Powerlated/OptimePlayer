@@ -12,6 +12,7 @@ default-run = "optime-cli"
 [dependencies]
 optime-core = { path = "../optime-core" }
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `export-album`: FLAC encoding (rayon = parallel channel compression), EBU R128 loudness
 # measurement, and progress bars. `match-ost` and the album render share rayon.
@@ -21,5 +22,14 @@ indicatif = "0.17"
 rayon = "1"
 # `match-ost`: decoding the reference soundtrack recordings, and the FFT its chroma features
 # are built from.
-symphonia = { version = "0.5", features = ["mp3", "flac", "wav", "pcm", "isomp4", "aac"] }
+symphonia = { version = "0.5", features = [
+    "mp3",
+    "flac",
+    "wav",
+    "pcm",
+    "isomp4",
+    "aac",
+    "ogg",
+    "vorbis",
+] }
 rustfft = "6"

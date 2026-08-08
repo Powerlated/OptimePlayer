@@ -1,7 +1,9 @@
 //! The option types the signal chain reads: pop smoothing, delay smoothing, shelf, and compressor settings.
 
+use crate::dsp::exciter::ExciterParams;
 use crate::dsp::high_band_compressor::HighBandCompressorParams;
 use crate::dsp::slewer::Direction;
+use crate::waveform::Sample;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DelaySmoothing {
@@ -108,6 +110,53 @@ impl HighBandCompressor {
             attack_ms: self.attack_ms,
             release_ms: self.release_ms,
             makeup_db: self.makeup_db,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Exciter {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "Exciter::default_crossover_hz")]
+    pub crossover_hz: f64,
+    #[serde(default = "Exciter::default_drive")]
+    pub drive: Sample,
+    #[serde(default = "Exciter::default_amount")]
+    pub amount: Sample,
+}
+
+impl Default for Exciter {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            crossover_hz: Self::default_crossover_hz(),
+            drive: Self::default_drive(),
+            amount: Self::default_amount(),
+        }
+    }
+}
+
+impl Exciter {
+    fn default_crossover_hz() -> f64 {
+        3500.0
+    }
+    fn default_drive() -> Sample {
+        4.0
+    }
+    fn default_amount() -> Sample {
+        0.5
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.amount != 0.0 && self.drive > 0.0
+    }
+
+    pub fn params(&self) -> ExciterParams {
+        ExciterParams {
+            crossover_hz: self.crossover_hz,
+            drive: self.drive,
+            amount: self.amount,
         }
     }
 }

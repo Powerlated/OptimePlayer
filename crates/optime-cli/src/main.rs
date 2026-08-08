@@ -4,7 +4,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use optime_cli::{
-    album, bench, bench_kernel, dse, extract, golden, match_ost, mixer_response, render,
+    album, bench, bench_kernel, dse, extract, golden, match_ost, mixer_response, reference, render,
+    tune,
 };
 
 #[derive(Parser)]
@@ -29,6 +30,8 @@ enum Command {
     BenchResample(bench::Args),
     BenchKernel(bench_kernel::Args),
     MixerResponse(mixer_response::Args),
+    TimbreProfile(reference::Args),
+    TuneExciter(tune::Args),
 }
 
 fn main() -> ExitCode {
@@ -42,5 +45,7 @@ fn main() -> ExitCode {
         Command::BenchResample(a) => bench::run(a),
         Command::BenchKernel(a) => bench_kernel::run(a),
         Command::MixerResponse(a) => mixer_response::run(a),
+        Command::TimbreProfile(a) => reference::run(a),
+        Command::TuneExciter(a) => tune::run(a),
     }
 }
