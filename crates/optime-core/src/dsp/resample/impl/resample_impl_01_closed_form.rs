@@ -1,4 +1,4 @@
-//! The same windowed-sinc contract as `resample_impl_simd`, and the same SIMD lanes, but with the
+//! The same windowed-sinc contract as `resample_impl_00_simd`, and the same SIMD lanes, but with the
 //! table replaced by evaluated functions — and reached from the other side of the convolution to
 //! make that possible. The source is read as a train of scaled Dirac deltas, and the
 //! zero-order hold that turns that train into a staircase is folded into the reconstruction kernel
@@ -8,7 +8,7 @@
 //! every implementation already agrees on, so it defers to the shared `gather_impulse`.
 //!
 //! The band-limited rect is the difference of the band-limited step at the rect's two edges, and
-//! that step is the sine integral. `resample_impl_simd` tables it and reads the table with a SIMD
+//! that step is the sine integral. `resample_impl_00_simd` tables it and reads the table with a SIMD
 //! gather; this file evaluates it instead — Taylor series near the origin, Padé approximants of the
 //! auxiliary asymptotic series beyond it — so nothing here touches memory outside the tap window.
 //! That is the whole point of having both: same output within float tolerance, opposite answers to

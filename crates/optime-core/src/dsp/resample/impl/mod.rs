@@ -1,7 +1,7 @@
 //! The resampler implementations, one module each, plus the primitives they are built from. A file
-//! under `impl/` is named for how it computes, not for when it was written — `resample_impl_simd` is
-//! the tabulated SIMD kernel, `resample_impl_simd_closed_form` swaps that table for evaluated
-//! functions — and holds only what makes *that* one different: its kernel, and its tables if it has
+//! under `impl/` is `resample_impl_<nn>_<technique>.rs` — the number is the order it was written, so
+//! the directory reads as the sequence of experiments it is, and the suffix says how it computes.
+//! Each holds only what makes *that* one different: its kernel, and its tables if it has
 //! any. Anything two of them would otherwise both need is defined here once: the SIMD lane width,
 //! `sinc`, the Blackman window and its cos-folded SIMD form, the `Phasor` rotation that supplies
 //! both without a transcendental per tap, and the impulse-mode gather, which no implementation has
@@ -12,11 +12,11 @@
 use core::f32::consts::PI;
 use std::simd::prelude::*;
 
-pub mod resample_impl_simd;
-pub mod resample_impl_simd_closed_form;
+pub mod resample_impl_00_simd;
+pub mod resample_impl_01_closed_form;
 
-pub use resample_impl_simd::ResampleImplSimd;
-pub use resample_impl_simd_closed_form::ResampleImplSimdClosedForm;
+pub use resample_impl_00_simd::ResampleImplSimd;
+pub use resample_impl_01_closed_form::ResampleImplSimdClosedForm;
 
 pub const DEFAULT_LANES: usize = 4;
 
