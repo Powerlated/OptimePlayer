@@ -7,7 +7,7 @@
 //! compile-time choice, so the roster hands each implementation to a caller that is itself generic
 //! and collects whatever the caller makes of it.
 
-use optime_core::{ResampleImplSimd, ResampleImplSimdClosedForm, Resampler};
+use optime_core::{ResampleImplPolyphase, ResampleImplSimd, ResampleImplSimdClosedForm, Resampler};
 
 pub trait ResamplerVisitor {
     type Output;
@@ -21,5 +21,7 @@ pub fn walk<V: ResamplerVisitor>(visitor: &mut V) -> Vec<V::Output> {
         visitor.visit::<ResampleImplSimd<8>>("simd x8"),
         visitor.visit::<ResampleImplSimdClosedForm<4>>("closed x4"),
         visitor.visit::<ResampleImplSimdClosedForm<8>>("closed x8"),
+        visitor.visit::<ResampleImplPolyphase<4>>("poly x4"),
+        visitor.visit::<ResampleImplPolyphase<8>>("poly x8"),
     ]
 }

@@ -14,9 +14,11 @@ use std::simd::prelude::*;
 
 pub mod resample_impl_00_simd;
 pub mod resample_impl_01_closed_form;
+pub mod resample_impl_02_polyphase;
 
 pub use resample_impl_00_simd::ResampleImplSimd;
 pub use resample_impl_01_closed_form::ResampleImplSimdClosedForm;
+pub use resample_impl_02_polyphase::ResampleImplPolyphase;
 
 pub const DEFAULT_LANES: usize = 4;
 
@@ -230,7 +232,7 @@ mod tests {
         let fc = if ratio > 1.0 { 0.5 / ratio as f32 } else { 0.5 };
         (0..OUTPUT_LEN)
             .map(|n| {
-                let pos = (half_taps as f64 + n as f64 * ratio) as f32;
+                let pos = (half_taps as f64 + (n as f64 * ratio) % SOURCE_LEN as f64) as f32;
                 let (lo, hi) = R::tap_window(&tables, pos);
                 let window: Vec<f32> = (lo..=hi)
                     .map(|k| source[k.rem_euclid(SOURCE_LEN as i64) as usize])
@@ -300,26 +302,51 @@ mod tests {
         10.0 * (reference / residual.max(f64::MIN_POSITIVE)).log10()
     }
 
-    const RATIOS: [f64; 4] = [7.0 / 16.0, 1.0, 43.0 / 32.0, 3.0];
+    const RATIOS: [f64; 5] = [7.0 / 16.0, 89.0 / 208.0, 1.0, 43.0 / 32.0, 3.0];
     const CONTRACT_SNR_DB: f64 = 100.0;
     const MIN_HALF_TAPS_FOR_CONTRACT: usize = 16;
+
+    type SnrMeasure = fn(usize, f64) -> f64;
+
+    const IMPLEMENTATIONS: [(&str, SnrMeasure, SnrMeasure); 6] = [
+        (
+            "simd/4",
+            snr_db::<ResampleImplSimd<4>>,
+            step_snr_db::<ResampleImplSimd<4>>,
+        ),
+        (
+            "simd/8",
+            snr_db::<ResampleImplSimd<8>>,
+            step_snr_db::<ResampleImplSimd<8>>,
+        ),
+        (
+            "closed/4",
+            snr_db::<ResampleImplSimdClosedForm<4>>,
+            step_snr_db::<ResampleImplSimdClosedForm<4>>,
+        ),
+        (
+            "closed/8",
+            snr_db::<ResampleImplSimdClosedForm<8>>,
+            step_snr_db::<ResampleImplSimdClosedForm<8>>,
+        ),
+        (
+            "poly/4",
+            snr_db::<ResampleImplPolyphase<4>>,
+            step_snr_db::<ResampleImplPolyphase<4>>,
+        ),
+        (
+            "poly/8",
+            snr_db::<ResampleImplPolyphase<8>>,
+            step_snr_db::<ResampleImplPolyphase<8>>,
+        ),
+    ];
 
     #[test]
     fn every_implementation_resamples_above_100_db_snr() {
         for ratio in RATIOS {
             for half_taps in [MIN_HALF_TAPS_FOR_CONTRACT, 32, 64] {
-                for (name, snr) in [
-                    ("simd/4", snr_db::<ResampleImplSimd<4>>(half_taps, ratio)),
-                    ("simd/8", snr_db::<ResampleImplSimd<8>>(half_taps, ratio)),
-                    (
-                        "closed/4",
-                        snr_db::<ResampleImplSimdClosedForm<4>>(half_taps, ratio),
-                    ),
-                    (
-                        "closed/8",
-                        snr_db::<ResampleImplSimdClosedForm<8>>(half_taps, ratio),
-                    ),
-                ] {
+                for (name, impulse, _) in IMPLEMENTATIONS {
+                    let snr = impulse(half_taps, ratio);
                     assert!(
                         snr > CONTRACT_SNR_DB,
                         "{name}: half_taps={half_taps} ratio={ratio} gave {snr:.1} dB"
@@ -338,24 +365,8 @@ mod tests {
     fn step_mode_renders_a_band_limited_square_wave() {
         for ratio in STEP_RATIOS {
             for half_taps in [MIN_HALF_TAPS_FOR_CONTRACT, 32, 64] {
-                for (name, snr) in [
-                    (
-                        "simd/4",
-                        step_snr_db::<ResampleImplSimd<4>>(half_taps, ratio),
-                    ),
-                    (
-                        "simd/8",
-                        step_snr_db::<ResampleImplSimd<8>>(half_taps, ratio),
-                    ),
-                    (
-                        "closed/4",
-                        step_snr_db::<ResampleImplSimdClosedForm<4>>(half_taps, ratio),
-                    ),
-                    (
-                        "closed/8",
-                        step_snr_db::<ResampleImplSimdClosedForm<8>>(half_taps, ratio),
-                    ),
-                ] {
+                for (name, _, step) in IMPLEMENTATIONS {
+                    let snr = step(half_taps, ratio);
                     assert!(
                         snr > STEP_CONTRACT_SNR_DB,
                         "{name}: half_taps={half_taps} ratio={ratio} gave {snr:.1} dB"

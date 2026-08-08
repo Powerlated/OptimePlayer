@@ -24,7 +24,8 @@ pub use devices::{
 };
 pub use dsp::biquad_filter;
 pub use dsp::resample::{
-    DefaultResampler, ResampleImplSimd, ResampleImplSimdClosedForm, Resampler, StreamResampler,
+    DefaultResampler, ResampleImplPolyphase, ResampleImplSimd, ResampleImplSimdClosedForm,
+    Resampler, StreamResampler,
 };
 pub use synth::{CROSSOVER_Q, DelayLine, WaveformInstrument, WaveformSynthesizer};
 pub use synth_controller::{
