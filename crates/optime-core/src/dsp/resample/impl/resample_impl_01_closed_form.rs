@@ -17,7 +17,10 @@
 use core::f32::consts::{FRAC_PI_2, PI};
 use std::simd::prelude::*;
 
-use super::{DEFAULT_LANES, Fv, Phasor, blackman, blackman_from_cos, gather_impulse, lane_offsets};
+use super::{
+    DEFAULT_LANES, Fv, Phasor, blackman_from_cos, gather_impulse, lane_offsets, load_partial,
+    occupied_lanes,
+};
 use crate::dsp::resample::{MAX_HALF_TAPS, Resampler};
 use crate::waveform::Sample;
 
@@ -171,7 +174,8 @@ fn convolve_rects<const N: usize>(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32
     let mut carry = band_limited_step(edge_rate * d0);
     let mut base = d0 - 1.0;
 
-    for chunk in src.chunks_exact(N) {
+    let mut rest = src;
+    while !rest.is_empty() {
         let d_lower = Fv::<N>::splat(base) - lane_offsets::<N>();
         let lower =
             band_limited_step_simd::<N>(d_lower * Simd::splat(edge_rate), edges.sin, edges.cos);
@@ -180,31 +184,20 @@ fn convolve_rects<const N: usize>(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32
         carry = lower.as_array()[N - 1];
 
         let mid = Fv::<N>::splat(base + 0.5) - lane_offsets::<N>();
-        let inside = mid.abs().simd_lt(Simd::splat(p));
+        let inside = occupied_lanes::<N>(rest.len()) & mid.abs().simd_lt(Simd::splat(p));
         let w = inside.select(
             blackman_from_cos(window.cos) * (upper - lower),
             Simd::splat(0.0),
         );
 
-        out += Fv::<N>::from_slice(chunk) * w;
+        out += load_partial::<N>(rest) * w;
         wsum += w;
         base -= N as f32;
         edges.rotate();
         window.rotate();
+        rest = &rest[rest.len().min(N)..];
     }
-    let (mut out, mut wsum) = (out.reduce_sum(), wsum.reduce_sum());
-
-    let done = src.len() - src.chunks_exact(N).remainder().len();
-    let mut upper = carry;
-    for (j, &s) in src.iter().enumerate().skip(done) {
-        let d = d0 - j as f32;
-        let lower = band_limited_step(edge_rate * (d - 1.0));
-        let w = blackman((d - 0.5).abs() / p) * (upper - lower);
-        out += s * w;
-        wsum += w;
-        upper = lower;
-    }
-    (out, wsum)
+    (out.reduce_sum(), wsum.reduce_sum())
 }
 
 #[cfg(test)]

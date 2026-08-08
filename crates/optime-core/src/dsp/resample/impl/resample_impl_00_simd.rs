@@ -22,7 +22,8 @@ use std::simd::prelude::*;
 use std::sync::OnceLock;
 
 use super::{
-    DEFAULT_LANES, Fv, Phasor, blackman, blackman_from_cos, gather_impulse, lane_offsets, sinc,
+    DEFAULT_LANES, Fv, Phasor, blackman_from_cos, gather_impulse, lane_offsets, load_partial,
+    occupied_lanes, sinc,
 };
 use crate::dsp::resample::{MAX_HALF_TAPS, Resampler};
 use crate::waveform::Sample;
@@ -194,7 +195,8 @@ fn gather_step<const N: usize>(
     let mut carry = sinc_int_at(k, sinc_idx_step * d0);
     let mut base = d0 - 1.0;
 
-    for chunk in src.chunks_exact(N) {
+    let mut rest = src;
+    while !rest.is_empty() {
         let d_lo = Fv::<N>::splat(base) - lane_offsets::<N>();
         let s_lo = sinc_int_simd::<N>(k, d_lo * Simd::splat(sinc_idx_step));
         let mut s_hi = s_lo.rotate_elements_right::<1>();
@@ -202,30 +204,19 @@ fn gather_step<const N: usize>(
         carry = s_lo.as_array()[N - 1];
 
         let d_mid = Fv::<N>::splat(base + 0.5) - lane_offsets::<N>();
-        let inside = d_mid.abs().simd_lt(Simd::splat(p));
+        let inside = occupied_lanes::<N>(rest.len()) & d_mid.abs().simd_lt(Simd::splat(p));
         let w = inside.select(
             blackman_from_cos(ph_win.cos) * (s_hi - s_lo),
             Simd::splat(0.0),
         );
 
-        out += Fv::<N>::from_slice(chunk) * w;
+        out += load_partial::<N>(rest) * w;
         wsum += w;
         base -= N as f32;
         ph_win.rotate();
+        rest = &rest[rest.len().min(N)..];
     }
-    let (mut out, mut wsum) = (out.reduce_sum(), wsum.reduce_sum());
-
-    let done = src.len() - src.chunks_exact(N).remainder().len();
-    let mut si_hi = carry;
-    for (j, &s) in src.iter().enumerate().skip(done) {
-        let d_hi = d0 - j as f32;
-        let si_lo = sinc_int_at(k, sinc_idx_step * (d_hi - 1.0));
-        let w = blackman((d_hi - 0.5).abs() / p) * (si_hi - si_lo);
-        out += s * w;
-        wsum += w;
-        si_hi = si_lo;
-    }
-    (out, wsum)
+    (out.reduce_sum(), wsum.reduce_sum())
 }
 
 #[cfg(test)]
@@ -233,6 +224,7 @@ mod tests {
 
     use core::f64::consts::PI;
 
+    use super::super::blackman;
     use super::*;
 
     fn close(a: f64, b: f64, tol: f64) -> bool {

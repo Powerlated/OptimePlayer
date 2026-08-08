@@ -3,7 +3,9 @@
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use optime_cli::{album, bench, dse, extract, golden, match_ost, mixer_response, render};
+use optime_cli::{
+    album, bench, bench_kernel, dse, extract, golden, match_ost, mixer_response, render,
+};
 
 #[derive(Parser)]
 #[command(
@@ -25,6 +27,7 @@ enum Command {
     DumpDse(dse::Args),
     Golden(golden::Args),
     BenchResample(bench::Args),
+    BenchKernel(bench_kernel::Args),
     MixerResponse(mixer_response::Args),
 }
 
@@ -37,6 +40,7 @@ fn main() -> ExitCode {
         Command::DumpDse(a) => dse::run(a),
         Command::Golden(a) => golden::run(a),
         Command::BenchResample(a) => bench::run(a),
+        Command::BenchKernel(a) => bench_kernel::run(a),
         Command::MixerResponse(a) => mixer_response::run(a),
     }
 }

@@ -168,9 +168,23 @@ impl<R: Resampler> StreamResampler<R> {
         fill_in: &mut impl FnMut(&mut [Sample], &mut [Sample]),
     ) {
         debug_assert_eq!(out_l.len(), out_r.len());
-        for (l, r) in out_l.chunks_mut(MAX_BLOCK).zip(out_r.chunks_mut(MAX_BLOCK)) {
-            self.process_block(l, r, fill_in);
+        let mut done = 0;
+        while done < out_l.len() {
+            let mut n = MAX_BLOCK.min(out_l.len() - done);
+            while n > 1 && self.pull_for(n) > MAX_BLOCK {
+                n = n.div_ceil(2);
+            }
+            self.process_block(
+                &mut out_l[done..done + n],
+                &mut out_r[done..done + n],
+                fill_in,
+            );
+            done += n;
         }
+    }
+
+    fn pull_for(&self, n: usize) -> usize {
+        (self.last_input_needed(n) + 1 - self.loaded).max(0) as usize
     }
 
     fn process_block(

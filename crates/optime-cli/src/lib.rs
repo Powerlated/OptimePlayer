@@ -2,6 +2,7 @@
 
 pub mod album;
 pub mod bench;
+pub mod bench_kernel;
 pub mod dse;
 pub mod extract;
 pub mod golden;
@@ -9,4 +10,5 @@ pub mod match_ost;
 pub mod mixer_response;
 pub mod profile;
 pub mod render;
+pub mod resampler_roster;
 pub mod wav;

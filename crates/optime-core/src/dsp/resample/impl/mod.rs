@@ -41,6 +41,7 @@ fn sinc(x: f32) -> f32 {
     }
 }
 
+#[cfg(test)]
 fn blackman(x: f32) -> f32 {
     if x >= 1.0 {
         return 0.0;
@@ -54,8 +55,35 @@ fn blackman_from_cos<const N: usize>(c: Fv<N>) -> Fv<N> {
 }
 
 #[inline]
-fn kernel_weight(d: f32, fc: f32, p: f32) -> f32 {
-    sinc(2.0 * fc * d) * blackman(d.abs() / p)
+fn load_partial<const N: usize>(src: &[f32]) -> Fv<N> {
+    if src.len() >= N {
+        Fv::<N>::from_slice(src)
+    } else {
+        let mut lanes = [0.0f32; N];
+        lanes[..src.len()].copy_from_slice(src);
+        Simd::from_array(lanes)
+    }
+}
+
+#[inline]
+fn occupied_lanes<const N: usize>(len: usize) -> Mask<i32, N> {
+    lane_offsets::<N>().simd_lt(Simd::splat(len as f32))
+}
+
+fn sin_cos_fast(x: f32) -> (f32, f32) {
+    let x = f64::from(x);
+    let quadrants = (x * core::f64::consts::FRAC_2_PI).round();
+    let r = x - quadrants * core::f64::consts::FRAC_PI_2;
+    let z = r * r;
+    let sin = r * (1.0 + z * (-1.0 / 6.0 + z * (1.0 / 120.0 + z * (-1.0 / 5040.0))));
+    let cos = 1.0 + z * (-0.5 + z * (1.0 / 24.0 + z * (-1.0 / 720.0 + z * (1.0 / 40320.0))));
+    let (sin, cos) = match (quadrants as i64).rem_euclid(4) {
+        0 => (sin, cos),
+        1 => (cos, -sin),
+        2 => (-sin, -cos),
+        _ => (-cos, sin),
+    };
+    (sin as f32, cos as f32)
 }
 
 struct Phasor<const N: usize> {
@@ -67,16 +95,25 @@ struct Phasor<const N: usize> {
 
 impl<const N: usize> Phasor<N> {
     fn new(rate: f32, d0: f32) -> Self {
+        let (step_sin, step_cos) = sin_cos_fast(rate);
         let (mut sin, mut cos) = ([0.0; N], [0.0; N]);
-        for i in 0..N {
-            (sin[i], cos[i]) = f32::sin_cos(rate * (d0 - i as f32));
+        (sin[0], cos[0]) = sin_cos_fast(rate * d0);
+        for i in 1..N {
+            sin[i] = sin[i - 1] * step_cos - cos[i - 1] * step_sin;
+            cos[i] = cos[i - 1] * step_cos + sin[i - 1] * step_sin;
         }
-        let (step_sin, step_cos) = f32::sin_cos(rate * N as f32);
+        let (mut lane_sin, mut lane_cos) = (step_sin, step_cos);
+        for _ in 1..N {
+            (lane_sin, lane_cos) = (
+                lane_sin * step_cos + lane_cos * step_sin,
+                lane_cos * step_cos - lane_sin * step_sin,
+            );
+        }
         Self {
             sin: Simd::from_array(sin),
             cos: Simd::from_array(cos),
-            step_sin,
-            step_cos,
+            step_sin: lane_sin,
+            step_cos: lane_cos,
         }
     }
 
@@ -96,29 +133,22 @@ fn gather_impulse<const N: usize>(src: &[f32], d0: f32, fc: f32, p: f32) -> (f32
 
     let (mut out, mut wsum) = (Fv::<N>::splat(0.0), Fv::<N>::splat(0.0));
     let mut d = Fv::<N>::splat(d0) - lane_offsets::<N>();
-    for chunk in src.chunks_exact(N) {
+    let mut rest = src;
+    while !rest.is_empty() {
         let arg = d * Simd::splat(sinc_rate);
         let near_zero = arg.abs().simd_lt(Simd::splat(1e-7));
         let lobe = near_zero.select(Simd::splat(1.0), ph_sinc.sin / arg);
-        let inside = d.abs().simd_lt(Simd::splat(p));
+        let inside = occupied_lanes::<N>(rest.len()) & d.abs().simd_lt(Simd::splat(p));
         let w = inside.select(lobe * blackman_from_cos(ph_win.cos), Simd::splat(0.0));
 
-        out += Fv::<N>::from_slice(chunk) * w;
+        out += load_partial::<N>(rest) * w;
         wsum += w;
         d -= Simd::splat(N as f32);
         ph_sinc.rotate();
         ph_win.rotate();
+        rest = &rest[rest.len().min(N)..];
     }
-    let (mut out, mut wsum) = (out.reduce_sum(), wsum.reduce_sum());
-
-    let done = src.len() - src.chunks_exact(N).remainder().len();
-    for (j, &s) in src.iter().enumerate().skip(done) {
-        let d = d0 - j as f32;
-        let w = kernel_weight(d, fc, p);
-        out += s * w;
-        wsum += w;
-    }
-    (out, wsum)
+    (out.reduce_sum(), wsum.reduce_sum())
 }
 
 #[cfg(test)]
@@ -139,6 +169,49 @@ mod tests {
                 (folded - blackman(x)).abs() < 1e-6,
                 "blackman({x}): folded={folded}"
             );
+        }
+    }
+
+    #[test]
+    fn fast_sin_cos_matches_the_library() {
+        let mut worst: f64 = 0.0;
+        for i in -400_000..=400_000 {
+            let x = i as f32 / 1000.0;
+            let (s, c) = sin_cos_fast(x);
+            let (want_s, want_c) = f32::sin_cos(x);
+            worst = worst
+                .max(f64::from((s - want_s).abs()))
+                .max(f64::from((c - want_c).abs()));
+        }
+        assert!(worst < 1e-6, "worst absolute error {worst}");
+    }
+
+    fn phasor_lanes<const N: usize>(rate: f32, d0: f32) -> ([f32; N], [f32; N], f32, f32) {
+        let p = Phasor::<N>::new(rate, d0);
+        (*p.sin.as_array(), *p.cos.as_array(), p.step_sin, p.step_cos)
+    }
+
+    #[test]
+    fn phasor_seeding_matches_direct_trigonometry() {
+        for rate in [0.03f32, PI / 16.0, PI, 2.0 * PI * 0.37, 5.9] {
+            for d0 in [0.0f32, 0.5, 7.25, 63.9] {
+                let (sin4, cos4, ss4, sc4) = phasor_lanes::<4>(rate, d0);
+                let (sin8, cos8, ss8, sc8) = phasor_lanes::<8>(rate, d0);
+                for (i, (&s, &c)) in sin8.iter().zip(&cos8).enumerate() {
+                    let (want_s, want_c) = f32::sin_cos(rate * (d0 - i as f32));
+                    assert!((s - want_s).abs() < 1e-4, "sin lane {i}: {s} vs {want_s}");
+                    assert!((c - want_c).abs() < 1e-4, "cos lane {i}: {c} vs {want_c}");
+                    if i < 4 {
+                        assert!((sin4[i] - want_s).abs() < 1e-4);
+                        assert!((cos4[i] - want_c).abs() < 1e-4);
+                    }
+                }
+                for (lanes, ss, sc) in [(4.0, ss4, sc4), (8.0, ss8, sc8)] {
+                    let (want_s, want_c) = f32::sin_cos(rate * lanes);
+                    assert!((ss - want_s).abs() < 1e-4, "step sin: {ss} vs {want_s}");
+                    assert!((sc - want_c).abs() < 1e-4, "step cos: {sc} vs {want_c}");
+                }
+            }
         }
     }
 

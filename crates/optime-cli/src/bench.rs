@@ -11,9 +11,10 @@ use std::time::Instant;
 use clap::Args as ClapArgs;
 use optime_core::{
     InstrumentResampleChoice, InstrumentResampleMode, InstrumentResampleSettings,
-    PerDeviceSettings, PopSmoothingEdge, ResampleImplSimd, ResampleImplSimdClosedForm, Resampler,
-    SoundData, SynthController, load_all,
+    PerDeviceSettings, PopSmoothingEdge, Resampler, SoundData, SynthController, load_all,
 };
+
+use crate::resampler_roster::{self, ResamplerVisitor};
 
 const SAMPLE_RATE: f64 = 48_000.0;
 const CHUNK_FRAMES: u64 = 1024;
@@ -64,24 +65,30 @@ impl<R: Resampler> Contender for Rendered<R> {
     }
 }
 
-fn contender<R: Resampler + 'static>(
-    implementation: &'static str,
+struct Build<'a> {
     mode: &'static str,
     instrument_resample: InstrumentResampleSettings,
-    data: &dyn SoundData,
+    data: &'a dyn SoundData,
     sseq_id: u32,
-) -> Option<Box<dyn Contender>> {
-    let controller = SynthController::<R>::with_resampler(SAMPLE_RATE, data, sseq_id)?;
-    Some(Box::new(Rendered {
-        implementation,
-        mode,
-        controller,
-        config: PerDeviceSettings {
-            instrument_resample,
-            ..PerDeviceSettings::neutral()
-        },
-        buf: vec![0.0f32; 2 * CHUNK_FRAMES as usize],
-    }))
+}
+
+impl ResamplerVisitor for Build<'_> {
+    type Output = Option<Box<dyn Contender>>;
+
+    fn visit<R: Resampler + 'static>(&mut self, name: &'static str) -> Option<Box<dyn Contender>> {
+        let controller =
+            SynthController::<R>::with_resampler(SAMPLE_RATE, self.data, self.sseq_id)?;
+        Some(Box::new(Rendered {
+            implementation: name,
+            mode: self.mode,
+            controller,
+            config: PerDeviceSettings {
+                instrument_resample: self.instrument_resample.clone(),
+                ..PerDeviceSettings::neutral()
+            },
+            buf: vec![0.0f32; 2 * CHUNK_FRAMES as usize],
+        }))
+    }
 }
 
 fn settings(choice: InstrumentResampleChoice, sinc_taps: usize) -> InstrumentResampleSettings {
@@ -123,31 +130,18 @@ pub fn run(args: Args) -> ExitCode {
     let sinc_taps = half_taps * 2;
     let clean = settings(InstrumentResampleChoice::SincSampleNyquist, sinc_taps);
     let crunch = settings(InstrumentResampleChoice::SincOutputNyquist, sinc_taps);
-    let mut contenders: Vec<Box<dyn Contender>> = [
-        contender::<ResampleImplSimd<4>>("simd x4", "clean", clean.clone(), data, sseq_id),
-        contender::<ResampleImplSimd<8>>("simd x8", "clean", clean.clone(), data, sseq_id),
-        contender::<ResampleImplSimdClosedForm<4>>(
-            "closed x4",
-            "clean",
-            clean.clone(),
-            data,
-            sseq_id,
-        ),
-        contender::<ResampleImplSimdClosedForm<8>>("closed x8", "clean", clean, data, sseq_id),
-        contender::<ResampleImplSimd<4>>("simd x4", "crunch", crunch.clone(), data, sseq_id),
-        contender::<ResampleImplSimd<8>>("simd x8", "crunch", crunch.clone(), data, sseq_id),
-        contender::<ResampleImplSimdClosedForm<4>>(
-            "closed x4",
-            "crunch",
-            crunch.clone(),
-            data,
-            sseq_id,
-        ),
-        contender::<ResampleImplSimdClosedForm<8>>("closed x8", "crunch", crunch, data, sseq_id),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let mut contenders: Vec<Box<dyn Contender>> = [("clean", clean), ("crunch", crunch)]
+        .into_iter()
+        .flat_map(|(mode, instrument_resample)| {
+            resampler_roster::walk(&mut Build {
+                mode,
+                instrument_resample,
+                data,
+                sseq_id,
+            })
+        })
+        .flatten()
+        .collect();
 
     let chunks_per_round = ((SAMPLE_RATE * round_seconds) as u64).div_ceil(CHUNK_FRAMES);
     let rendered_seconds = (chunks_per_round * CHUNK_FRAMES) as f64 / SAMPLE_RATE;
