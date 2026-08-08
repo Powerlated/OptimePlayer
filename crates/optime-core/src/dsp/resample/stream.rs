@@ -27,6 +27,8 @@ pub struct StreamResampler<R: Resampler = DefaultResampler> {
     pos_int: i64,
     pos_frac: f32,
     loaded: i64,
+    state_l: R::State,
+    state_r: R::State,
     ring_l: Vec<f32>,
     ring_r: Vec<f32>,
 }
@@ -54,6 +56,8 @@ impl<R: Resampler> StreamResampler<R> {
             pos_int: 0,
             pos_frac: 0.0,
             loaded: 0,
+            state_l: R::State::default(),
+            state_r: R::State::default(),
             ring_l: vec![0.0; ring],
             ring_r: vec![0.0; ring],
         }
@@ -97,6 +101,8 @@ impl<R: Resampler> StreamResampler<R> {
         self.pos_int = 0;
         self.pos_frac = 0.0;
         self.loaded = 0;
+        self.state_l = R::State::default();
+        self.state_r = R::State::default();
         self.ring_l.fill(0.0);
         self.ring_r.fill(0.0);
     }
@@ -238,8 +244,22 @@ impl<R: Resampler> StreamResampler<R> {
                         *sl = Self::at(&self.ring_l, k);
                         *sr = Self::at(&self.ring_r, k);
                     }
-                    *l = R::resample(&tables, &buf_l[..n], syn_pos, fc, step_mode);
-                    *r = R::resample(&tables, &buf_r[..n], syn_pos, fc, step_mode);
+                    *l = R::resample(
+                        &tables,
+                        &mut self.state_l,
+                        &buf_l[..n],
+                        syn_pos,
+                        fc,
+                        step_mode,
+                    );
+                    *r = R::resample(
+                        &tables,
+                        &mut self.state_r,
+                        &buf_r[..n],
+                        syn_pos,
+                        fc,
+                        step_mode,
+                    );
                     self.advance();
                 }
             }
@@ -257,6 +277,7 @@ mod tests {
 
     impl Resampler for CenterTapOnly {
         type Tables = usize;
+        type State = ();
 
         fn tables(half_taps: usize) -> usize {
             half_taps.clamp(1, MAX_HALF_TAPS)
@@ -271,7 +292,14 @@ mod tests {
             ((pos - p).floor() as i64, (pos + p).ceil() as i64)
         }
 
-        fn resample(tables: &usize, src: &[f32], pos: f32, _: f32, _: bool) -> Sample {
+        fn resample(
+            tables: &usize,
+            _state: &mut (),
+            src: &[f32],
+            pos: f32,
+            _: f32,
+            _: bool,
+        ) -> Sample {
             let (k_lo, _) = Self::tap_window(tables, pos);
             src[(pos.round() as i64 - k_lo) as usize]
         }

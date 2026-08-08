@@ -91,6 +91,7 @@ fn blackman_f64(x: f64) -> f32 {
 
 impl<const LANES: usize> Resampler for ResampleImplPolyphase<LANES> {
     type Tables = Tables;
+    type State = ();
 
     fn tables(half_taps: usize) -> Tables {
         let half_taps = half_taps.clamp(1, MAX_HALF_TAPS);
@@ -111,9 +112,16 @@ impl<const LANES: usize> Resampler for ResampleImplPolyphase<LANES> {
         Tabulated::tap_window(&tables.tabulated, pos)
     }
 
-    fn resample(tables: &Tables, src: &[f32], pos: f32, fc: f32, step_mode: bool) -> Sample {
+    fn resample(
+        tables: &Tables,
+        state: &mut (),
+        src: &[f32],
+        pos: f32,
+        fc: f32,
+        step_mode: bool,
+    ) -> Sample {
         if step_mode || fc < 0.5 {
-            return Tabulated::resample(&tables.tabulated, src, pos, fc, step_mode);
+            return Tabulated::resample(&tables.tabulated, state, src, pos, fc, step_mode);
         }
         let bank = tables.bank;
         let phase = (pos - pos.floor()) * bank.phases as f32;
@@ -226,8 +234,8 @@ mod tests {
                     .map(|k| data[k.rem_euclid(data.len() as i64) as usize])
                     .collect();
                 assert_eq!(
-                    ResampleImplPolyphase::<4>::resample(&banked, &src, pos, fc, false),
-                    ResampleImplSimd::<4>::resample(&tabulated, &src, pos, fc, false)
+                    ResampleImplPolyphase::<4>::resample(&banked, &mut (), &src, pos, fc, false),
+                    ResampleImplSimd::<4>::resample(&tabulated, &mut (), &src, pos, fc, false)
                 );
             }
         }

@@ -37,6 +37,7 @@ pub struct Tables {
 
 impl<const LANES: usize> Resampler for ResampleImplSimd<LANES> {
     type Tables = Tables;
+    type State = ();
 
     fn tables(half_taps: usize) -> Tables {
         let _ = kernels();
@@ -56,7 +57,14 @@ impl<const LANES: usize> Resampler for ResampleImplSimd<LANES> {
         ((pos - p).floor() as i64, (pos + p).ceil() as i64)
     }
 
-    fn resample(tables: &Tables, src: &[f32], pos: f32, fc: f32, step_mode: bool) -> Sample {
+    fn resample(
+        tables: &Tables,
+        _state: &mut (),
+        src: &[f32],
+        pos: f32,
+        fc: f32,
+        step_mode: bool,
+    ) -> Sample {
         let k = kernels();
         let (k_lo, k_hi) = Self::tap_window(tables, pos);
         debug_assert_eq!(
@@ -312,7 +320,12 @@ mod tests {
             for pos in [3.0, 7.35, 20.7] {
                 let src = staged(&tables, pos, |_| 1.0);
                 let out = f64::from(ResampleImplSimd::<4>::resample(
-                    &tables, &src, pos as f32, fc as f32, true,
+                    &tables,
+                    &mut (),
+                    &src,
+                    pos as f32,
+                    fc as f32,
+                    true,
                 ));
                 assert!(close(out, 1.0, 1e-9), "DC at fc={fc}, pos={pos}: {out}");
             }
@@ -327,6 +340,7 @@ mod tests {
         let at = |pos: f64| {
             f64::from(ResampleImplSimd::<4>::resample(
                 &tables,
+                &mut (),
                 &staged(&tables, pos, step),
                 pos as f32,
                 fc as f32,
@@ -356,7 +370,12 @@ mod tests {
         let pos = 12.37;
         let src = staged(&tables, pos, |_| 1.0);
         let out = f64::from(ResampleImplSimd::<4>::resample(
-            &tables, &src, pos as f32, 0.4, false,
+            &tables,
+            &mut (),
+            &src,
+            pos as f32,
+            0.4,
+            false,
         ));
         assert!(close(out, 1.0, 1e-6), "DC gain = {out}");
     }
@@ -372,6 +391,7 @@ mod tests {
             let ideal = (2.0 * PI * f0 * pos).cos();
             let out = f64::from(ResampleImplSimd::<4>::resample(
                 &tables,
+                &mut (),
                 &staged(&tables, pos, get),
                 pos as f32,
                 fc as f32,

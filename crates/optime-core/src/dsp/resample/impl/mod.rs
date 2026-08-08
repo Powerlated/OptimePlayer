@@ -15,10 +15,12 @@ use std::simd::prelude::*;
 pub mod resample_impl_00_simd;
 pub mod resample_impl_01_closed_form;
 pub mod resample_impl_02_polyphase;
+pub mod resample_impl_03_iir;
 
 pub use resample_impl_00_simd::ResampleImplSimd;
 pub use resample_impl_01_closed_form::ResampleImplSimdClosedForm;
 pub use resample_impl_02_polyphase::ResampleImplPolyphase;
+pub use resample_impl_03_iir::ResampleImplIir;
 
 pub const DEFAULT_LANES: usize = 4;
 
@@ -237,7 +239,14 @@ mod tests {
                 let window: Vec<f32> = (lo..=hi)
                     .map(|k| source[k.rem_euclid(SOURCE_LEN as i64) as usize])
                     .collect();
-                f64::from(R::resample(&tables, &window, pos, fc, false))
+                f64::from(R::resample(
+                    &tables,
+                    &mut R::State::default(),
+                    &window,
+                    pos,
+                    fc,
+                    false,
+                ))
             })
             .collect()
     }
@@ -294,7 +303,14 @@ mod tests {
             let window: Vec<f32> = (lo..=hi)
                 .map(|k| source[k.rem_euclid(SOURCE_LEN as i64) as usize])
                 .collect();
-            let got = f64::from(R::resample(&tables, &window, pos, fc, true));
+            let got = f64::from(R::resample(
+                &tables,
+                &mut R::State::default(),
+                &window,
+                pos,
+                fc,
+                true,
+            ));
             let want = additive_square(f64::from(pos), f64::from(fc));
             reference += want * want;
             residual += (got - want) * (got - want);
@@ -308,7 +324,7 @@ mod tests {
 
     type SnrMeasure = fn(usize, f64) -> f64;
 
-    const IMPLEMENTATIONS: [(&str, SnrMeasure, SnrMeasure); 6] = [
+    const LINEAR_PHASE: [(&str, SnrMeasure, SnrMeasure); 6] = [
         (
             "simd/4",
             snr_db::<ResampleImplSimd<4>>,
@@ -341,11 +357,54 @@ mod tests {
         ),
     ];
 
+    const EVERY: [(&str, SnrMeasure, SpectrumMeasure); 8] = [
+        (
+            "simd/4",
+            snr_db::<ResampleImplSimd<4>>,
+            step_spectrum::<ResampleImplSimd<4>>,
+        ),
+        (
+            "simd/8",
+            snr_db::<ResampleImplSimd<8>>,
+            step_spectrum::<ResampleImplSimd<8>>,
+        ),
+        (
+            "closed/4",
+            snr_db::<ResampleImplSimdClosedForm<4>>,
+            step_spectrum::<ResampleImplSimdClosedForm<4>>,
+        ),
+        (
+            "closed/8",
+            snr_db::<ResampleImplSimdClosedForm<8>>,
+            step_spectrum::<ResampleImplSimdClosedForm<8>>,
+        ),
+        (
+            "poly/4",
+            snr_db::<ResampleImplPolyphase<4>>,
+            step_spectrum::<ResampleImplPolyphase<4>>,
+        ),
+        (
+            "poly/8",
+            snr_db::<ResampleImplPolyphase<8>>,
+            step_spectrum::<ResampleImplPolyphase<8>>,
+        ),
+        (
+            "iir/4",
+            snr_db::<ResampleImplIir<4>>,
+            step_spectrum::<ResampleImplIir<4>>,
+        ),
+        (
+            "iir/8",
+            snr_db::<ResampleImplIir<8>>,
+            step_spectrum::<ResampleImplIir<8>>,
+        ),
+    ];
+
     #[test]
     fn every_implementation_resamples_above_100_db_snr() {
         for ratio in RATIOS {
             for half_taps in [MIN_HALF_TAPS_FOR_CONTRACT, 32, 64] {
-                for (name, impulse, _) in IMPLEMENTATIONS {
+                for (name, impulse, _) in EVERY {
                     let snr = impulse(half_taps, ratio);
                     assert!(
                         snr > CONTRACT_SNR_DB,
@@ -365,13 +424,102 @@ mod tests {
     fn step_mode_renders_a_band_limited_square_wave() {
         for ratio in STEP_RATIOS {
             for half_taps in [MIN_HALF_TAPS_FOR_CONTRACT, 32, 64] {
-                for (name, _, step) in IMPLEMENTATIONS {
+                for (name, _, step) in LINEAR_PHASE {
                     let snr = step(half_taps, ratio);
                     assert!(
                         snr > STEP_CONTRACT_SNR_DB,
                         "{name}: half_taps={half_taps} ratio={ratio} gave {snr:.1} dB"
                     );
                 }
+            }
+        }
+    }
+
+    const STEP_SPECTRUM_CASES: [(f64, usize); 7] = [
+        (0.25, 2),
+        (11.0 / 64.0, 2),
+        (0.375, 2),
+        (0.4375, 2),
+        (0.6875, 2),
+        (1.375, 8),
+        (2.75, 16),
+    ];
+    const SPECTRUM_WARMUP: usize = 512;
+    const HARMONIC_TOLERANCE_DB: f64 = 0.75;
+    const STRAY_FLOOR_DB: f64 = -35.0;
+
+    type SpectrumMeasure = fn(usize, f64, usize) -> (Vec<f64>, f64);
+
+    fn square_source(period: usize) -> Vec<f32> {
+        (0..SOURCE_LEN)
+            .map(|k| if k % period < period / 2 { 1.0 } else { -1.0 })
+            .collect()
+    }
+
+    fn step_spectrum<R: Resampler>(half_taps: usize, ratio: f64, period: usize) -> (Vec<f64>, f64) {
+        let source = square_source(period);
+        let tables = R::tables(half_taps);
+        let mut state = R::State::default();
+        let fc = 0.5 / ratio as f32;
+
+        let rendered: Vec<f64> = (0..SPECTRUM_WARMUP + OUTPUT_LEN)
+            .map(|n| {
+                let pos = (half_taps as f64 + (n as f64 * ratio) % SOURCE_LEN as f64) as f32;
+                let (lo, hi) = R::tap_window(&tables, pos);
+                let window: Vec<f32> = (lo..=hi)
+                    .map(|k| source[k.rem_euclid(SOURCE_LEN as i64) as usize])
+                    .collect();
+                f64::from(R::resample(&tables, &mut state, &window, pos, fc, true))
+            })
+            .collect();
+        let settled = &rendered[SPECTRUM_WARMUP..];
+
+        let fundamental = ratio / period as f64;
+        let mut residual: Vec<f64> = settled.to_vec();
+        let mut amplitudes = Vec::new();
+        let mut harmonic = 1;
+        while harmonic as f64 * fundamental < 0.5 {
+            let cycles = harmonic as f64 * fundamental;
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (n, &x) in settled.iter().enumerate() {
+                let phase = std::f64::consts::TAU * cycles * n as f64;
+                re += x * phase.cos();
+                im += x * phase.sin();
+            }
+            let scale = 2.0 / settled.len() as f64;
+            let (re, im) = (re * scale, im * scale);
+            amplitudes.push((re * re + im * im).sqrt());
+            for (n, slot) in residual.iter_mut().enumerate() {
+                let phase = std::f64::consts::TAU * cycles * n as f64;
+                *slot -= re * phase.cos() + im * phase.sin();
+            }
+            harmonic += 2;
+        }
+
+        let signal: f64 = amplitudes.iter().map(|a| a * a).sum::<f64>().sqrt();
+        let stray = (residual.iter().map(|x| x * x).sum::<f64>() / residual.len() as f64).sqrt();
+        (amplitudes, 20.0 * (stray * 2f64.sqrt() / signal).log10())
+    }
+
+    #[test]
+    fn every_implementation_passes_the_squares_harmonics_and_rejects_the_rest() {
+        for (ratio, period) in STEP_SPECTRUM_CASES {
+            for (name, _, spectrum) in EVERY {
+                let (got, stray) = spectrum(16, ratio, period);
+                for (index, &amplitude) in got.iter().enumerate() {
+                    let harmonic = 2 * index + 1;
+                    let want = 4.0 / (std::f64::consts::PI * harmonic as f64);
+                    let db = 20.0 * (amplitude.max(1e-12) / want).log10();
+                    assert!(
+                        db.abs() < HARMONIC_TOLERANCE_DB,
+                        "{name}: ratio={ratio} harmonic {harmonic} off by {db:.2} dB"
+                    );
+                }
+                let source_fits_the_output = ratio <= 1.0;
+                assert!(
+                    stray < STRAY_FLOOR_DB || !source_fits_the_output,
+                    "{name}: ratio={ratio} strays {stray:.1} dB"
+                );
             }
         }
     }

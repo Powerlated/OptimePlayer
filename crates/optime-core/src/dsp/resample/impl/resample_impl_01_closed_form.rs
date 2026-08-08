@@ -63,6 +63,7 @@ pub struct Tables {
 
 impl<const LANES: usize> Resampler for ResampleImplSimdClosedForm<LANES> {
     type Tables = Tables;
+    type State = ();
 
     fn tables(half_taps: usize) -> Tables {
         Tables {
@@ -81,7 +82,14 @@ impl<const LANES: usize> Resampler for ResampleImplSimdClosedForm<LANES> {
         ((pos - p).floor() as i64, (pos + p).ceil() as i64)
     }
 
-    fn resample(tables: &Tables, src: &[f32], pos: f32, fc: f32, step_mode: bool) -> Sample {
+    fn resample(
+        tables: &Tables,
+        _state: &mut (),
+        src: &[f32],
+        pos: f32,
+        fc: f32,
+        step_mode: bool,
+    ) -> Sample {
         let (k_lo, k_hi) = Self::tap_window(tables, pos);
         debug_assert_eq!(
             src.len() as i64,
@@ -274,8 +282,14 @@ mod tests {
                     let src: Vec<f32> = (lo..=hi)
                         .map(|k| data[k.rem_euclid(data.len() as i64) as usize])
                         .collect();
-                    let got =
-                        ResampleImplSimdClosedForm::<4>::resample(&tables, &src, pos, fc, true);
+                    let got = ResampleImplSimdClosedForm::<4>::resample(
+                        &tables,
+                        &mut (),
+                        &src,
+                        pos,
+                        fc,
+                        true,
+                    );
                     let want = integrated_rect_reference(
                         &src,
                         f64::from(pos - lo as f32),
@@ -326,8 +340,9 @@ mod tests {
             let src: Vec<f32> = (lo..=hi)
                 .map(|k| data[k.rem_euclid(data.len() as i64) as usize])
                 .collect();
-            let a = ResampleImplSimd::<4>::resample(&one, &src, pos, fc, step_mode);
-            let b = ResampleImplSimdClosedForm::<4>::resample(&two, &src, pos, fc, step_mode);
+            let a = ResampleImplSimd::<4>::resample(&one, &mut (), &src, pos, fc, step_mode);
+            let b =
+                ResampleImplSimdClosedForm::<4>::resample(&two, &mut (), &src, pos, fc, step_mode);
             worst = worst.max((a - b).abs());
         }
         worst

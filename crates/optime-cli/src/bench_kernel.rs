@@ -98,12 +98,14 @@ impl<R: Resampler> Contender for Kernel<R> {
         let half_taps = R::half_taps(&self.tables) as f32;
         let span = self.source.len() as f32 - 2.0 * half_taps - 4.0;
         let mut pos = half_taps + 1.0;
+        let mut state = R::State::default();
         let mut acc = 0.0f64;
         for _ in 0..samples {
             let (lo, hi) = R::tap_window(&self.tables, pos);
             let window = &self.source[lo as usize..=hi as usize];
             acc += f64::from(R::resample(
                 &self.tables,
+                &mut state,
                 window,
                 pos,
                 fc,

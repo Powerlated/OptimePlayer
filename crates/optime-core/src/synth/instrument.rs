@@ -3,14 +3,16 @@
 use std::sync::Arc;
 
 use crate::devices::VoicePitch;
-use crate::dsp::resample::{EffectiveGather, GatherSource, Resampler, effective_gather, sinc_fc};
+use crate::dsp::resample::{
+    DefaultResampler, EffectiveGather, GatherSource, Resampler, effective_gather, sinc_fc,
+};
 use crate::dsp::slewer::{Direction, Slewer};
 use crate::synth_controller::{DEFAULT_POP_SLEW_SECONDS, PopSmoothing};
 use crate::tuning::{TuningSystem, midi_note_to_hz};
 use crate::waveform::{InstrumentResampleMode, Sample, Waveform};
 
 #[derive(Clone)]
-pub struct WaveformInstrument {
+pub struct WaveformInstrument<R: Resampler = DefaultResampler> {
     inv_sample_rate: f64,
     pub waveform: Arc<Waveform>,
     pub pitch: VoicePitch,
@@ -26,9 +28,10 @@ pub struct WaveformInstrument {
     freq_ratio: f64,
     pub output: Sample,
     pub(super) stopped_at: Option<usize>,
+    resample_state: R::State,
 }
 
-impl WaveformInstrument {
+impl<R: Resampler> WaveformInstrument<R> {
     pub fn new(sample_rate: f64, waveform: Arc<Waveform>) -> Self {
         let pitch = VoicePitch::Midi {
             note: 0.0,
@@ -50,10 +53,12 @@ impl WaveformInstrument {
             freq_ratio: 0.0,
             output: 0.0,
             stopped_at: None,
+            resample_state: R::State::default(),
         }
     }
 
     pub fn begin_note(&mut self, volume: Sample, pops: PopSmoothing) {
+        self.resample_state = R::State::default();
         self.volume = volume;
         self.pop_slew_seconds = pops.slew_seconds;
         self.refresh_pop_step();
@@ -82,7 +87,7 @@ impl WaveformInstrument {
         self.refresh_pop_step();
     }
 
-    pub fn advance<R: Resampler>(
+    pub fn advance(
         &mut self,
         mode: InstrumentResampleMode,
         tables: Option<&R::Tables>,
@@ -158,7 +163,7 @@ impl WaveformInstrument {
                         loop_len,
                         wrapped: self.wrapped,
                     };
-                    R::gather(&src, tbl, pos, fc, step_mode)
+                    R::gather(&src, tbl, &mut self.resample_state, pos, fc, step_mode)
                 } else {
                     get(pos.floor() as i64)
                 }
@@ -168,7 +173,7 @@ impl WaveformInstrument {
         self.output = result * gain;
     }
 
-    pub fn advance_block<R: Resampler>(
+    pub fn advance_block(
         &mut self,
         mode: InstrumentResampleMode,
         tables: Option<&R::Tables>,
@@ -187,7 +192,7 @@ impl WaveformInstrument {
         else {
             for (i, slot) in out.iter_mut().enumerate() {
                 let was_playing = self.playing;
-                self.advance::<R>(mode, tables, pops);
+                self.advance(mode, tables, pops);
                 if was_playing && !self.playing {
                     self.stopped_at.get_or_insert(i);
                 }
@@ -263,7 +268,7 @@ impl WaveformInstrument {
                 loop_len,
                 wrapped,
             };
-            let result = R::gather(&src, tbl, pos, fc, step_mode);
+            let result = R::gather(&src, tbl, &mut self.resample_state, pos, fc, step_mode);
             last = result * g;
             *slot += last;
         }
@@ -338,10 +343,10 @@ mod tests {
     #[test]
     fn set_sample_rate_rescales_playback_step() {
         let waveform = Arc::new(Waveform::new(vec![0.0; 4096], 440.0, 22_050.0, false, 0));
-        let mut instr = WaveformInstrument::new(44_100.0, waveform);
+        let mut instr = WaveformInstrument::<ResampleImplSimd>::new(44_100.0, waveform);
         instr.set_pitch(VoicePitch::DataRateHz(22_050.0), TuningSystem::Equal);
 
-        instr.advance::<ResampleImplSimd>(
+        instr.advance(
             InstrumentResampleMode::NearestNeighbor,
             None,
             PopSmoothing::default(),
@@ -353,7 +358,7 @@ mod tests {
         );
 
         instr.set_sample_rate(22_050.0);
-        instr.advance::<ResampleImplSimd>(
+        instr.advance(
             InstrumentResampleMode::NearestNeighbor,
             None,
             PopSmoothing::default(),
@@ -372,7 +377,7 @@ mod tests {
         tables: Option<&<ResampleImplSimd as Resampler>::Tables>,
         n: usize,
     ) -> Vec<Sample> {
-        let mut instr = WaveformInstrument::new(out_rate, waveform);
+        let mut instr = WaveformInstrument::<ResampleImplSimd>::new(out_rate, waveform);
         instr.set_pitch(
             VoicePitch::Midi {
                 note: 69.0,
@@ -384,7 +389,7 @@ mod tests {
         instr.playing = true;
         (0..n)
             .map(|_| {
-                instr.advance::<ResampleImplSimd>(mode, tables, PopSmoothing::default());
+                instr.advance(mode, tables, PopSmoothing::default());
                 instr.output
             })
             .collect()
@@ -599,7 +604,7 @@ mod tests {
             sample_pitch_hz: 440.0,
         };
 
-        let mut instr = WaveformInstrument::new(out_rate, waveform.clone());
+        let mut instr = WaveformInstrument::<ResampleImplSimd>::new(out_rate, waveform.clone());
         instr.set_pitch(pitch, TuningSystem::Equal);
         instr.playing = true;
         let psg_on = PopSmoothing {
@@ -608,7 +613,7 @@ mod tests {
             ..PopSmoothing::default()
         };
         instr.begin_note(1.0, psg_on);
-        instr.advance::<ResampleImplSimd>(InstrumentResampleMode::NearestNeighbor, None, psg_on);
+        instr.advance(InstrumentResampleMode::NearestNeighbor, None, psg_on);
         assert!(
             instr.output < 0.05,
             "smoothed start must ramp from silence, got {}",
@@ -617,11 +622,7 @@ mod tests {
         let mut prev = instr.output;
         let mut reached = false;
         for _ in 0..1024 {
-            instr.advance::<ResampleImplSimd>(
-                InstrumentResampleMode::NearestNeighbor,
-                None,
-                psg_on,
-            );
+            instr.advance(InstrumentResampleMode::NearestNeighbor, None, psg_on);
             let delta = instr.output - prev;
             assert!((-1e-12..0.02).contains(&delta), "ramp step {delta}");
             prev = instr.output;
@@ -637,20 +638,16 @@ mod tests {
             if !instr.playing {
                 break;
             }
-            instr.advance::<ResampleImplSimd>(
-                InstrumentResampleMode::NearestNeighbor,
-                None,
-                psg_on,
-            );
+            instr.advance(InstrumentResampleMode::NearestNeighbor, None, psg_on);
         }
         assert!(!instr.playing, "fade-out must stop the voice");
         assert_eq!(instr.output, 0.0);
 
-        let mut hard = WaveformInstrument::new(out_rate, waveform);
+        let mut hard = WaveformInstrument::<ResampleImplSimd>::new(out_rate, waveform);
         hard.set_pitch(pitch, TuningSystem::Equal);
         hard.playing = true;
         hard.begin_note(1.0, PopSmoothing::default());
-        hard.advance::<ResampleImplSimd>(
+        hard.advance(
             InstrumentResampleMode::NearestNeighbor,
             None,
             PopSmoothing::default(),
@@ -680,11 +677,11 @@ mod tests {
                 direction,
                 ..PopSmoothing::default()
             };
-            let mut instr = WaveformInstrument::new(out_rate, waveform.clone());
+            let mut instr = WaveformInstrument::<ResampleImplSimd>::new(out_rate, waveform.clone());
             instr.set_pitch(pitch, TuningSystem::Equal);
             instr.playing = true;
             instr.begin_note(1.0, pops);
-            instr.advance::<ResampleImplSimd>(mode, None, pops);
+            instr.advance(mode, None, pops);
             (instr, pops)
         };
 
@@ -697,7 +694,7 @@ mod tests {
         attack.volume = 1.0;
         attack.gain.set(1.0);
         attack.begin_fade_out();
-        attack.advance::<ResampleImplSimd>(mode, None, pops);
+        attack.advance(mode, None, pops);
         assert_eq!(attack.output, 0.0, "an attack-only cut must be instant");
         assert!(!attack.playing, "the instant cut must stop the voice");
 
@@ -708,7 +705,7 @@ mod tests {
             release.output
         );
         release.begin_fade_out();
-        release.advance::<ResampleImplSimd>(mode, None, pops);
+        release.advance(mode, None, pops);
         assert!(
             release.output > 0.9 && release.playing,
             "a release-only fade-out must ramp, got {}",

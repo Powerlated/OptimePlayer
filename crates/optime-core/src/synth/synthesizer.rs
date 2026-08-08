@@ -19,7 +19,7 @@ const PAN_SLEW_SECONDS: f64 = 0.01;
 
 pub struct WaveformSynthesizer<R: Resampler = DefaultResampler> {
     sample_rate: f64,
-    instrs: Vec<WaveformInstrument>,
+    instrs: Vec<WaveformInstrument<R>>,
     active_instrs: Vec<usize>,
     playing_index: usize,
     pub val_l: Sample,
@@ -120,12 +120,12 @@ impl<R: Resampler> WaveformSynthesizer<R> {
     }
 
     #[inline]
-    pub fn instr(&self, index: usize) -> &WaveformInstrument {
+    pub fn instr(&self, index: usize) -> &WaveformInstrument<R> {
         &self.instrs[index]
     }
 
     #[inline]
-    pub fn instr_mut(&mut self, index: usize) -> &mut WaveformInstrument {
+    pub fn instr_mut(&mut self, index: usize) -> &mut WaveformInstrument<R> {
         &mut self.instrs[index]
     }
 
@@ -228,7 +228,7 @@ impl<R: Resampler> WaveformSynthesizer<R> {
 
         let mut mono: [Sample; MAX_BLOCK] = [0.0; MAX_BLOCK];
         for &i in &self.active_instrs {
-            self.instrs[i].advance_block::<R>(resample, tables, pop_smoothing, &mut mono[..n]);
+            self.instrs[i].advance_block(resample, tables, pop_smoothing, &mut mono[..n]);
         }
         let quiet_at = self.quiet_at();
         self.prune_stopped();

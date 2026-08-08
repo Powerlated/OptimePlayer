@@ -2825,11 +2825,7 @@ impl OptimeApp {
             "instrument-to-mixer-resampling",
             &mut d.instrument_resample.choice,
         );
-        if matches!(
-            d.instrument_resample.choice,
-            InstrumentResampleChoice::SincOutputNyquist
-                | InstrumentResampleChoice::SincSampleNyquist
-        ) {
+        if d.instrument_resample.choice == InstrumentResampleChoice::SincSampleNyquist {
             sinc_taps_slider(ui, &mut d.instrument_resample.sinc_taps);
         }
         if d.instrument_resample.choice == InstrumentResampleChoice::SincOutputNyquist {
@@ -2919,11 +2915,7 @@ impl OptimeApp {
         let psg_crunch_compensation = &mut d.psg_crunch_compensation;
         ui.add_enabled_ui(use_mixer, |ui| {
             resample_combo(ui, "mixer-to-output-resampling", &mut ms.choice);
-            if matches!(
-                ms.choice,
-                InstrumentResampleChoice::SincOutputNyquist
-                    | InstrumentResampleChoice::SincSampleNyquist
-            ) {
+            if ms.choice == InstrumentResampleChoice::SincSampleNyquist {
                 sinc_taps_slider(ui, &mut ms.sinc_taps);
             }
             if ms.choice == InstrumentResampleChoice::SincOutputNyquist {

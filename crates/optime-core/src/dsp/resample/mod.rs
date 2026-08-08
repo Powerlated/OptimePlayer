@@ -5,7 +5,9 @@
 //! compile time and no dyn dispatch or runtime branch reaches the hot path.
 //!
 //! The provided `gather` is why an implementation writes only a kernel: it owns the awkward part,
-//! turning a `GatherSource` (a waveform plus its loop geometry) into that contiguous slice. Inside
+//! turning a `GatherSource` (a waveform plus its loop geometry) into that contiguous slice. `State`
+//! is what an implementation carries between consecutive output samples of one voice; a kernel that
+//! reads a window and nothing else sets it to `()`, and a recursive one keeps its filter there. Inside
 //! the waveform with no wrap in play it borrows the slice directly; otherwise it copies the window
 //! into a stack buffer, following the loop backwards and forwards so taps that fall off either end
 //! read the looped signal rather than silence, and zero-filling only where there is genuinely
@@ -15,13 +17,15 @@ pub mod r#impl;
 pub mod mode;
 pub mod stream;
 
-pub use r#impl::{ResampleImplPolyphase, ResampleImplSimd, ResampleImplSimdClosedForm};
+pub use r#impl::{
+    ResampleImplIir, ResampleImplPolyphase, ResampleImplSimd, ResampleImplSimdClosedForm,
+};
 pub(crate) use mode::{EffectiveGather, effective_gather, mode_half_taps, sinc_fc};
 pub use stream::StreamResampler;
 
 use crate::waveform::Sample;
 
-pub type DefaultResampler = ResampleImplPolyphase<8>;
+pub type DefaultResampler = ResampleImplIir<8>;
 
 pub const MAX_HALF_TAPS: usize = 64;
 pub(crate) const GATHER_BUF_LEN: usize = 2 * MAX_HALF_TAPS + 2;
@@ -36,6 +40,7 @@ pub struct GatherSource<'a> {
 
 pub trait Resampler {
     type Tables: Clone;
+    type State: Default + Clone;
 
     fn tables(half_taps: usize) -> Self::Tables;
 
@@ -43,12 +48,20 @@ pub trait Resampler {
 
     fn tap_window(tables: &Self::Tables, pos: f32) -> (i64, i64);
 
-    fn resample(tables: &Self::Tables, src: &[f32], pos: f32, fc: f32, step_mode: bool) -> Sample;
+    fn resample(
+        tables: &Self::Tables,
+        state: &mut Self::State,
+        src: &[f32],
+        pos: f32,
+        fc: f32,
+        step_mode: bool,
+    ) -> Sample;
 
     #[inline]
     fn gather(
         source: &GatherSource,
         tables: &Self::Tables,
+        state: &mut Self::State,
         pos: f32,
         fc: f32,
         step_mode: bool,
@@ -65,7 +78,7 @@ pub trait Resampler {
         let periodic = looping && wrapped && loop_len > 0;
         if !periodic && k_lo >= 0 && k_hi < data_len {
             let src = &data[k_lo as usize..=k_hi as usize];
-            return Self::resample(tables, src, pos, fc, step_mode);
+            return Self::resample(tables, state, src, pos, fc, step_mode);
         }
 
         let n = (k_hi - k_lo + 1) as usize;
@@ -90,7 +103,7 @@ pub trait Resampler {
                 };
             }
         }
-        Self::resample(tables, &buf[..n], pos, fc, step_mode)
+        Self::resample(tables, state, &buf[..n], pos, fc, step_mode)
     }
 }
 
