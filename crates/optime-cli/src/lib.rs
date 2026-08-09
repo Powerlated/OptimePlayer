@@ -14,6 +14,8 @@ pub mod reference;
 pub mod render;
 pub mod resampler_roster;
 pub mod search;
+pub mod spectrum;
+pub mod sweep;
 pub mod timbre;
 pub mod tune;
 pub mod wav;

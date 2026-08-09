@@ -1,6 +1,14 @@
 //! The top-end exciter: generates harmonics above a crossover by driving that band through a
 //! saturating waveshaper, and adds only what the shaper invented back into the signal.
 //!
+//! It exists to replace an excitation the chain used to get for free. Reconstructing the
+//! intermediate mixer bus as a staircase throws images above that bus's Nyquist, and those images
+//! are what gave the sampled voices their air — bought at the price of a `sinc` null at the mixer
+//! rate and a great deal of harshness nobody chose. Reconstructing cleanly removes both and leaves
+//! the top octave empty; this stage refills it deliberately. That is why the caller runs it on the
+//! sampled bus alone: PSG voices bypass the mixer entirely, so they never had staircase images to
+//! replace, and exciting them would be adding harshness rather than trading it away.
+//!
 //! The topology is additive rather than a band replacement. The high band is taken with a
 //! high-pass, driven through `tanh(drive·x)/drive`, and what the drive added to it — the harmonics
 //! and nothing else — is high-passed again and summed into the dry input at `amount`. The dry path

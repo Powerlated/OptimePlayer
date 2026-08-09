@@ -143,7 +143,7 @@ pub struct Args {
     load: Option<PathBuf>,
 }
 
-fn base_settings(data: &dyn SoundData, excitation: Excitation) -> PerDeviceSettings {
+pub(crate) fn base_settings(data: &dyn SoundData, excitation: Excitation) -> PerDeviceSettings {
     let is_gba = data.as_any().downcast_ref::<GbaRom>().is_some();
     let mut config = if is_gba {
         PerDeviceSettings::enhanced_gba()
@@ -152,6 +152,7 @@ fn base_settings(data: &dyn SoundData, excitation: Excitation) -> PerDeviceSetti
     };
     match excitation {
         Excitation::ZeroOrderHold => config.exciter.enabled = false,
+        Excitation::Shaper if is_gba => config = PerDeviceSettings::enhanced_plus_gba(),
         Excitation::Shaper => {
             config.mixer_resample.choice = optime_core::InstrumentResampleChoice::SincSampleNyquist;
             config.psg_crunch_compensation = false;
@@ -161,7 +162,7 @@ fn base_settings(data: &dyn SoundData, excitation: Excitation) -> PerDeviceSetti
     config
 }
 
-fn read_knobs(config: &PerDeviceSettings) -> Vec<f64> {
+pub(crate) fn read_knobs(config: &PerDeviceSettings) -> Vec<f64> {
     vec![
         config.exciter.crossover_hz,
         f64::from(config.exciter.drive),
@@ -178,7 +179,7 @@ fn read_knobs(config: &PerDeviceSettings) -> Vec<f64> {
     ]
 }
 
-fn apply_knobs(config: &PerDeviceSettings, values: &[f64]) -> PerDeviceSettings {
+pub(crate) fn apply_knobs(config: &PerDeviceSettings, values: &[f64]) -> PerDeviceSettings {
     let mut config = config.clone();
     config.exciter.enabled = true;
     config.exciter.crossover_hz = values[0];
@@ -199,7 +200,7 @@ fn apply_knobs(config: &PerDeviceSettings, values: &[f64]) -> PerDeviceSettings 
     config
 }
 
-fn load_parameters(path: &std::path::Path) -> Result<Vec<f64>, String> {
+pub(crate) fn load_parameters(path: &std::path::Path) -> Result<Vec<f64>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     KNOBS
@@ -212,7 +213,7 @@ fn load_parameters(path: &std::path::Path) -> Result<Vec<f64>, String> {
         .collect()
 }
 
-fn render_mono(
+pub(crate) fn render_mono(
     data: &dyn SoundData,
     song_id: u32,
     config: &PerDeviceSettings,

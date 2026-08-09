@@ -327,34 +327,35 @@ impl PerDeviceSettings {
 
     pub fn enhanced_plus_gba() -> Self {
         Self {
+            mixer_sample_rate: 48_000,
             mixer_resample: MixerResampleSettings {
                 choice: InstrumentResampleChoice::SincSampleNyquist,
                 sinc_taps: 32,
-                cutoff_hz: 13379,
+                cutoff_hz: 48_000,
             },
             psg_crunch_compensation: false,
             exciter: Exciter {
                 enabled: true,
-                crossover_hz: 1413.2,
-                drive: 15.06,
-                amount: 0.309,
+                crossover_hz: 1351.1,
+                drive: 22.147,
+                amount: 1.240,
             },
             high_band_compress: HighBandCompressor {
                 enabled_psg: true,
                 enabled_sampled: true,
-                cutoff_hz: 14731.7,
-                threshold_db: -59.96,
-                ratio: 3.528,
-                attack_ms: 1.102,
-                release_ms: 31.95,
-                makeup_db: 5.509,
+                cutoff_hz: 15880.2,
+                threshold_db: -59.97,
+                ratio: 6.027,
+                attack_ms: 5.009,
+                release_ms: 17.514,
+                makeup_db: -0.274,
             },
             shelf: HighShelf {
                 enabled: true,
                 order: 2,
-                q: 0.344,
-                cutoff_hz: 12688.9,
-                gain_db: -4.464,
+                q: 0.404,
+                cutoff_hz: 10509.2,
+                gain_db: -6.054,
             },
             ..Self::enhanced_gba()
         }

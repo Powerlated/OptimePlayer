@@ -527,7 +527,7 @@ impl<R: Resampler> SynthController<R> {
         high_l: &mut [Sample],
         high_r: &mut [Sample],
     ) {
-        if !config.exciter.is_active() {
+        if !config.use_mixer || !config.exciter.is_active() {
             self.exciter_was_active = false;
             return;
         }
@@ -696,6 +696,7 @@ impl<R: Resampler> SynthController<R> {
             if config.use_mixer {
                 let (mix_l, mix_r) = (&mut scratch.mix_l[..n], &mut scratch.mix_r[..n]);
                 self.route_mixer_block(mix_l, mix_r, config);
+                self.excite_block(mix_l, mix_r, config, high_l, high_r);
                 self.compress_sampled_high_band_block(mix_l, mix_r, config, high_l, high_r);
                 for (acc, &m) in acc_l.iter_mut().zip(mix_l.iter()) {
                     *acc += m;
@@ -703,8 +704,9 @@ impl<R: Resampler> SynthController<R> {
                 for (acc, &m) in acc_r.iter_mut().zip(mix_r.iter()) {
                     *acc += m;
                 }
+            } else {
+                self.exciter_was_active = false;
             }
-            self.excite_block(acc_l, acc_r, config, high_l, high_r);
             self.master_filter_block(acc_l, acc_r, config);
 
             let gain = &mut scratch.gain[..n];

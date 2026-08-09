@@ -1,22 +1,22 @@
 {
   "archive": "demos/pokemon-emerald.gbaaudio",
   "loss": {
-    "holdout": 0.7098627528175712,
-    "train": 0.9981342330574989
+    "holdout": 0.6656495849601924,
+    "train": 0.9429694656282663
   },
   "parameters": {
-    "exciter.amount": 0.3094268168496569,
-    "exciter.crossover_hz": 1413.205143379073,
-    "exciter.drive": 15.056755379348472,
-    "high_band.attack_ms": 1.1016692571043116,
-    "high_band.cutoff_hz": 14731.691163770889,
-    "high_band.makeup_db": 5.5086527016815445,
-    "high_band.ratio": 3.5283927327501066,
-    "high_band.release_ms": 31.949057604151843,
-    "high_band.threshold_db": -59.96423743688071,
-    "shelf.cutoff_hz": 12688.93885766301,
-    "shelf.gain_db": -4.463617536142057,
-    "shelf.q": 0.3444723819816511
+    "exciter.amount": 1.240264282659375,
+    "exciter.crossover_hz": 1351.1183685997369,
+    "exciter.drive": 22.146772619579103,
+    "high_band.attack_ms": 5.008856366099707,
+    "high_band.cutoff_hz": 15880.174196389578,
+    "high_band.makeup_db": -0.2740123897196476,
+    "high_band.ratio": 6.026719455168586,
+    "high_band.release_ms": 17.514131376844908,
+    "high_band.threshold_db": -59.97053042289146,
+    "shelf.cutoff_hz": 10509.152953039604,
+    "shelf.gain_db": -6.054355713423791,
+    "shelf.q": 0.40363266216274735
   },
   "rate": 48000,
   "reference": "scripts/deltarune-timbre.json",
@@ -28,21 +28,21 @@
     "bitcrush_mixer": false,
     "delay_smoothing_choice": 1,
     "exciter": {
-      "amount": 0.30942681431770325,
-      "crossover_hz": 1413.205143379073,
-      "drive": 15.056755065917969,
+      "amount": 1.2402642965316772,
+      "crossover_hz": 1351.1183685997369,
+      "drive": 22.146772384643555,
       "enabled": true
     },
     "force_stereo_separation": false,
     "high_band_compress": {
-      "attack_ms": 1.1016692571043116,
-      "cutoff_hz": 14731.691163770889,
+      "attack_ms": 5.008856366099707,
+      "cutoff_hz": 15880.174196389578,
       "enabled_psg": true,
       "enabled_sampled": true,
-      "makeup_db": 5.5086527016815445,
-      "ratio": 3.5283927327501066,
-      "release_ms": 31.949057604151843,
-      "threshold_db": -59.96423743688071
+      "makeup_db": -0.2740123897196476,
+      "ratio": 6.026719455168586,
+      "release_ms": 17.514131376844908,
+      "threshold_db": -59.97053042289146
     },
     "instrument_resample": {
       "choice": "SincSampleNyquist",
@@ -56,20 +56,20 @@
     },
     "mixer_resample": {
       "choice": "SincSampleNyquist",
-      "cutoff_hz": 13379,
+      "cutoff_hz": 48000,
       "sinc_taps": 32
     },
-    "mixer_sample_rate": 13379,
+    "mixer_sample_rate": 48000,
     "mp2k_reverb": true,
     "psg_crunch_compensation": false,
     "pure_tonic": 0,
     "remove_sample_dc_offset": false,
     "shelf": {
-      "cutoff_hz": 12688.93885766301,
+      "cutoff_hz": 10509.152953039604,
       "enabled": true,
-      "gain_db": -4.463617536142057,
+      "gain_db": -6.054355713423791,
       "order": 2,
-      "q": 0.3444723819816511
+      "q": 0.40363266216274735
     },
     "smooth_pan": true,
     "stereo_separation": true,
