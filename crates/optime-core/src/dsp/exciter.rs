@@ -10,9 +10,18 @@
 //! replace, and exciting them would be adding harshness rather than trading it away.
 //!
 //! The topology is additive rather than a band replacement. The high band is taken with a
-//! high-pass, driven through `tanh(drive·x)/drive`, and what the drive added to it — the harmonics
-//! and nothing else — is high-passed again and summed into the dry input at `amount`. The dry path
-//! is never split, so there is no crossover-summing error to answer for.
+//! high-pass, driven through a saturating curve, and what the drive added to it — the harmonics and
+//! nothing else — is high-passed again and summed into the dry input at `amount`. The dry path is
+//! never split, so there is no crossover-summing error to answer for.
+//!
+//! The curve is `tanh(drive·(x + bias))`, offset so it still passes through the origin. Plain `tanh`
+//! is an odd function, and an odd nonlinearity produces only odd harmonics — the third and fifth,
+//! which sit a musical twelfth and two octaves plus a third above the fundamental and are the
+//! harmonics ears read as harsh. Displacing the input along the curve makes it asymmetric, and
+//! asymmetry is what produces even harmonics: the second is an octave, which reads as loudness
+//! rather than grit. `bias` is therefore the knob that trades harshness for warmth at equal
+//! brightness, and it exists because a tuner asked to add air with `bias` fixed at zero can only
+//! add the harsh kind.
 //!
 //! A waveshaper applied sample by sample is a memoryless nonlinearity, and the harmonics it creates
 //! above Nyquist fold back as inharmonic aliases that no later filter can separate. This stage
@@ -47,6 +56,7 @@ const SEED_CROSSOVER_HZ: f64 = 3000.0;
 pub struct ExciterParams {
     pub crossover_hz: f64,
     pub drive: Sample,
+    pub bias: Sample,
     pub amount: Sample,
 }
 
@@ -63,56 +73,74 @@ fn ln_cosh(u: f64) -> f64 {
     }
 }
 
-#[inline]
-fn shape(x: f64, drive: f64) -> f64 {
-    (x * drive).tanh() / drive
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Curve {
+    drive: f64,
+    bias: f64,
+    offset: f64,
 }
 
-#[inline]
-fn shape_antiderivative(x: f64, drive: f64) -> f64 {
-    ln_cosh(x * drive) / (drive * drive)
+impl Curve {
+    fn new(drive: Sample, bias: Sample) -> Self {
+        let (drive, bias) = (f64::from(drive), f64::from(bias));
+        Self {
+            drive,
+            bias,
+            offset: (bias * drive).tanh() / drive,
+        }
+    }
+
+    #[inline]
+    fn shape(&self, x: f64) -> f64 {
+        ((x + self.bias) * self.drive).tanh() / self.drive - self.offset
+    }
+
+    #[inline]
+    fn antiderivative(&self, x: f64) -> f64 {
+        ln_cosh((x + self.bias) * self.drive) / (self.drive * self.drive) - x * self.offset
+    }
 }
 
 struct AntialiasedShaper {
-    drive: f64,
+    curve: Curve,
     prev_x: f64,
     prev_antiderivative: f64,
 }
 
 impl AntialiasedShaper {
-    fn new(drive: Sample) -> Self {
-        let drive = f64::from(drive);
+    fn new(drive: Sample, bias: Sample) -> Self {
+        let curve = Curve::new(drive, bias);
         Self {
-            drive,
+            curve,
             prev_x: 0.0,
-            prev_antiderivative: shape_antiderivative(0.0, drive),
+            prev_antiderivative: curve.antiderivative(0.0),
         }
     }
 
-    fn set_drive(&mut self, drive: Sample) {
-        let drive = f64::from(drive);
-        if drive == self.drive {
+    fn set_curve(&mut self, drive: Sample, bias: Sample) {
+        let curve = Curve::new(drive, bias);
+        if curve == self.curve {
             return;
         }
-        self.drive = drive;
-        self.prev_antiderivative = shape_antiderivative(self.prev_x, drive);
+        self.curve = curve;
+        self.prev_antiderivative = curve.antiderivative(self.prev_x);
     }
 
     fn reset_state(&mut self) {
         self.prev_x = 0.0;
-        self.prev_antiderivative = shape_antiderivative(0.0, self.drive);
+        self.prev_antiderivative = self.curve.antiderivative(0.0);
     }
 
     #[inline]
     fn process(&mut self, x: Sample) -> ShapedSample {
         let x = f64::from(x);
-        let antiderivative = shape_antiderivative(x, self.drive);
+        let antiderivative = self.curve.antiderivative(x);
         let step = x - self.prev_x;
         let midpoint = 0.5 * (x + self.prev_x);
         let shaped = if step.abs() > ADAA_MIN_STEP {
             (antiderivative - self.prev_antiderivative) / step
         } else {
-            shape(midpoint, self.drive)
+            self.curve.shape(midpoint)
         };
         self.prev_x = x;
         self.prev_antiderivative = antiderivative;
@@ -148,8 +176,8 @@ impl ExciterStage {
             split_r: BiquadFilter::high_pass(SPLIT_ORDER, sample_rate, SEED_CROSSOVER_HZ, Q),
             harmonic_l: BiquadFilter::high_pass(HARMONIC_ORDER, sample_rate, SEED_CROSSOVER_HZ, Q),
             harmonic_r: BiquadFilter::high_pass(HARMONIC_ORDER, sample_rate, SEED_CROSSOVER_HZ, Q),
-            shaper_l: AntialiasedShaper::new(1.0),
-            shaper_r: AntialiasedShaper::new(1.0),
+            shaper_l: AntialiasedShaper::new(1.0, 0.0),
+            shaper_r: AntialiasedShaper::new(1.0, 0.0),
         }
     }
 
@@ -171,8 +199,8 @@ impl ExciterStage {
             self.harmonic_l.reset_state();
             self.harmonic_r.reset_state();
         }
-        self.shaper_l.set_drive(p.drive);
-        self.shaper_r.set_drive(p.drive);
+        self.shaper_l.set_curve(p.drive, p.bias);
+        self.shaper_r.set_curve(p.drive, p.bias);
         self.params = Some(p);
     }
 
@@ -257,6 +285,7 @@ mod tests {
         ExciterParams {
             crossover_hz: 2000.0,
             drive,
+            bias: 0.0,
             amount,
         }
     }
@@ -326,7 +355,7 @@ mod tests {
     fn the_shaper_adds_harmonics_the_input_did_not_have() {
         const LEN: usize = 4800;
         let tone = 5_000.0;
-        let mut shaper = AntialiasedShaper::new(8.0);
+        let mut shaper = AntialiasedShaper::new(8.0, 0.0);
         let shaped: Vec<Sample> = (0..LEN)
             .map(|n| {
                 let x = (core::f64::consts::TAU * tone * n as f64 / SR).sin() as Sample * 0.8;
@@ -350,11 +379,11 @@ mod tests {
             .map(|n| (core::f64::consts::TAU * tone * n as f64 / SR).sin() as Sample * 0.8)
             .collect();
 
-        let mut shaper = AntialiasedShaper::new(DRIVE as Sample);
+        let mut shaper = AntialiasedShaper::new(DRIVE as Sample, 0.0);
         let antialiased: Vec<Sample> = source.iter().map(|&x| shaper.process(x).shaped).collect();
         let naive: Vec<Sample> = source
             .iter()
-            .map(|&x| shape(f64::from(x), DRIVE) as Sample)
+            .map(|&x| Curve::new(DRIVE as Sample, 0.0).shape(f64::from(x)) as Sample)
             .collect();
 
         let alias_energy = |signal: &[Sample]| -> f64 {
@@ -367,6 +396,42 @@ mod tests {
         assert!(
             got < 0.5 * want,
             "antialiased aliases {got} did not beat naive {want}"
+        );
+    }
+
+    #[test]
+    fn bias_is_what_creates_even_harmonics() {
+        const LEN: usize = 4800;
+        let tone = 5_000.0;
+        let source: Vec<Sample> = (0..LEN)
+            .map(|n| (core::f64::consts::TAU * tone * n as f64 / SR).sin() as Sample * 0.5)
+            .collect();
+
+        let second_harmonic = |bias: Sample| -> f64 {
+            let mut shaper = AntialiasedShaper::new(8.0, bias);
+            let shaped: Vec<Sample> = source.iter().map(|&x| shaper.process(x).shaped).collect();
+            amplitude_at(&shaped, 2.0 * tone, SR)
+        };
+
+        let symmetric = second_harmonic(0.0);
+        let asymmetric = second_harmonic(0.3);
+        assert!(
+            symmetric < 1.0e-3,
+            "an odd curve produced a second harmonic of {symmetric}"
+        );
+        assert!(
+            asymmetric > 20.0 * symmetric.max(1.0e-6),
+            "bias produced only {asymmetric} of second harmonic against {symmetric}"
+        );
+    }
+
+    #[test]
+    fn a_biased_curve_still_passes_through_the_origin() {
+        let curve = Curve::new(8.0, 0.4);
+        assert!(
+            curve.shape(0.0).abs() < 1.0e-12,
+            "shape(0) = {}",
+            curve.shape(0.0)
         );
     }
 

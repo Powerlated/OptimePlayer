@@ -3022,7 +3022,11 @@ impl OptimeApp {
                         .logarithmic(true),
                 )
                 .on_hover_text("How hard the high band is pushed into saturation, which sets how much harmonic content exists to add.");
-                ui.add(egui::Slider::new(&mut d.exciter.amount, 0.0..=2.0).text("Amount"))
+                ui.add(egui::Slider::new(&mut d.exciter.bias, -1.5..=1.5).text("Bias"))
+                    .on_hover_text(
+                        "Displaces the signal along the saturating curve. At zero the curve is odd                         and makes only odd harmonics, which read as harsh; off zero it is                         asymmetric and makes even ones, which read as warmth at the same                         brightness.",
+                    );
+                ui.add(egui::Slider::new(&mut d.exciter.amount, 0.0..=4.0).text("Amount"))
                     .on_hover_text("How much of the generated harmonic band is summed in. Zero is exactly transparent.");
             });
         }

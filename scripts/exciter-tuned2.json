@@ -1,23 +1,23 @@
 {
   "archive": "demos/pokemon-emerald.gbaaudio",
   "loss": {
-    "holdout": 0.3701707976205008,
-    "train": 0.4878069292753935
+    "holdout": 0.5383515143766999,
+    "train": 0.4203606100442509
   },
   "parameters": {
-    "exciter.amount": 0.7062222455734452,
-    "exciter.bias": -0.49071553111961497,
-    "exciter.crossover_hz": 1129.578079364528,
-    "exciter.drive": 4.419269946568613,
-    "high_band.attack_ms": 16.871942687052307,
-    "high_band.cutoff_hz": 17180.80550197759,
-    "high_band.makeup_db": -4.850111605055689,
-    "high_band.ratio": 9.007948673336264,
-    "high_band.release_ms": 78.95213802294349,
-    "high_band.threshold_db": -55.08034298964411,
-    "shelf.cutoff_hz": 9201.449929118804,
-    "shelf.gain_db": -7.718492019654001,
-    "shelf.q": 0.643457011945283
+    "exciter.amount": 0.9238783112114622,
+    "exciter.bias": 0.008747497687882522,
+    "exciter.crossover_hz": 1139.2283523957683,
+    "exciter.drive": 31.037955755712385,
+    "high_band.attack_ms": 1.4977834784782997,
+    "high_band.cutoff_hz": 13659.76306705827,
+    "high_band.makeup_db": -1.5325298699288297,
+    "high_band.ratio": 4.1714694754857495,
+    "high_band.release_ms": 7.296609800622276,
+    "high_band.threshold_db": -82.28674154960481,
+    "shelf.cutoff_hz": 11982.88238571176,
+    "shelf.gain_db": -5.838743096723444,
+    "shelf.q": 0.5078625500732588
   },
   "rate": 48000,
   "reference": "scripts/deltarune-timbre.json",
@@ -29,22 +29,22 @@
     "bitcrush_mixer": false,
     "delay_smoothing_choice": 1,
     "exciter": {
-      "amount": 0.7062222361564636,
-      "bias": -0.49071553349494934,
-      "crossover_hz": 1129.578079364528,
-      "drive": 4.419270038604736,
+      "amount": 0.9238783121109009,
+      "bias": 0.008747497573494911,
+      "crossover_hz": 1139.2283523957683,
+      "drive": 31.03795623779297,
       "enabled": true
     },
     "force_stereo_separation": false,
     "high_band_compress": {
-      "attack_ms": 16.871942687052307,
-      "cutoff_hz": 17180.80550197759,
+      "attack_ms": 1.4977834784782997,
+      "cutoff_hz": 13659.76306705827,
       "enabled_psg": true,
       "enabled_sampled": true,
-      "makeup_db": -4.850111605055689,
-      "ratio": 9.007948673336264,
-      "release_ms": 78.95213802294349,
-      "threshold_db": -55.08034298964411
+      "makeup_db": -1.5325298699288297,
+      "ratio": 4.1714694754857495,
+      "release_ms": 7.296609800622276,
+      "threshold_db": -82.28674154960481
     },
     "instrument_resample": {
       "choice": "SincSampleNyquist",
@@ -67,11 +67,11 @@
     "pure_tonic": 0,
     "remove_sample_dc_offset": false,
     "shelf": {
-      "cutoff_hz": 9201.449929118804,
+      "cutoff_hz": 11982.88238571176,
       "enabled": true,
-      "gain_db": -7.718492019654001,
+      "gain_db": -5.838743096723444,
       "order": 2,
-      "q": 0.643457011945283
+      "q": 0.5078625500732588
     },
     "smooth_pan": true,
     "stereo_separation": true,

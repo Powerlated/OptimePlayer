@@ -55,6 +55,32 @@ pub struct Target {
     pub deviation: Profile,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Emphasis {
+    pub above_hz: f64,
+    pub weight: f32,
+}
+
+impl Emphasis {
+    pub const UNIFORM: Self = Self {
+        above_hz: 0.0,
+        weight: 1.0,
+    };
+
+    fn band_weight(&self, band: usize) -> f32 {
+        if band_centre_hz(band) >= self.above_hz {
+            self.weight
+        } else {
+            1.0
+        }
+    }
+}
+
+pub fn band_centre_hz(band: usize) -> f64 {
+    let ratio = (BAND_HIGH_HZ / BAND_LOW_HZ).powf(1.0 / BAND_COUNT as f64);
+    BAND_LOW_HZ * ratio.powf(band as f64 + 0.5)
+}
+
 fn band_edges() -> Vec<f64> {
     let ratio = (BAND_HIGH_HZ / BAND_LOW_HZ).powf(1.0 / BAND_COUNT as f64);
     (0..=BAND_COUNT)
@@ -252,6 +278,28 @@ impl Target {
     }
 
     pub fn distance(&self, profile: &Profile) -> f32 {
+        self.distance_with(profile, Emphasis::UNIFORM)
+    }
+
+    pub fn band_distance(&self, profile: &Profile, lo_hz: f64, hi_hz: f64) -> f32 {
+        let bands: Vec<usize> = (0..BAND_COUNT)
+            .filter(|&b| (lo_hz..hi_hz).contains(&band_centre_hz(b)))
+            .collect();
+        if bands.is_empty() {
+            return f32::NAN;
+        }
+        let total: f32 = bands
+            .iter()
+            .map(|&b| {
+                let z = (profile.spectrum_db[b] - self.mean.spectrum_db[b])
+                    / self.deviation.spectrum_db[b].max(DEVIATION_FLOOR_DB);
+                z * z
+            })
+            .sum();
+        total / bands.len() as f32
+    }
+
+    pub fn distance_with(&self, profile: &Profile, emphasis: Emphasis) -> f32 {
         let term = |got: f32, want: f32, dev: f32, weight: f32| -> (f32, f32) {
             let z = (got - want) / dev.max(DEVIATION_FLOOR_DB);
             (weight * z * z, weight)
@@ -263,7 +311,7 @@ impl Target {
                 profile.spectrum_db[b],
                 self.mean.spectrum_db[b],
                 self.deviation.spectrum_db[b],
-                1.0,
+                emphasis.band_weight(b),
             );
             total += t;
             weight += w;

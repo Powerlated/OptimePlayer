@@ -28,77 +28,83 @@ use crate::album::album_order;
 use crate::search::{Knob, Rng, Scale, Spsa};
 use crate::timbre::{self, Profile, Target};
 
-static KNOBS: [Knob; 12] = [
+static KNOBS: [Knob; 13] = [
     Knob {
         name: "exciter.crossover_hz",
-        lo: 1_000.0,
-        hi: 12_000.0,
+        lo: 800.0,
+        hi: 20_000.0,
         scale: Scale::Log,
     },
     Knob {
         name: "exciter.drive",
-        lo: 0.5,
-        hi: 24.0,
+        lo: 0.25,
+        hi: 200.0,
         scale: Scale::Log,
+    },
+    Knob {
+        name: "exciter.bias",
+        lo: -1.5,
+        hi: 1.5,
+        scale: Scale::Linear,
     },
     Knob {
         name: "exciter.amount",
         lo: 0.0,
-        hi: 2.0,
+        hi: 2.5,
         scale: Scale::Linear,
     },
     Knob {
         name: "high_band.cutoff_hz",
-        lo: 2_000.0,
-        hi: 16_000.0,
+        lo: 1_000.0,
+        hi: 22_000.0,
         scale: Scale::Log,
     },
     Knob {
         name: "high_band.threshold_db",
-        lo: -60.0,
+        lo: -100.0,
         hi: 0.0,
         scale: Scale::Linear,
     },
     Knob {
         name: "high_band.ratio",
         lo: 1.0,
-        hi: 8.0,
+        hi: 20.0,
         scale: Scale::Linear,
     },
     Knob {
         name: "high_band.attack_ms",
-        lo: 0.5,
-        hi: 50.0,
+        lo: 0.1,
+        hi: 200.0,
         scale: Scale::Log,
     },
     Knob {
         name: "high_band.release_ms",
-        lo: 10.0,
-        hi: 500.0,
+        lo: 2.0,
+        hi: 2_000.0,
         scale: Scale::Log,
     },
     Knob {
         name: "high_band.makeup_db",
-        lo: -6.0,
-        hi: 12.0,
+        lo: -12.0,
+        hi: 18.0,
         scale: Scale::Linear,
     },
     Knob {
         name: "shelf.cutoff_hz",
-        lo: 1_000.0,
-        hi: 14_000.0,
+        lo: 3_000.0,
+        hi: 20_000.0,
         scale: Scale::Log,
     },
     Knob {
         name: "shelf.gain_db",
-        lo: -12.0,
+        lo: -18.0,
         hi: 12.0,
         scale: Scale::Linear,
     },
     Knob {
         name: "shelf.q",
-        lo: 0.3,
-        hi: 2.0,
+        lo: 0.2,
+        hi: 4.0,
         scale: Scale::Log,
     },
 ];
@@ -141,6 +147,12 @@ pub struct Args {
     start_from: Excitation,
     #[arg(long)]
     load: Option<PathBuf>,
+    #[arg(long)]
+    deterministic: bool,
+    #[arg(long, default_value_t = 3_000.0)]
+    focus_hz: f64,
+    #[arg(long, default_value_t = 6.0)]
+    focus_weight: f32,
 }
 
 pub(crate) fn base_settings(data: &dyn SoundData, excitation: Excitation) -> PerDeviceSettings {
@@ -166,6 +178,7 @@ pub(crate) fn read_knobs(config: &PerDeviceSettings) -> Vec<f64> {
     vec![
         config.exciter.crossover_hz,
         f64::from(config.exciter.drive),
+        f64::from(config.exciter.bias),
         f64::from(config.exciter.amount),
         config.high_band_compress.cutoff_hz,
         config.high_band_compress.threshold_db,
@@ -184,19 +197,20 @@ pub(crate) fn apply_knobs(config: &PerDeviceSettings, values: &[f64]) -> PerDevi
     config.exciter.enabled = true;
     config.exciter.crossover_hz = values[0];
     config.exciter.drive = values[1] as f32;
-    config.exciter.amount = values[2] as f32;
+    config.exciter.bias = values[2] as f32;
+    config.exciter.amount = values[3] as f32;
     config.high_band_compress.enabled_psg = true;
     config.high_band_compress.enabled_sampled = true;
-    config.high_band_compress.cutoff_hz = values[3];
-    config.high_band_compress.threshold_db = values[4];
-    config.high_band_compress.ratio = values[5];
-    config.high_band_compress.attack_ms = values[6];
-    config.high_band_compress.release_ms = values[7];
-    config.high_band_compress.makeup_db = values[8];
+    config.high_band_compress.cutoff_hz = values[4];
+    config.high_band_compress.threshold_db = values[5];
+    config.high_band_compress.ratio = values[6];
+    config.high_band_compress.attack_ms = values[7];
+    config.high_band_compress.release_ms = values[8];
+    config.high_band_compress.makeup_db = values[9];
     config.shelf.enabled = true;
-    config.shelf.cutoff_hz = values[9];
-    config.shelf.gain_db = values[10];
-    config.shelf.q = values[11];
+    config.shelf.cutoff_hz = values[10];
+    config.shelf.gain_db = values[11];
+    config.shelf.q = values[12];
     config
 }
 
@@ -250,6 +264,7 @@ struct Objective<'a> {
     target: &'a Target,
     rate: u32,
     seconds: f64,
+    emphasis: timbre::Emphasis,
 }
 
 impl Objective<'_> {
@@ -271,12 +286,41 @@ impl Objective<'_> {
             .collect()
     }
 
+    fn top_band_score(&self, songs: &[u32], config: &PerDeviceSettings) -> f64 {
+        let scored: Vec<f64> = songs
+            .par_iter()
+            .filter_map(|&id| {
+                self.profile(id, config).map(|p| {
+                    f64::from(self.target.band_distance(&p, self.emphasis.above_hz, 1.0e9))
+                })
+            })
+            .collect();
+        if scored.is_empty() {
+            return f64::NAN;
+        }
+        scored.iter().sum::<f64>() / scored.len() as f64
+    }
+
+    fn low_band_score(&self, songs: &[u32], config: &PerDeviceSettings) -> f64 {
+        let scored: Vec<f64> = songs
+            .par_iter()
+            .filter_map(|&id| {
+                self.profile(id, config)
+                    .map(|p| f64::from(self.target.band_distance(&p, 0.0, self.emphasis.above_hz)))
+            })
+            .collect();
+        if scored.is_empty() {
+            return f64::NAN;
+        }
+        scored.iter().sum::<f64>() / scored.len() as f64
+    }
+
     fn score(&self, songs: &[u32], config: &PerDeviceSettings) -> f64 {
         let scored: Vec<f64> = songs
             .par_iter()
             .filter_map(|&id| {
                 self.profile(id, config)
-                    .map(|p| f64::from(self.target.distance(&p)))
+                    .map(|p| f64::from(self.target.distance_with(&p, self.emphasis)))
             })
             .collect();
         if scored.is_empty() {
@@ -368,6 +412,10 @@ pub fn run(args: Args) -> ExitCode {
         target: &target,
         rate: args.rate,
         seconds: args.seconds,
+        emphasis: timbre::Emphasis {
+            above_hz: args.focus_hz,
+            weight: args.focus_weight,
+        },
     };
 
     let zoh = base_settings(&*data, Excitation::ZeroOrderHold);
@@ -419,7 +467,11 @@ pub fn run(args: Args) -> ExitCode {
     for step in 1..=args.steps {
         let report = {
             let mut evaluate = |values: &[f64], batch: u64| {
-                let songs = minibatch(&train_ids, args.batch, batch);
+                let songs = if args.deterministic {
+                    train_eval.clone()
+                } else {
+                    minibatch(&train_ids, args.batch, batch)
+                };
                 objective.score(&songs, &apply_knobs(&shaper_base, values))
             };
             spsa.step(&mut evaluate)
@@ -451,6 +503,39 @@ pub fn run(args: Args) -> ExitCode {
         objective.score(&train_eval, &silenced),
         objective.score(&holdout_eval, &silenced),
     );
+
+    println!(
+        "\nAbove {:.0} Hz only (mean squared deviation in units of the corpus sd):",
+        args.focus_hz
+    );
+    for (label, config) in [
+        ("zero-order-hold excitation", &zoh),
+        ("shaper excitation, untuned", &untuned),
+        ("shaper excitation, tuned", &tuned),
+    ] {
+        report_line(
+            label,
+            objective.top_band_score(&train_eval, config),
+            objective.top_band_score(&holdout_eval, config),
+        );
+    }
+
+    println!(
+        "
+Below {:.0} Hz only (must not regress -- a tilt buys the top by spending the bottom):",
+        args.focus_hz
+    );
+    for (label, config) in [
+        ("zero-order-hold excitation", &zoh),
+        ("shaper excitation, untuned", &untuned),
+        ("shaper excitation, tuned", &tuned),
+    ] {
+        report_line(
+            label,
+            objective.low_band_score(&train_eval, config),
+            objective.low_band_score(&holdout_eval, config),
+        );
+    }
 
     println!("\nSpectrum on the holdout, dB about each render's own mean band:");
     let zoh_bands = objective.mean_spectrum(&holdout_eval, &zoh);

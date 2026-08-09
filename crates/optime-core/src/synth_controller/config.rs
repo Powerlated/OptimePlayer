@@ -122,6 +122,8 @@ pub struct Exciter {
     pub crossover_hz: f64,
     #[serde(default = "Exciter::default_drive")]
     pub drive: Sample,
+    #[serde(default)]
+    pub bias: Sample,
     #[serde(default = "Exciter::default_amount")]
     pub amount: Sample,
 }
@@ -132,6 +134,7 @@ impl Default for Exciter {
             enabled: false,
             crossover_hz: Self::default_crossover_hz(),
             drive: Self::default_drive(),
+            bias: 0.0,
             amount: Self::default_amount(),
         }
     }
@@ -156,6 +159,7 @@ impl Exciter {
         ExciterParams {
             crossover_hz: self.crossover_hz,
             drive: self.drive,
+            bias: self.bias,
             amount: self.amount,
         }
     }
